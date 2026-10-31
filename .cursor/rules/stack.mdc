@@ -1,0 +1,15 @@
+---
+description: Native Rust stack for the Metis Mesh HQ desktop app
+alwaysApply: true
+---
+
+# Stack
+
+- Rust desktop app. Dioxus 0.7, Tailwind, and a small Rust/UI-style component set.
+- MapLibre through `dioxus-maplibre`. Ship library files and a local style in `assets/`. Do not load map tiles or scripts from a CDN.
+- Radio access through `meshcore-rs` (BLE now, USB on the same radio pool later).
+- SQLite in WAL mode under `data/`, which is gitignored. One database for every radio.
+- Channel secrets go in the OS keyring. If that fails, use a `0600` file under `data/` and show that in Settings.
+- No Docker. `dx serve --platform desktop` runs the window on this laptop and the LattePanda.
+- Desktop is the default Cargo feature so Windows, macOS, and Linux share one program.
+---

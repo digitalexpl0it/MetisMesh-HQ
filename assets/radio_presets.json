@@ -1,0 +1,226 @@
+[
+  {
+    "name": "Australia",
+    "freq_mhz": 915.8,
+    "bw_khz": 250.0,
+    "sf": 10,
+    "cr": 5,
+    "recommended": false
+  },
+  {
+    "name": "Australia (Narrow)",
+    "freq_mhz": 916.575,
+    "bw_khz": 62.5,
+    "sf": 7,
+    "cr": 7,
+    "recommended": false
+  },
+  {
+    "name": "Australia (Mid)",
+    "freq_mhz": 915.075,
+    "bw_khz": 125.0,
+    "sf": 9,
+    "cr": 5,
+    "recommended": false
+  },
+  {
+    "name": "Australia: SA, WA",
+    "freq_mhz": 923.125,
+    "bw_khz": 62.5,
+    "sf": 8,
+    "cr": 8,
+    "recommended": false
+  },
+  {
+    "name": "Australia: QLD",
+    "freq_mhz": 923.125,
+    "bw_khz": 62.5,
+    "sf": 8,
+    "cr": 5,
+    "recommended": false
+  },
+  {
+    "name": "Brazil",
+    "freq_mhz": 923.125,
+    "bw_khz": 62.5,
+    "sf": 8,
+    "cr": 8,
+    "recommended": false
+  },
+  {
+    "name": "Canada",
+    "freq_mhz": 910.525,
+    "bw_khz": 62.5,
+    "sf": 7,
+    "cr": 5,
+    "recommended": false,
+    "path_hash_size": 3
+  },
+  {
+    "name": "Costa Rica",
+    "freq_mhz": 910.525,
+    "bw_khz": 125.0,
+    "sf": 11,
+    "cr": 5,
+    "recommended": false
+  },
+  {
+    "name": "EU/UK (Narrow)",
+    "freq_mhz": 869.618,
+    "bw_khz": 62.5,
+    "sf": 8,
+    "cr": 8,
+    "recommended": false
+  },
+  {
+    "name": "EU/UK (Deprecated)",
+    "freq_mhz": 869.525,
+    "bw_khz": 250.0,
+    "sf": 11,
+    "cr": 5,
+    "recommended": false
+  },
+  {
+    "name": "Czech Republic (Narrow)",
+    "freq_mhz": 869.432,
+    "bw_khz": 62.5,
+    "sf": 7,
+    "cr": 5,
+    "recommended": false,
+    "path_hash_size": 2
+  },
+  {
+    "name": "EU 433MHz (Long Range)",
+    "freq_mhz": 433.65,
+    "bw_khz": 250.0,
+    "sf": 11,
+    "cr": 5,
+    "recommended": false
+  },
+  {
+    "name": "EU 433MHz (Narrow)",
+    "freq_mhz": 433.65,
+    "bw_khz": 62.5,
+    "sf": 8,
+    "cr": 8,
+    "recommended": false
+  },
+  {
+    "name": "Hungary",
+    "freq_mhz": 869.618,
+    "bw_khz": 62.5,
+    "sf": 7,
+    "cr": 5,
+    "recommended": false,
+    "path_hash_size": 2
+  },
+  {
+    "name": "Netherlands",
+    "freq_mhz": 869.618,
+    "bw_khz": 62.5,
+    "sf": 7,
+    "cr": 5,
+    "recommended": false
+  },
+  {
+    "name": "Netherlands (Limburg)",
+    "freq_mhz": 869.618,
+    "bw_khz": 62.5,
+    "sf": 8,
+    "cr": 8,
+    "recommended": false,
+    "path_hash_size": 2
+  },
+  {
+    "name": "New Zealand (Narrow)",
+    "freq_mhz": 917.375,
+    "bw_khz": 62.5,
+    "sf": 7,
+    "cr": 5,
+    "recommended": false,
+    "path_hash_size": 2
+  },
+  {
+    "name": "New Zealand (Gisborne)",
+    "freq_mhz": 917.375,
+    "bw_khz": 250.0,
+    "sf": 11,
+    "cr": 5,
+    "recommended": false,
+    "path_hash_size": 1
+  },
+  {
+    "name": "Portugal 433",
+    "freq_mhz": 433.375,
+    "bw_khz": 62.5,
+    "sf": 9,
+    "cr": 6,
+    "recommended": false
+  },
+  {
+    "name": "Portugal 868",
+    "freq_mhz": 869.618,
+    "bw_khz": 62.5,
+    "sf": 7,
+    "cr": 6,
+    "recommended": false
+  },
+  {
+    "name": "Slovakia",
+    "freq_mhz": 869.618,
+    "bw_khz": 62.5,
+    "sf": 7,
+    "cr": 5,
+    "recommended": false,
+    "path_hash_size": 2
+  },
+  {
+    "name": "Switzerland",
+    "freq_mhz": 869.618,
+    "bw_khz": 62.5,
+    "sf": 8,
+    "cr": 8,
+    "recommended": false
+  },
+  {
+    "name": "Thailand",
+    "freq_mhz": 921.0,
+    "bw_khz": 62.5,
+    "sf": 7,
+    "cr": 5,
+    "recommended": false
+  },
+  {
+    "name": "USA",
+    "freq_mhz": 910.525,
+    "bw_khz": 62.5,
+    "sf": 7,
+    "cr": 5,
+    "recommended": true
+  },
+  {
+    "name": "USA - Southern California",
+    "freq_mhz": 927.875,
+    "bw_khz": 62.5,
+    "sf": 7,
+    "cr": 5,
+    "recommended": true,
+    "path_hash_size": 3
+  },
+  {
+    "name": "Vietnam (Narrow)",
+    "freq_mhz": 920.25,
+    "bw_khz": 62.5,
+    "sf": 8,
+    "cr": 5,
+    "recommended": false
+  },
+  {
+    "name": "Vietnam (Deprecated)",
+    "freq_mhz": 920.25,
+    "bw_khz": 250.0,
+    "sf": 11,
+    "cr": 5,
+    "recommended": false
+  }
+]

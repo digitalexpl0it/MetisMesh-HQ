@@ -1,0 +1,7 @@
+/target
+/data
+/dist
+**/*.db
+**/*.db-*
+.DS_Store
+node_modules/

@@ -1,0 +1,34 @@
+[package]
+name = "metis-mesh-hq"
+version = "0.1.0"
+edition = "2021"
+description = "Offline emergency headquarters for MeshCore communities"
+license = "MIT"
+
+[dependencies]
+btleplug = "0.12"
+chrono = "0.4"
+dioxus = "0.7"
+futures-util = "0.3"
+hex = "0.4"
+keyring = "3"
+meshcore-rs = { version = "0.2", features = ["ble"] }
+rand = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+ureq = { version = "2", default-features = false, features = ["tls"] }
+uuid = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+bluer = { version = "0.17", features = ["bluetoothd"] }
+gtk = "0.18"
+
+[features]
+default = ["desktop"]
+web = ["dioxus/web"]
+desktop = ["dioxus/desktop"]
+mobile = ["dioxus/mobile"]

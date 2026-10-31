@@ -1,0 +1,12 @@
+[application]
+name = "metis-mesh-hq"
+default_platform = "desktop"
+asset_dir = "assets"
+
+[web.app]
+title = "Metis Mesh HQ"
+
+[bundle]
+identifier = "dev.metis.mesh-hq"
+publisher = "Metis Mesh"
+resources = ["assets/*"]

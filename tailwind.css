@@ -1,0 +1,53 @@
+@import "tailwindcss";
+@source "./src/**/*.rs";
+
+@theme {
+  --color-background: #101418;
+  --color-foreground: #f4f4f5;
+  --color-card: #151a20;
+  --color-muted: #222831;
+  --color-muted-foreground: #9aa3af;
+  --color-border: #ffffff14;
+  --color-primary: #e7e5e4;
+  --color-primary-foreground: #1c1917;
+  --color-accent: #1b2a22;
+  --color-signal: #3dd68c;
+  --color-destructive: #ef4444;
+  --font-sans: "IBM Plex Sans", "Segoe UI", "Ubuntu", sans-serif;
+}
+
+@layer base {
+  html,
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    min-height: 100%;
+    color-scheme: dark;
+  }
+
+  /*
+   * Native <select> on Linux WebKitGTK keeps OS form chrome unless appearance
+   * is reset. Without that, background-color looks like a flat system grey.
+   */
+  select {
+    -webkit-appearance: none;
+    appearance: none;
+    background-color: #151a20;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%239aa3af' d='M1.2 1.4 6 6.2l4.8-4.8 1.1 1.1L6 8.4.1 2.5z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.75rem center;
+    background-size: 0.75rem;
+    color: #f4f4f5;
+    border-color: #ffffff24;
+    padding-right: 2rem;
+  }
+
+  select:focus {
+    outline: 1px solid #3dd68c;
+  }
+
+  option {
+    background-color: #151a20;
+    color: #f4f4f5;
+  }
+}

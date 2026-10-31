@@ -860,13 +860,55 @@ fn parse_pubkey_prefix(hex_key: &str) -> Result<[u8; 6], String> {
     Ok(prefix)
 }
 
+fn cli_correlation_tag() -> String {
+    // Firmware / mesh-client use two [a-z0-9] chars so replies can be matched.
+    const ALPH: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let a = ALPH[(nanos % ALPH.len() as u128) as usize] as char;
+    let b = ALPH[((nanos / 7) % ALPH.len() as u128) as usize] as char;
+    format!("{a}{b}")
+}
+
+fn parse_cli_reply_bytes(bytes: &[u8], tag: &str) -> Option<String> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let body = if bytes[0] == 29 {
+        String::from_utf8_lossy(&bytes[1..]).to_string()
+    } else if bytes[0].is_ascii_graphic() || bytes[0].is_ascii_whitespace() {
+        String::from_utf8_lossy(bytes).to_string()
+    } else {
+        return None;
+    };
+    let body = body.trim();
+    let prefix = format!("{tag}|");
+    if let Some(rest) = body.strip_prefix(&prefix) {
+        return Some(rest.trim().to_string());
+    }
+    // Older firmwares may echo the command without the correlation tag.
+    Some(body.to_string())
+}
+
 /// Companion `CMD_RUN_CLI_COMMAND` (66). Reply is code 29 → EventType::Unknown + Bytes.
+/// Wire body is `xx|command` (protocol v14+), matching mesh-client / firmware.
 async fn apply_local_cli(
     commands: &meshcore_rs::commands::CommandHandler,
     text: &str,
 ) -> Result<String, String> {
+    let command = text.trim_start();
+    if command.is_empty() {
+        return Err("Empty command.".into());
+    }
+    let tag = cli_correlation_tag();
+    let framed = format!("{tag}|{command}");
+    if framed.len() > 150 {
+        return Err("CLI command too long (max ~148 bytes with tag).".into());
+    }
     let mut data = vec![66u8];
-    data.extend_from_slice(text.as_bytes());
+    data.extend_from_slice(framed.as_bytes());
     let event = commands
         .send_multi(
             &data,
@@ -874,33 +916,27 @@ async fn apply_local_cli(
             Duration::from_secs(12),
         )
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| {
+            format!(
+                "{err} — companion CLI needs firmware protocol v14+. Try `version` after updating."
+            )
+        })?;
     match event.event_type {
         EventType::Error => match event.payload {
             EventPayload::String(s) => Err(s),
-            _ => Err("Companion rejected the CLI command.".into()),
+            _ => Err("Companion rejected the CLI command (unsupported or busy).".into()),
         },
         EventType::Ok => Ok("(ok)".into()),
         _ => match event.payload {
-            EventPayload::Bytes(bytes) if !bytes.is_empty() && bytes[0] == 29 => {
-                let body = String::from_utf8_lossy(&bytes[1..]).trim().to_string();
-                if body.is_empty() {
-                    Ok("(empty CLI reply)".into())
-                } else {
-                    Ok(body)
-                }
+            EventPayload::Bytes(bytes) => match parse_cli_reply_bytes(&bytes, &tag) {
+                Some(s) if !s.is_empty() => Ok(s),
+                Some(_) => Ok("(empty CLI reply)".into()),
+                None => Ok(format!("raw reply: {}", hex::encode(bytes))),
+            },
+            EventPayload::String(s) => {
+                let prefix = format!("{tag}|");
+                Ok(s.strip_prefix(&prefix).unwrap_or(&s).trim().to_string())
             }
-            EventPayload::Bytes(bytes) if !bytes.is_empty() => {
-                // Some firmwares emit reply text without wrapping code 29 in payload[0]
-                // when meshcore-rs already classified the packet as Unknown.
-                if bytes[0].is_ascii_graphic() || bytes[0].is_ascii_whitespace() {
-                    Ok(String::from_utf8_lossy(&bytes).trim().to_string())
-                } else {
-                    Ok(format!("raw reply: {}", hex::encode(bytes)))
-                }
-            }
-            EventPayload::Bytes(_) => Ok("(empty CLI reply)".into()),
-            EventPayload::String(s) => Ok(s),
             _ => Ok("(empty CLI reply)".into()),
         },
     }
@@ -1045,7 +1081,7 @@ async fn run_session(
         write_sync(
             status,
             SyncPhase::Contacts,
-            "Fetching contacts…",
+            "Fetching contacts (BLE can take a few minutes)…",
             None,
         );
         // Contact lists over BLE can outlast the default 5s command timeout.
@@ -1078,16 +1114,49 @@ async fn run_session(
                 return SessionEnd::Lost(err);
             }
         }
-        write_sync(status, SyncPhase::Messages, "Draining queued messages…", None);
+        // Cap the initial queue drain. On a busy Public channel, new RF traffic
+        // can refill the companion queue forever — holding this lock for hours
+        // blocks Ready / CLI / settings while the UI says "Draining…".
+        write_sync(
+            status,
+            SyncPhase::Messages,
+            "Draining queued messages…",
+            Some((0, 1)),
+        );
+        let drain_deadline = Instant::now() + Duration::from_secs(60);
+        let mut drained = 0u32;
+        const DRAIN_MAX: u32 = 400;
         loop {
-            match commands.get_msg().await {
-                Ok(Some(event)) => {
+            if drained >= DRAIN_MAX || Instant::now() >= drain_deadline {
+                write_sync(
+                    status,
+                    SyncPhase::Messages,
+                    format!(
+                        "Queued drain paused after {drained} msg(s); live fetch continues…"
+                    ),
+                    Some((drained, drained.max(1))),
+                );
+                break;
+            }
+            match tokio::time::timeout(Duration::from_secs(4), commands.get_msg()).await {
+                Ok(Ok(Some(event))) => {
+                    drained = drained.saturating_add(1);
+                    write_sync(
+                        status,
+                        SyncPhase::Messages,
+                        format!("Draining queued messages… ({drained})"),
+                        Some((drained, (drained + 8).max(1))),
+                    );
                     if let Err(err) = handle_event(db, &meshcore, event, radio).await {
                         eprintln!("message: {err}");
                     }
                 }
-                Ok(None) => break,
-                Err(err) => return SessionEnd::Lost(err.to_string()),
+                Ok(Ok(None)) => break,
+                Ok(Err(err)) => return SessionEnd::Lost(err.to_string()),
+                Err(_) => {
+                    // No reply in time — treat as empty / move on to live mode.
+                    break;
+                }
             }
         }
         write_sync(status, SyncPhase::Ready, "Companion ready", None);
@@ -1130,12 +1199,23 @@ async fn run_session(
     let mut replies: HashMap<String, Instant> = HashMap::new();
     let mut pushed_generation = 0i64;
     let mut last_battery = Instant::now();
+    let mut last_advert_sync = Instant::now() - Duration::from_secs(120);
+    let mut contact_retry_at = Instant::now() + Duration::from_secs(15);
+    let mut need_contact_retry = db
+        .setting("contacts_since")
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0)
+        == 0;
     // Persistent interval — recreating `sleep(1s)` inside select! starves battery
     // polls whenever mesh events keep arriving (auto-fetch / advertisements).
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
+        // Prefer UI/radio commands over mesh event floods so CLI/settings stay responsive.
         tokio::select! {
+            biased;
             cmd = rx.recv() => {
                 match cmd {
                     None | Some(RadioCmd::Disconnect) => {
@@ -1536,7 +1616,13 @@ async fn run_session(
                         return SessionEnd::Lost("Bluetooth link closed.".into());
                     }
                     Some(event) => {
-                        if matches!(event.event_type, EventType::Advertisement | EventType::MessagesWaiting) {
+                        // Do NOT contact-sync on MessagesWaiting — auto-fetch already
+                        // drains messages, and a 30s get_contacts held the command lock
+                        // so CLI/settings never ran on a busy mesh.
+                        if event.event_type == EventType::Advertisement
+                            && last_advert_sync.elapsed() >= Duration::from_secs(60)
+                        {
+                            last_advert_sync = Instant::now();
                             let commands = meshcore.commands().lock().await;
                             if let Err(err) = sync_contacts(db, &commands, None).await {
                                 eprintln!("contact sync: {err}");
@@ -1569,6 +1655,45 @@ async fn run_session(
                     }
                     last_battery = Instant::now();
                 }
+                // If initial contact dump never finished (contacts_since still 0),
+                // retry once the live loop is up so we don't block connect forever.
+                if need_contact_retry && Instant::now() >= contact_retry_at {
+                    contact_retry_at = Instant::now() + Duration::from_secs(120);
+                    let since_now = db
+                        .setting("contacts_since")
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.parse::<u32>().ok())
+                        .unwrap_or(0);
+                    if since_now == 0 {
+                        write_sync(
+                            status,
+                            SyncPhase::Contacts,
+                            "Retrying contact sync…",
+                            None,
+                        );
+                        let commands = meshcore.commands().lock().await;
+                        match sync_contacts(db, &commands, Some(status)).await {
+                            Ok(()) => {
+                                need_contact_retry = false;
+                                write_sync(status, SyncPhase::Ready, "Companion ready", None);
+                                write_status(status, "connected", connected_detail(status, name));
+                            }
+                            Err(err) => {
+                                eprintln!("contact sync retry: {err}");
+                                write_sync(status, SyncPhase::Ready, "Companion ready", None);
+                                write_status(
+                                    status,
+                                    "connected",
+                                    format!(
+                                        "{}. Contact sync still pending.",
+                                        connected_detail(status, name)
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1584,9 +1709,9 @@ async fn sync_contacts(
         .map_err(|err| err.to_string())?
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
-    // Full and incremental contact dumps often need more than the library default.
+    // Full dumps of hundreds of contacts over BLE routinely exceed 30s.
     let contacts = commands
-        .get_contacts_with_timeout(since, Duration::from_secs(30))
+        .get_contacts_with_timeout(since, Duration::from_secs(180))
         .await
         .map_err(|err| err.to_string())?;
     let total = contacts.len() as u32;

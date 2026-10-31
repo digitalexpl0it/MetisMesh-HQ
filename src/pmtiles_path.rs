@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 static PMTILES_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+static ACTIVE_REGION: Mutex<Option<String>> = Mutex::new(None);
 
 pub fn set_pmtiles_path(path: Option<impl AsRef<Path>>) {
     let next = path.and_then(|p| {
@@ -27,8 +28,19 @@ pub fn current_pmtiles_path() -> Option<PathBuf> {
         .filter(|path| path.is_file())
 }
 
+pub fn set_active_region_id(id: Option<String>) {
+    if let Ok(mut guard) = ACTIVE_REGION.lock() {
+        *guard = id.filter(|s| !s.is_empty());
+    }
+}
+
+pub fn active_region_id() -> Option<String> {
+    ACTIVE_REGION.lock().ok().and_then(|g| g.clone())
+}
+
 /// URL the MapLibre PMTiles protocol should fetch (custom `metis` scheme).
-pub fn basemap_protocol_url() -> Option<&'static str> {
-    // Host `local` so the path is `/pmtiles/basemap` (not host=`pmtiles`, path=`/basemap`).
-    current_pmtiles_path().map(|_| "metis://local/pmtiles/basemap")
+pub fn basemap_protocol_url() -> Option<String> {
+    current_pmtiles_path()?;
+    let id = active_region_id().unwrap_or_else(|| "basemap".into());
+    Some(format!("metis://local/pmtiles/{id}"))
 }

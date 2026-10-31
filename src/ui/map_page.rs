@@ -2,6 +2,7 @@
 
 use dioxus::prelude::*;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 
 use crate::db::unix_now;
 use crate::path::{build_line, MapLine};
@@ -9,8 +10,10 @@ use crate::pmtiles_path;
 
 use super::icons::{Icon, IconName};
 use super::map_host::{
-    dark_basemap_style, map_bind_node_clicks, map_destroy, map_fit_bounds, map_fly_to, map_init,
-    map_set_geojson, map_set_visibility, map_take_selection, MAP_CONTAINER_ID,
+    dark_basemap_style, load_saved_basemap, load_saved_camera, map_bind_node_clicks, map_destroy,
+    map_exists, map_fit_bounds, map_fly_to, map_get_camera, map_init, map_set_geojson,
+    map_set_nodes, map_set_style, map_set_visibility, map_take_favorite_toggle, map_take_selection,
+    save_basemap, save_camera, BasemapKind, MapCamera, MAP_CONTAINER_ID,
 };
 use super::state;
 use super::widgets::{Button, ButtonKind, PageHeading, SelectInput};
@@ -18,9 +21,13 @@ use super::widgets::{Button, ButtonKind, PageHeading, SelectInput};
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NodeFilter {
     All,
+    Favorites,
+    Users,
+    Repeaters,
+    Rooms,
+    Sensors,
     Enrolled,
     Heard,
-    Gps,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -31,14 +38,6 @@ enum TrafficWindow {
     Day,
 }
 
-#[derive(Clone, Default)]
-struct SelectedNode {
-    name: String,
-    enrollment: String,
-    type_label: String,
-    pubkey: String,
-}
-
 fn node_type_label(contact_type: u8) -> &'static str {
     match contact_type {
         1 => "Chat",
@@ -46,6 +45,25 @@ fn node_type_label(contact_type: u8) -> &'static str {
         3 => "Room",
         4 => "Sensor",
         _ => "Node",
+    }
+}
+
+fn relative_ago(ts: Option<i64>) -> String {
+    let Some(ts) = ts else {
+        return "unknown".into();
+    };
+    let now = unix_now();
+    let delta = (now - ts).max(0);
+    if delta < 60 {
+        "just now".into()
+    } else if delta < 3600 {
+        format!("{}m ago", delta / 60)
+    } else if delta < 86_400 {
+        format!("{}h ago", delta / 3600)
+    } else if delta < 86_400 * 14 {
+        format!("{}d ago", delta / 86_400)
+    } else {
+        format!("{}w ago", delta / (86_400 * 7))
     }
 }
 
@@ -67,13 +85,30 @@ fn line_feature(line: &MapLine) -> Value {
     })
 }
 
-fn enrollment_color(enrollment: &str) -> &'static str {
-    match enrollment {
-        "hq" => "#f472b6",
-        "enrolled" => "#34d399",
-        "pending" => "#fbbf24",
-        "denied" => "#f87171",
-        _ => "#38bdf8",
+/// Pin colors by MeshCore contact type (HQ overrides).
+fn type_color(enrollment: &str, contact_type: u8) -> &'static str {
+    if enrollment == "hq" {
+        return "#f472b6";
+    }
+    match contact_type {
+        1 => "#38bdf8", // Chat / companion user
+        2 => "#34d399", // Repeater
+        3 => "#fbbf24", // Room server
+        4 => "#fb923c", // Sensor
+        _ => "#94a3b8",
+    }
+}
+
+fn type_key(enrollment: &str, contact_type: u8) -> &'static str {
+    if enrollment == "hq" {
+        return "hq";
+    }
+    match contact_type {
+        1 => "chat",
+        2 => "repeater",
+        3 => "room",
+        4 => "sensor",
+        _ => "node",
     }
 }
 
@@ -97,6 +132,28 @@ fn noise_color(noise: i64) -> &'static str {
     }
 }
 
+fn load_favorites() -> HashSet<String> {
+    state()
+        .db
+        .setting("map_favorites")
+        .ok()
+        .flatten()
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn save_favorites(favs: &HashSet<String>) {
+    let mut list: Vec<_> = favs.iter().cloned().collect();
+    list.sort();
+    let _ = state().db.set_setting("map_favorites", &list.join(","));
+}
+
 struct MapModel {
     nodes: Value,
     solid: Value,
@@ -115,6 +172,8 @@ fn build_model(
     show_dashed: bool,
     show_snr: bool,
     show_noise: bool,
+    favorites: &HashSet<String>,
+    basemap: BasemapKind,
 ) -> MapModel {
     let db = &state().db;
     let path_nodes = db.known_nodes_for_paths().unwrap_or_default();
@@ -129,9 +188,15 @@ fn build_model(
             let enrollment = node.enrollment.as_str();
             let keep = match filter {
                 NodeFilter::All => true,
+                NodeFilter::Favorites => {
+                    favorites.contains(&node.pubkey) || enrollment == "hq"
+                }
+                NodeFilter::Users => node.contact_type == 1 || enrollment == "hq",
+                NodeFilter::Repeaters => node.contact_type == 2,
+                NodeFilter::Rooms => node.contact_type == 3,
+                NodeFilter::Sensors => node.contact_type == 4,
                 NodeFilter::Enrolled => enrollment == "enrolled" || enrollment == "hq",
                 NodeFilter::Heard => enrollment == "heard",
-                NodeFilter::Gps => true,
             };
             if !keep {
                 return None;
@@ -141,16 +206,23 @@ fn build_model(
             } else {
                 node_type_label(node.contact_type)
             };
+            let favorited = favorites.contains(&node.pubkey);
+            let color = type_color(enrollment, node.contact_type);
             Some(json!({
                 "type": "Feature",
                 "properties": {
                     "name": node.name,
                     "enrollment": enrollment,
                     "type_label": type_label,
+                    "type_key": type_key(enrollment, node.contact_type),
                     "contact_type": node.contact_type,
                     "pubkey": node.pubkey,
-                    "color": enrollment_color(enrollment),
-                    "radius": if enrollment == "hq" { 9 } else { 6 },
+                    "favorite": favorited,
+                    "lat": lat,
+                    "lon": lon,
+                    "last_heard_label": relative_ago(node.last_heard),
+                    "color": color,
+                    "radius": if enrollment == "hq" { 11 } else { 9 },
                 },
                 "geometry": { "type": "Point", "coordinates": [lon, lat] }
             }))
@@ -210,11 +282,7 @@ fn build_model(
 
         if show_snr {
             if let Some(snr) = message.snr {
-                let point = if outbound {
-                    hq_pos
-                } else {
-                    node_pos
-                };
+                let point = if outbound { hq_pos } else { node_pos };
                 if let Some((lon, lat)) = point {
                     snr_features.push(json!({
                         "type": "Feature",
@@ -272,6 +340,13 @@ fn build_model(
         None
     };
     let pmtiles_ok = pmtiles_path::current_pmtiles_path().is_some();
+    let basemap_note = match (basemap, pmtiles_ok) {
+        (BasemapKind::Outline, _) => " · outline + state borders",
+        (_, true) => " · offline PMTiles",
+        (BasemapKind::Streets, false)
+        | (BasemapKind::Terrain, false)
+        | (BasemapKind::Topo, false) => " · outline (set PMTiles for street/terrain/topo tiles)",
+    };
     let note = if node_features.is_empty() {
         "No GPS fixes yet. Positions appear when a node advertises coordinates.".into()
     } else if hq_pos.is_none() {
@@ -282,11 +357,7 @@ fn build_model(
             node_features.len(),
             solid.len(),
             dashed.len(),
-            if pmtiles_ok {
-                " · offline PMTiles basemap"
-            } else {
-                " · land outline basemap (optional PMTiles in Settings)"
-            }
+            basemap_note
         )
     };
 
@@ -300,20 +371,6 @@ fn build_model(
         bounds,
         pmtiles_ok,
     }
-}
-
-fn node_layers() -> Value {
-    json!([{
-        "id": "node-dots",
-        "type": "circle",
-        "source": "nodes",
-        "paint": {
-            "circle-radius": ["coalesce", ["get", "radius"], 6],
-            "circle-color": ["coalesce", ["get", "color"], "#38bdf8"],
-            "circle-stroke-width": 1.5,
-            "circle-stroke-color": "#e2e8f0"
-        }
-    }])
 }
 
 fn solid_layers() -> Value {
@@ -368,19 +425,72 @@ fn noise_layers() -> Value {
     }])
 }
 
+fn filter_chip(active: bool) -> &'static str {
+    if active {
+        "map-chip map-chip-active"
+    } else {
+        "map-chip"
+    }
+}
+
+fn default_camera() -> (MapCamera, bool) {
+    // Returns (camera, skip_fit_bounds).
+    if let Some(cam) = load_saved_camera() {
+        return (cam, true);
+    }
+    if let Some((_, lat, lon)) = state().db.hq_position().ok().flatten() {
+        return (
+            MapCamera {
+                lng: lon,
+                lat,
+                zoom: 11.0,
+            },
+            true,
+        );
+    }
+    if let Some((lon, lat)) = state().db.list_nodes().ok().and_then(|rows| {
+        rows.into_iter().find_map(|n| Some((n.lon?, n.lat?)))
+    }) {
+        return (
+            MapCamera {
+                lng: lon,
+                lat,
+                zoom: 10.0,
+            },
+            true,
+        );
+    }
+    (
+        MapCamera {
+            lng: -100.0,
+            lat: 38.0,
+            zoom: 3.5,
+        },
+        false,
+    )
+}
+
 #[component]
 pub fn MapPage() -> Element {
     let mut filter = use_signal(|| NodeFilter::All);
     let mut window = use_signal(|| TrafficWindow::Last25);
+    let mut basemap = use_signal(load_saved_basemap);
+    let mut cluster = use_signal(|| true);
     let mut show_solid = use_signal(|| true);
     let mut show_dashed = use_signal(|| true);
     let mut show_snr = use_signal(|| false);
     let mut show_noise = use_signal(|| false);
+    let mut favorites = use_signal(load_favorites);
     let mut tick = use_signal(|| 0u32);
     let mut ready = use_signal(|| false);
     let mut fitted = use_signal(|| false);
-    let mut selected = use_signal(|| None::<SelectedNode>);
+    let mut style_key = use_signal(|| 0u32);
+    let mut preserve_camera = use_signal(|| None::<MapCamera>);
     let mut map_error = use_signal(String::new);
+    let mut show_download = use_signal(|| pmtiles_path::current_pmtiles_path().is_none());
+    let mut zip_input = use_signal(String::new);
+    let mut radius_miles = use_signal(|| 50u32);
+    let mut dl_note = use_signal(String::new);
 
     let _ = tick();
     let model = build_model(
@@ -390,30 +500,48 @@ pub fn MapPage() -> Element {
         show_dashed(),
         show_snr(),
         show_noise(),
+        &favorites(),
+        basemap(),
     );
 
-    // Init MapLibre once scripts are present.
+    // Init once; later basemap switches use setStyle (no flashy destroy).
+    // Subscribe only to style_key so basemap.set + style_key++ do not double-run.
     use_effect(move || {
+        let key = style_key();
+        let kind = basemap.peek().clone();
+        let preserved = preserve_camera.peek().clone();
         spawn(async move {
+            // Let flex layout assign map-stage height before MapLibre measures.
             tokio::time::sleep(std::time::Duration::from_millis(180)).await;
-            let style = dark_basemap_style(pmtiles_path::basemap_protocol_url());
-            // Prefer HQ / first GPS node for initial camera.
-            let (lng, lat, zoom) = state()
-                .db
-                .hq_position()
-                .ok()
-                .flatten()
-                .map(|(_, la, lo)| (lo, la, 9.0))
-                .or_else(|| {
-                    state().db.list_nodes().ok().and_then(|rows| {
-                        rows.into_iter().find_map(|n| Some((n.lon?, n.lat?, 9.0)))
-                    })
-                })
-                .unwrap_or((0.0, 20.0, 1.5));
-            match map_init(&style, lng, lat, zoom).await {
+            let tiles = pmtiles_path::basemap_protocol_url();
+            let style = dark_basemap_style(tiles.as_deref(), kind);
+            let live = map_get_camera().await;
+            let (cam, skip_fit) = if let Some(cam) = preserved.or(live) {
+                (cam, true)
+            } else if let Some(saved) = load_saved_camera() {
+                (saved, true)
+            } else {
+                default_camera()
+            };
+            let exists = map_exists().await;
+            let result = if exists {
+                map_set_style(&style, Some(cam)).await
+            } else {
+                map_init(&style, cam.lng, cam.lat, cam.zoom).await
+            };
+            match result {
                 Ok(()) => {
                     map_error.set(String::new());
                     ready.set(true);
+                    // Never auto-fit after a style swap — keep the user's view.
+                    fitted.set(true);
+                    let _ = skip_fit;
+                    preserve_camera.set(None);
+                    save_camera(cam);
+                    save_basemap(kind);
+                    // Force overlay re-push after style swap (sources were wiped).
+                    let _ = key;
+                    tick.with_mut(|n| *n = n.wrapping_add(1));
                 }
                 Err(err) => {
                     map_error.set(format!("Map failed to start: {err}"));
@@ -425,11 +553,13 @@ pub fn MapPage() -> Element {
 
     use_drop(move || {
         spawn(async move {
+            if let Some(cam) = map_get_camera().await {
+                save_camera(cam);
+            }
             map_destroy().await;
         });
     });
 
-    // Push GeoJSON whenever filters/tick change and the map is ready.
     use_effect(move || {
         let _ = (
             tick(),
@@ -439,10 +569,13 @@ pub fn MapPage() -> Element {
             show_dashed(),
             show_snr(),
             show_noise(),
+            cluster(),
+            favorites(),
         );
         if !ready() {
             return;
         }
+        // Peek basemap — style swaps own the re-push via tick bump after setStyle.
         let snapshot = build_model(
             filter(),
             window(),
@@ -450,6 +583,8 @@ pub fn MapPage() -> Element {
             show_dashed(),
             show_snr(),
             show_noise(),
+            &favorites(),
+            *basemap.peek(),
         );
         let nodes = snapshot.nodes.clone();
         let solid = snapshot.solid.clone();
@@ -458,8 +593,9 @@ pub fn MapPage() -> Element {
         let noise = snapshot.noise.clone();
         let bounds = snapshot.bounds;
         let do_fit = !fitted() && bounds.is_some();
+        let do_cluster = cluster();
         spawn(async move {
-            map_set_geojson("nodes", &nodes, &node_layers()).await;
+            map_set_nodes(&nodes, do_cluster).await;
             map_set_geojson("solid-routes", &solid, &solid_layers()).await;
             map_set_geojson("dashed-routes", &dashed, &dashed_layers()).await;
             map_set_geojson("snr-points", &snr, &snr_layers()).await;
@@ -474,7 +610,6 @@ pub fn MapPage() -> Element {
         });
     });
 
-    // Visibility toggles.
     use_effect(move || {
         if !ready() {
             return;
@@ -491,81 +626,93 @@ pub fn MapPage() -> Element {
         });
     });
 
-    // Live refresh + click selection poll.
     use_effect(move || {
         spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                tick.with_mut(|n| *n = n.wrapping_add(1));
-                if let Some(raw) = map_take_selection().await {
-                    if let Ok(value) = serde_json::from_str::<Value>(&raw) {
-                        selected.set(Some(SelectedNode {
-                            name: value
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("Node")
-                                .into(),
-                            enrollment: value
-                                .get("enrollment")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .into(),
-                            type_label: value
-                                .get("type_label")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("Node")
-                                .into(),
-                            pubkey: value
-                                .get("pubkey")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .into(),
-                        }));
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                if let Some(key) = map_take_favorite_toggle().await {
+                    if !key.is_empty() {
+                        favorites.with_mut(|set| {
+                            if set.contains(&key) {
+                                set.remove(&key);
+                            } else {
+                                set.insert(key);
+                            }
+                            save_favorites(set);
+                        });
                     }
+                }
+                let _ = map_take_selection().await;
+                if let Some(cam) = map_get_camera().await {
+                    save_camera(cam);
                 }
             }
         });
     });
 
-    let rows = state().db.list_nodes().unwrap_or_default();
+    use_effect(move || {
+        spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tick.with_mut(|n| *n = n.wrapping_add(1));
+            }
+        });
+    });
+
+    let set_basemap = move |kind: BasemapKind| {
+        if basemap() == kind {
+            return;
+        }
+        spawn(async move {
+            let cam = map_get_camera().await;
+            preserve_camera.set(cam);
+            // Set basemap before bumping style_key; the style effect peeks basemap.
+            basemap.set(kind);
+            save_basemap(kind);
+            style_key.with_mut(|n| *n = n.wrapping_add(1));
+        });
+    };
 
     rsx! {
         document::Stylesheet { href: asset!("/assets/maplibre-gl.css") }
         document::Script { src: asset!("/assets/maplibre-gl.js") }
         document::Script { src: asset!("/assets/pmtiles.js") }
         document::Script { src: asset!("/assets/map_bridge.js") }
-        div { class: "flex h-full min-h-0 flex-col gap-3",
+        div { class: "flex h-full min-h-0 flex-col gap-3 overflow-hidden",
             PageHeading { icon: IconName::Map, title: "Map".to_string(), "{model.note}" }
             if !map_error().is_empty() {
                 p { class: "text-sm text-destructive", "{map_error}" }
             }
-            if !model.pmtiles_ok {
-                p { class: "text-xs text-muted-foreground",
-                    "Showing bundled land outlines. Add a regional PMTiles path in Settings → Offline map tiles for a full offline basemap."
+            {
+                let dl = crate::map_tiles::download_status();
+                if dl.running {
+                    rsx! {
+                        p { class: "text-xs text-muted-foreground", "{dl.detail}" }
+                    }
+                } else if !dl_note().is_empty() {
+                    rsx! {
+                        p { class: "text-xs text-muted-foreground", "{dl_note}" }
+                    }
+                } else if !model.pmtiles_ok {
+                    rsx! {
+                        p { class: "text-xs text-muted-foreground",
+                            "Outline works offline. Download a local area (ZIP + radius) for Streets / Terrain / Topo."
+                        }
+                    }
+                } else {
+                    rsx! {}
                 }
             }
             div { class: "map-toolbar",
                 div { class: "flex flex-wrap gap-2",
-                    button {
-                        class: if filter() == NodeFilter::All { "map-chip map-chip-active" } else { "map-chip" },
-                        onclick: move |_| filter.set(NodeFilter::All),
-                        "All"
-                    }
-                    button {
-                        class: if filter() == NodeFilter::Enrolled { "map-chip map-chip-active" } else { "map-chip" },
-                        onclick: move |_| filter.set(NodeFilter::Enrolled),
-                        "Enrolled"
-                    }
-                    button {
-                        class: if filter() == NodeFilter::Heard { "map-chip map-chip-active" } else { "map-chip" },
-                        onclick: move |_| filter.set(NodeFilter::Heard),
-                        "Heard"
-                    }
-                    button {
-                        class: if filter() == NodeFilter::Gps { "map-chip map-chip-active" } else { "map-chip" },
-                        onclick: move |_| filter.set(NodeFilter::Gps),
-                        "Has GPS"
-                    }
+                    button { class: filter_chip(filter() == NodeFilter::All), onclick: move |_| filter.set(NodeFilter::All), "All" }
+                    button { class: filter_chip(filter() == NodeFilter::Favorites), onclick: move |_| filter.set(NodeFilter::Favorites), "Favorites" }
+                    button { class: filter_chip(filter() == NodeFilter::Users), onclick: move |_| filter.set(NodeFilter::Users), "Users" }
+                    button { class: filter_chip(filter() == NodeFilter::Repeaters), onclick: move |_| filter.set(NodeFilter::Repeaters), "Repeaters" }
+                    button { class: filter_chip(filter() == NodeFilter::Rooms), onclick: move |_| filter.set(NodeFilter::Rooms), "Rooms" }
+                    button { class: filter_chip(filter() == NodeFilter::Sensors), onclick: move |_| filter.set(NodeFilter::Sensors), "Sensors" }
+                    button { class: filter_chip(filter() == NodeFilter::Enrolled), onclick: move |_| filter.set(NodeFilter::Enrolled), "Enrolled" }
+                    button { class: filter_chip(filter() == NodeFilter::Heard), onclick: move |_| filter.set(NodeFilter::Heard), "Heard" }
                 }
                 div { class: "min-w-[10rem]",
                     SelectInput {
@@ -592,6 +739,10 @@ pub fn MapPage() -> Element {
                     }
                 }
                 label { class: "map-toggle",
+                    input { r#type: "checkbox", checked: cluster(), oninput: move |_| cluster.set(!cluster()) }
+                    "Cluster markers"
+                }
+                label { class: "map-toggle",
                     input { r#type: "checkbox", checked: show_solid(), oninput: move |_| show_solid.set(!show_solid()) }
                     "Solid routes"
                 }
@@ -611,7 +762,13 @@ pub fn MapPage() -> Element {
                     kind: ButtonKind::Ghost,
                     onclick: move |_| {
                         if let Some((w, s, e, n)) = model.bounds {
-                            spawn(async move { map_fit_bounds(w, s, e, n).await; });
+                            spawn(async move {
+                                if (e - w).abs() < 1e-5 && (n - s).abs() < 1e-5 {
+                                    map_fly_to(w, s, 12.0).await;
+                                } else {
+                                    map_fit_bounds(w, s, e, n).await;
+                                }
+                            });
                         }
                     },
                     Icon { name: IconName::Locate, size: 14 }
@@ -629,65 +786,142 @@ pub fn MapPage() -> Element {
                     id: "{MAP_CONTAINER_ID}",
                     class: "map-canvas",
                 }
+                if show_download() || !model.pmtiles_ok || crate::map_tiles::download_status().running {
+                    div { class: "map-download-card",
+                        div { class: "map-download-head",
+                            span { class: "map-download-title", "Download offline map" }
+                            if model.pmtiles_ok && !crate::map_tiles::download_status().running {
+                                button {
+                                    class: "map-download-dismiss",
+                                    title: "Dismiss",
+                                    onclick: move |_| show_download.set(false),
+                                    "×"
+                                }
+                            }
+                        }
+                        p { class: "map-download-copy",
+                            "One pack unlocks Streets, Terrain, and Topo. Enter a US ZIP and radius, or leave ZIP blank to use the map center (or HQ)."
+                        }
+                        div { class: "map-download-row",
+                            input {
+                                class: "map-download-input",
+                                r#type: "text",
+                                maxlength: "10",
+                                placeholder: "ZIP (optional)",
+                                value: "{zip_input}",
+                                oninput: move |event: FormEvent| zip_input.set(event.value()),
+                            }
+                            button {
+                                class: "map-download-go",
+                                disabled: crate::map_tiles::download_status().running,
+                                onclick: move |_| {
+                                    let zip = zip_input();
+                                    let radius = radius_miles() as f64;
+                                    let db = state().db.clone();
+                                    spawn(async move {
+                                        let cam = map_get_camera().await;
+                                        let center = cam.map(|c| (c.lat, c.lng));
+                                        crate::map_tiles::start_area_download(
+                                            db,
+                                            zip,
+                                            radius,
+                                            center,
+                                        );
+                                        dl_note.set("Download started…".into());
+                                        show_download.set(true);
+                                        for _ in 0..180 {
+                                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                            tick.with_mut(|n| *n = n.wrapping_add(1));
+                                            let s = crate::map_tiles::download_status();
+                                            if !s.running {
+                                                if s.phase == "done" {
+                                                    dl_note.set(s.detail.clone());
+                                                    // Refresh style so Streets picks up the new archive.
+                                                    preserve_camera.set(map_get_camera().await);
+                                                    if *basemap.peek() == BasemapKind::Outline {
+                                                        basemap.set(BasemapKind::Streets);
+                                                    }
+                                                    style_key.with_mut(|n| *n = n.wrapping_add(1));
+                                                } else if s.phase == "error" {
+                                                    dl_note.set(s.detail.clone());
+                                                }
+                                                break;
+                                            }
+                                            dl_note.set(s.detail.clone());
+                                        }
+                                    });
+                                },
+                                if crate::map_tiles::download_status().running { "Working…" } else { "Download" }
+                            }
+                        }
+                        div { class: "map-download-radii",
+                            for miles in [25u32, 50, 75, 100, 150] {
+                                {
+                                    let selected = radius_miles() == miles;
+                                    rsx! {
+                                        button {
+                                            key: "{miles}",
+                                            class: if selected { "map-radius-chip active" } else { "map-radius-chip" },
+                                            onclick: move |_| radius_miles.set(miles),
+                                            "{miles} mi"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if crate::map_tiles::download_status().running {
+                            p { class: "map-download-status",
+                                "{crate::map_tiles::download_status().detail}"
+                            }
+                        }
+                    }
+                } else if model.pmtiles_ok {
+                    button {
+                        class: "map-download-fab",
+                        title: "Download another offline map area",
+                        onclick: move |_| show_download.set(true),
+                        "Offline map"
+                    }
+                }
                 div { class: "map-legend",
                     p { class: "map-legend-title", "Legend" }
-                    div { class: "map-legend-row", span { class: "map-swatch", style: "background:#f472b6;" } "HQ" }
-                    div { class: "map-legend-row", span { class: "map-swatch", style: "background:#34d399;" } "Enrolled" }
-                    div { class: "map-legend-row", span { class: "map-swatch", style: "background:#38bdf8;" } "Heard" }
-                    div { class: "map-legend-row", span { class: "map-swatch", style: "background:#fbbf24;" } "Pending" }
+                    div { class: "map-legend-row", span { class: "map-type-swatch map-type-hq" } "HQ" }
+                    div { class: "map-legend-row", span { class: "map-type-swatch map-type-chat" } "Chat" }
+                    div { class: "map-legend-row", span { class: "map-type-swatch map-type-repeater" } "Repeater" }
+                    div { class: "map-legend-row", span { class: "map-type-swatch map-type-room" } "Room" }
+                    div { class: "map-legend-row", span { class: "map-type-swatch map-type-sensor" } "Sensor" }
+                    div { class: "map-legend-row", span { class: "map-cluster-swatch metis-cluster-cool" } "Cluster (5+)" }
                     div { class: "map-legend-row", span { class: "map-line", style: "background:#34d399;" } "Resolved hops" }
                     div { class: "map-legend-row", span { class: "map-line map-line-dashed", style: "background:#fbbf24;" } "Endpoints only" }
                 }
-                if let Some(node) = selected() {
-                    div { class: "map-popup-panel",
-                        p { class: "text-sm font-medium", "{node.name}" }
-                        p { class: "text-xs text-muted-foreground",
-                            "{node.type_label} · {node.enrollment}"
-                        }
-                        if !node.pubkey.is_empty() {
-                            p { class: "mt-1 break-all font-mono text-[0.65rem] text-muted-foreground", "{node.pubkey}" }
-                        }
-                        Button {
-                            kind: ButtonKind::Ghost,
-                            onclick: move |_| selected.set(None),
-                            "Close"
-                        }
+                div { class: "map-basemap-switcher", title: "Basemap",
+                    button {
+                        class: if basemap() == BasemapKind::Outline { "map-basemap-btn active" } else { "map-basemap-btn" },
+                        onclick: move |_| set_basemap(BasemapKind::Outline),
+                        title: "Outline",
+                        span { class: "map-basemap-icon map-basemap-outline" }
+                        span { "Outline" }
                     }
-                }
-            }
-            div { class: "map-node-list",
-                for node in rows.iter().filter(|n| n.lat.is_some() && n.lon.is_some()).take(24) {
-                    {
-                        let name = node.name.clone();
-                        let enrollment = node.enrollment.as_str().to_string();
-                        let type_label = if enrollment == "hq" {
-                            "HQ".to_string()
-                        } else {
-                            node_type_label(node.contact_type).to_string()
-                        };
-                        let color = enrollment_color(enrollment.as_str());
-                        let pubkey = node.pubkey.clone();
-                        let lat = node.lat.unwrap_or(0.0);
-                        let lon = node.lon.unwrap_or(0.0);
-                        rsx! {
-                            button {
-                                key: "{pubkey}",
-                                class: "map-node-row",
-                                onclick: move |_| {
-                                    selected.set(Some(SelectedNode {
-                                        name: name.clone(),
-                                        enrollment: enrollment.clone(),
-                                        type_label: type_label.clone(),
-                                        pubkey: pubkey.clone(),
-                                    }));
-                                    spawn(async move { map_fly_to(lon, lat, 12.0).await; });
-                                },
-                                span { class: "map-swatch", style: "background:{color};" }
-                                span { class: "min-w-0 flex-1 truncate text-left text-sm", "{name}" }
-                                span { class: "shrink-0 text-[0.65rem] text-muted-foreground", "{type_label}" }
-                                span { class: "font-mono text-[0.65rem] text-muted-foreground", "{lat:.3}, {lon:.3}" }
-                            }
-                        }
+                    button {
+                        class: if basemap() == BasemapKind::Streets { "map-basemap-btn active" } else { "map-basemap-btn" },
+                        onclick: move |_| set_basemap(BasemapKind::Streets),
+                        title: "Streets",
+                        span { class: "map-basemap-icon map-basemap-streets" }
+                        span { "Streets" }
+                    }
+                    button {
+                        class: if basemap() == BasemapKind::Terrain { "map-basemap-btn active" } else { "map-basemap-btn" },
+                        onclick: move |_| set_basemap(BasemapKind::Terrain),
+                        title: "Terrain",
+                        span { class: "map-basemap-icon map-basemap-terrain" }
+                        span { "Terrain" }
+                    }
+                    button {
+                        class: if basemap() == BasemapKind::Topo { "map-basemap-btn active" } else { "map-basemap-btn" },
+                        onclick: move |_| set_basemap(BasemapKind::Topo),
+                        title: "Topo",
+                        span { class: "map-basemap-icon map-basemap-topo" }
+                        span { "Topo" }
                     }
                 }
             }

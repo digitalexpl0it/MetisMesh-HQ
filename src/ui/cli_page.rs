@@ -88,7 +88,18 @@ pub fn CliPage(radio: RadioStatus) -> Element {
         };
         append_transcript(transcript, &format!("> {text}"));
         append_transcript(transcript, "… waiting for reply");
+        let expected_seq = state().radio.snapshot().cli_seq;
         state().radio.run_cli(contact, text);
+        spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(14)).await;
+            let snap = state().radio.snapshot();
+            if snap.cli_seq == expected_seq {
+                append_transcript(
+                    transcript,
+                    "error: no CLI reply (timeout). Needs companion protocol v14+, and the radio link must be free.",
+                );
+            }
+        });
     };
 
     rsx! {

@@ -1686,6 +1686,13 @@ fn MessagesPage() -> Element {
     let mut refresh = use_signal(|| 0u64);
     let mut refresh_started = use_signal(|| false);
     let mut read_session = use_signal(|| None::<ChannelReadSession>);
+    let mut message_keep = use_signal(|| {
+        state()
+            .db
+            .message_keep()
+            .unwrap_or_else(|_| "forever".into())
+    });
+    let mut keep_applied_at = use_signal(|| 0i64);
     if !refresh_started() {
         refresh_started.set(true);
         spawn(async move {
@@ -1696,6 +1703,12 @@ fn MessagesPage() -> Element {
         });
     }
     let _ = refresh();
+    // Enforce keep window at most once a minute while Channels is open.
+    let now = crate::db::unix_now();
+    if now.saturating_sub(keep_applied_at()) >= 60 {
+        keep_applied_at.set(now);
+        let _ = state().db.apply_message_keep();
+    }
     let radio = state().radio.snapshot();
     let channels = state().db.list_channels().unwrap_or_default();
     let linked = radio.state == "connected";
@@ -2120,6 +2133,47 @@ fn MessagesPage() -> Element {
         div { class: "mx-auto flex max-w-6xl flex-col gap-4",
             PageHeading { icon: IconName::Messages, title: "Channels".to_string(),
                 "Public and private channels on the headquarters companion. Secrets are never shown here."
+            }
+            Card { title: "Keep messages".to_string(), icon: Some(IconName::Clock),
+                p { class: "mb-3 text-sm text-muted-foreground",
+                    "Older channel messages are removed automatically. Roster, secrets, and audit stay."
+                }
+                div { class: "flex flex-wrap gap-2",
+                    RetentionChoice { label: "1 hour", value: "1h", current: message_keep(), onpick: move |value: String| {
+                        let _ = state().db.set_message_keep(&value);
+                        message_keep.set(value);
+                        let _ = state().db.apply_message_keep();
+                        keep_applied_at.set(crate::db::unix_now());
+                    } }
+                    RetentionChoice { label: "6 hours", value: "6h", current: message_keep(), onpick: move |value: String| {
+                        let _ = state().db.set_message_keep(&value);
+                        message_keep.set(value);
+                        let _ = state().db.apply_message_keep();
+                        keep_applied_at.set(crate::db::unix_now());
+                    } }
+                    RetentionChoice { label: "24 hours", value: "24h", current: message_keep(), onpick: move |value: String| {
+                        let _ = state().db.set_message_keep(&value);
+                        message_keep.set(value);
+                        let _ = state().db.apply_message_keep();
+                        keep_applied_at.set(crate::db::unix_now());
+                    } }
+                    RetentionChoice { label: "1 week", value: "7d", current: message_keep(), onpick: move |value: String| {
+                        let _ = state().db.set_message_keep(&value);
+                        message_keep.set(value);
+                        let _ = state().db.apply_message_keep();
+                        keep_applied_at.set(crate::db::unix_now());
+                    } }
+                    RetentionChoice { label: "30 days", value: "30d", current: message_keep(), onpick: move |value: String| {
+                        let _ = state().db.set_message_keep(&value);
+                        message_keep.set(value);
+                        let _ = state().db.apply_message_keep();
+                        keep_applied_at.set(crate::db::unix_now());
+                    } }
+                    RetentionChoice { label: "Forever", value: "forever", current: message_keep(), onpick: move |value: String| {
+                        let _ = state().db.set_message_keep(&value);
+                        message_keep.set(value);
+                    } }
+                }
             }
             Card { title: "Create channel".to_string(), icon: Some(IconName::Messages),
                 div { class: "flex flex-col gap-3 sm:flex-row sm:items-end",
@@ -2707,8 +2761,6 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
         .ok()
         .flatten()
         .unwrap_or_else(|| "Metis HQ".into());
-    let (retention, days) = state().db.retention().unwrap_or_else(|_| ("forever".into(), 30));
-    let pmtiles = state().db.setting("pmtiles_path").ok().flatten().unwrap_or_default();
     let secret_label = state()
         .db
         .secret_store_label()
@@ -2730,9 +2782,13 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
     let mut hq_name = use_signal(|| saved_hq);
     let mut time_format = use_signal(|| saved_time);
     let mut date_format = use_signal(|| saved_date);
-    let mut retention_mode = use_signal(|| retention);
-    let mut retention_days = use_signal(|| days.to_string());
-    let mut pmtiles_path = use_signal(|| pmtiles);
+    let mut message_keep = use_signal(|| {
+        state()
+            .db
+            .message_keep()
+            .unwrap_or_else(|_| "forever".into())
+    });
+    let mut regions_tick = use_signal(|| 0u32);
     let mut confirm_purge = use_signal(|| false);
     let mut purge_note = use_signal(String::new);
     let mut device_query = use_signal(String::new);
@@ -2827,13 +2883,13 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
         .is_saved_radio(&radio_name())
         .unwrap_or(false);
 
-    let preview = if retention_mode() == "forever" {
-        None
-    } else {
-        let days: i64 = retention_days().parse().unwrap_or(30).max(1);
-        let cutoff = unix_now() - days * 86_400;
-        state().db.purge_preview(cutoff).ok().map(|preview| (cutoff, preview))
-    };
+    let preview = crate::db::Db::message_keep_cutoff(&message_keep()).and_then(|cutoff| {
+        state()
+            .db
+            .purge_preview(cutoff)
+            .ok()
+            .map(|preview| (cutoff, preview))
+    });
 
     rsx! {
         div { class: "mx-auto flex max-w-4xl flex-col gap-4",
@@ -3072,34 +3128,43 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
             }
             Card { title: "History", icon: Some(IconName::Clock),
                 p { class: "mb-3 text-sm text-muted-foreground",
-                    "Messages, routes, and location trails are kept forever until you set a window and confirm a purge. The roster, secrets, and audit log stay."
+                    "Same keep window as Channels. Messages auto-trim; use Purge to also clear old routes, locations, and telemetry. Roster, secrets, and audit stay."
                 }
                 div { class: "mb-3 flex flex-wrap gap-2",
-                    RetentionChoice { label: "Forever", value: "forever", current: retention_mode(), onpick: move |value| retention_mode.set(value) }
-                    RetentionChoice { label: "30 days", value: "30", current: retention_mode(), onpick: move |value| { retention_days.set("30".into()); retention_mode.set(value); } }
-                    RetentionChoice { label: "90 days", value: "90", current: retention_mode(), onpick: move |value| { retention_days.set("90".into()); retention_mode.set(value); } }
-                    RetentionChoice { label: "1 year", value: "365", current: retention_mode(), onpick: move |value| { retention_days.set("365".into()); retention_mode.set(value); } }
-                    RetentionChoice { label: "Custom", value: "custom", current: retention_mode(), onpick: move |value| retention_mode.set(value) }
-                }
-                if retention_mode() == "custom" {
-                    div { class: "mb-3 max-w-xs",
-                        TextInput {
-                            value: retention_days(),
-                            placeholder: "Days",
-                            oninput: move |event: FormEvent| retention_days.set(event.value()),
-                        }
-                    }
+                    RetentionChoice { label: "1 hour", value: "1h", current: message_keep(), onpick: move |value: String| {
+                        let _ = state().db.set_message_keep(&value);
+                        message_keep.set(value);
+                        let _ = state().db.apply_message_keep();
+                    } }
+                    RetentionChoice { label: "6 hours", value: "6h", current: message_keep(), onpick: move |value: String| {
+                        let _ = state().db.set_message_keep(&value);
+                        message_keep.set(value);
+                        let _ = state().db.apply_message_keep();
+                    } }
+                    RetentionChoice { label: "24 hours", value: "24h", current: message_keep(), onpick: move |value: String| {
+                        let _ = state().db.set_message_keep(&value);
+                        message_keep.set(value);
+                        let _ = state().db.apply_message_keep();
+                    } }
+                    RetentionChoice { label: "1 week", value: "7d", current: message_keep(), onpick: move |value: String| {
+                        let _ = state().db.set_message_keep(&value);
+                        message_keep.set(value);
+                        let _ = state().db.apply_message_keep();
+                    } }
+                    RetentionChoice { label: "30 days", value: "30d", current: message_keep(), onpick: move |value: String| {
+                        let _ = state().db.set_message_keep(&value);
+                        message_keep.set(value);
+                        let _ = state().db.apply_message_keep();
+                    } }
+                    RetentionChoice { label: "Forever", value: "forever", current: message_keep(), onpick: move |value: String| {
+                        let _ = state().db.set_message_keep(&value);
+                        message_keep.set(value);
+                    } }
                 }
                 div { class: "flex gap-2",
                     Button {
-                        kind: ButtonKind::Ghost,
-                        onclick: move |_| save_retention(retention_mode(), retention_days()),
-                        Icon { name: IconName::Save, size: 14 }
-                        "Save retention"
-                    }
-                    Button {
                         kind: ButtonKind::Danger,
-                        disabled: retention_mode() == "forever",
+                        disabled: message_keep() == "forever",
                         onclick: move |_| confirm_purge.set(true),
                         Icon { name: IconName::Trash, size: 14 }
                         "Purge older data"
@@ -3109,29 +3174,100 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                     p { class: "mt-2 text-sm text-muted-foreground", "{purge_note}" }
                 }
             }
-            Card { title: "Offline map tiles", icon: Some(IconName::Map),
-                p { class: "mb-3 text-sm text-muted-foreground",
-                    "Point at a local Protomaps/OSM PMTiles archive for an offline basemap. No CDN tiles — the Map page reads this file through a desktop protocol."
-                }
-                div { class: "flex gap-2",
-                    TextInput {
-                        value: pmtiles_path(),
-                        placeholder: "/path/to/region.pmtiles",
-                        oninput: move |event: FormEvent| pmtiles_path.set(event.value()),
-                    }
-                    Button {
-                        kind: ButtonKind::Ghost,
-                        onclick: move |_| {
-                            let path = pmtiles_path();
-                            let _ = state().db.set_setting("pmtiles_path", &path);
-                            crate::pmtiles_path::set_pmtiles_path(if path.trim().is_empty() {
-                                None
-                            } else {
-                                Some(std::path::PathBuf::from(path.trim()))
-                            });
-                        },
-                        Icon { name: IconName::Save, size: 14 }
-                        "Save"
+            {
+                let _ = regions_tick();
+                let regions = crate::map_tiles::list_installed_regions(&state().db);
+                let active = crate::map_tiles::active_region_id(&state().db).unwrap_or_default();
+                let dl = crate::map_tiles::download_status();
+                rsx! {
+                    Card { title: "Offline map packs", icon: Some(IconName::Map),
+                        p { class: "mb-3 text-sm text-muted-foreground",
+                            "Installed packs only. Download new areas from Map (ZIP + radius). One pack covers Streets, Terrain, and Topo."
+                        }
+                        if dl.running || (dl.phase == "error" && !dl.detail.is_empty()) {
+                            p { class: "mb-2 text-xs text-muted-foreground",
+                                if dl.running {
+                                    "Downloading {dl.region_id}: {dl.detail}"
+                                } else {
+                                    "Last error: {dl.detail}"
+                                }
+                            }
+                        }
+                        if regions.is_empty() {
+                            p { class: "text-sm text-muted-foreground",
+                                "No packs yet. Open Map and use Download offline map."
+                            }
+                        }
+                        div { class: "flex flex-col gap-2",
+                            for region in regions.iter() {
+                                {
+                                    let id = region.id.clone();
+                                    let id_active = id.clone();
+                                    let id_dl = id.clone();
+                                    let id_del = id.clone();
+                                    let is_active = active == region.id;
+                                    let status = region.status.clone();
+                                    let name = region.name.clone();
+                                    let bytes = region.bytes;
+                                    let bbox = format!(
+                                        "{:.2},{:.2} → {:.2},{:.2}",
+                                        region.bbox[0], region.bbox[1], region.bbox[2], region.bbox[3]
+                                    );
+                                    rsx! {
+                                        div {
+                                            key: "{id}",
+                                            class: "flex flex-wrap items-center gap-2 rounded-md border border-white/10 bg-[#151a20] px-3 py-2",
+                                            label { class: "flex min-w-[10rem] flex-1 items-center gap-2 text-sm",
+                                                input {
+                                                    r#type: "radio",
+                                                    name: "map-region-active",
+                                                    checked: is_active,
+                                                    oninput: move |_| {
+                                                        let _ = crate::map_tiles::set_active_region(&state().db, &id_active);
+                                                        regions_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                                    }
+                                                }
+                                                span { class: "font-medium", "{name}" }
+                                            }
+                                            span { class: "font-mono text-[0.65rem] text-muted-foreground", "{bbox}" }
+                                            span { class: "text-[0.65rem] text-muted-foreground",
+                                                "{status}"
+                                                if bytes > 0 {
+                                                    " · {bytes / 1_000_000} MB"
+                                                }
+                                            }
+                                            Button {
+                                                kind: ButtonKind::Ghost,
+                                                disabled: dl.running,
+                                                onclick: move |_| {
+                                                    crate::map_tiles::start_download(state().db.clone(), id_dl.clone());
+                                                    regions_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                                    spawn(async move {
+                                                        for _ in 0..120 {
+                                                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                                            regions_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                                            if !crate::map_tiles::download_status().running {
+                                                                break;
+                                                            }
+                                                        }
+                                                    });
+                                                },
+                                                "Update"
+                                            }
+                                            Button {
+                                                kind: ButtonKind::Ghost,
+                                                disabled: dl.running,
+                                                onclick: move |_| {
+                                                    let _ = crate::map_tiles::delete_region(&state().db, &id_del);
+                                                    regions_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                                },
+                                                Icon { name: IconName::Trash, size: 14 }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -3844,25 +3980,6 @@ fn DeviceCard(
             }
         }
     }
-}
-
-fn save_retention(mode: String, days: String) {
-    let stored = if mode == "forever" {
-        "forever".to_string()
-    } else if mode == "custom" {
-        "custom".to_string()
-    } else {
-        mode.clone()
-    };
-    let day_value = if stored == "forever" {
-        days
-    } else if stored == "custom" {
-        days.parse::<i64>().unwrap_or(30).max(1).to_string()
-    } else {
-        stored.clone()
-    };
-    let _ = state().db.set_setting("retention", &stored);
-    let _ = state().db.set_setting("retention_days", &day_value);
 }
 
 #[component]

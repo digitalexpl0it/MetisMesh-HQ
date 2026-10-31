@@ -1,5 +1,6 @@
 mod ble_pair;
 mod db;
+mod map_tiles;
 mod path;
 mod pmtiles_path;
 mod radio;
@@ -27,8 +28,11 @@ fn main() {
         eprintln!("unable to prepare the headquarters database: {err}");
         std::process::exit(1);
     }
-    if let Ok(Some(path)) = db.setting("pmtiles_path") {
-        pmtiles_path::set_pmtiles_path(Some(PathBuf::from(path)));
+    map_tiles::sync_active_path(&db);
+    if pmtiles_path::current_pmtiles_path().is_none() {
+        if let Ok(Some(path)) = db.setting("pmtiles_path") {
+            pmtiles_path::set_pmtiles_path(Some(PathBuf::from(path)));
+        }
     }
     let db = Arc::new(db);
     let secrets = Arc::new(Secrets::new(&data));
@@ -105,20 +109,74 @@ fn serve_metis_protocol(
 ) -> dioxus::desktop::wry::http::Response<Cow<'static, [u8]>> {
     use dioxus::desktop::wry::http::{header, Response, StatusCode};
 
-    // wry/http parses `metis://pmtiles/basemap` as host=`pmtiles`, path=`/basemap`.
-    // Prefer `metis://local/pmtiles/basemap` (path `/pmtiles/basemap`); accept both.
     let path = request.uri().path();
     let host = request.uri().host().unwrap_or("");
-    let is_basemap = path == "/pmtiles/basemap"
-        || path.ends_with("/pmtiles/basemap")
-        || (host == "pmtiles" && (path == "/basemap" || path.ends_with("/basemap")));
-    if !is_basemap {
+
+    // Bundled outline GeoJSON (tiny style JSON references these URLs).
+    let geojson_name = path
+        .strip_prefix("/geojson/")
+        .or_else(|| {
+            path.rsplit_once("/geojson/")
+                .map(|(_, rest)| rest.trim_start_matches('/'))
+        })
+        .filter(|s| !s.is_empty());
+    if let Some(name) = geojson_name {
+        let body: &'static [u8] = match name {
+            "world-land" | "world-land.geojson" => {
+                include_bytes!("../assets/world-land.geojson").as_slice()
+            }
+            "admin0-borders" | "admin0-borders.geojson" => {
+                include_bytes!("../assets/admin0-borders.geojson").as_slice()
+            }
+            "admin1-lines" | "admin1-lines.geojson" => {
+                include_bytes!("../assets/admin1-lines.geojson").as_slice()
+            }
+            _ => {
+                return Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body(Cow::Borrowed(b"geojson not found" as &[u8]))
+                    .unwrap_or_else(|_| {
+                        Response::new(Cow::Borrowed(b"geojson not found" as &[u8]))
+                    });
+            }
+        };
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/geo+json")
+            .header(header::CONTENT_LENGTH, body.len().to_string())
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header(header::CACHE_CONTROL, "public, max-age=86400")
+            .body(Cow::Borrowed(body))
+            .unwrap_or_else(|_| Response::new(Cow::Borrowed(body)));
+    }
+
+    // Paths: /pmtiles/basemap (active) or /pmtiles/{region_id}
+    let region_from_path = path
+        .strip_prefix("/pmtiles/")
+        .or_else(|| {
+            path.rsplit_once("/pmtiles/")
+                .map(|(_, rest)| rest.trim_start_matches('/'))
+        })
+        .filter(|s| !s.is_empty());
+    let legacy = host == "pmtiles"
+        && (path == "/basemap" || path.ends_with("/basemap") || path == "/");
+    if region_from_path.is_none() && !legacy {
         return Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(Cow::Borrowed(b"not found" as &[u8]))
             .unwrap_or_else(|_| Response::new(Cow::Borrowed(b"not found" as &[u8])));
     }
-    let Some(file_path) = pmtiles_path::current_pmtiles_path() else {
+    let file_path = region_from_path
+        .and_then(|id| {
+            if id == "basemap" {
+                pmtiles_path::current_pmtiles_path()
+            } else {
+                map_tiles::region_pmtiles_path(id)
+                    .or_else(pmtiles_path::current_pmtiles_path)
+            }
+        })
+        .or_else(pmtiles_path::current_pmtiles_path);
+    let Some(file_path) = file_path else {
         return Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(Cow::Borrowed(b"pmtiles not configured" as &[u8]))

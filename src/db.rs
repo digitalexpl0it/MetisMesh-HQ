@@ -263,6 +263,29 @@ impl Db {
         if self.setting("retention_days")?.is_none() {
             self.set_setting("retention_days", "30")?;
         }
+        if self.setting("message_keep")?.is_none() {
+            // Prefer forever; map older day-based retention when present.
+            let migrated = match self.setting("retention")?.as_deref() {
+                Some("30") => "30d",
+                Some("90") | Some("365") => "30d",
+                Some("forever") | None => "forever",
+                Some("custom") => {
+                    let days = self
+                        .setting("retention_days")?
+                        .and_then(|v| v.parse::<i64>().ok())
+                        .unwrap_or(30);
+                    if days <= 1 {
+                        "24h"
+                    } else if days <= 7 {
+                        "7d"
+                    } else {
+                        "30d"
+                    }
+                }
+                Some(_) => "forever",
+            };
+            self.set_setting("message_keep", migrated)?;
+        }
         if self.setting("channel_generation")?.is_none() {
             self.set_setting("channel_generation", "0")?;
         }
@@ -311,6 +334,76 @@ impl Db {
             .and_then(|value| value.parse().ok())
             .unwrap_or(30);
         Ok((mode, days))
+    }
+
+    /// How long to keep channel/DM messages: `1h` | `6h` | `24h` | `7d` | `30d` | `forever`.
+    pub fn message_keep(&self) -> Result<String> {
+        Ok(self
+            .setting("message_keep")?
+            .unwrap_or_else(|| "forever".into()))
+    }
+
+    pub fn set_message_keep(&self, keep: &str) -> Result<()> {
+        let normalized = match keep {
+            "1h" | "6h" | "24h" | "7d" | "30d" | "forever" => keep,
+            _ => "forever",
+        };
+        self.set_setting("message_keep", normalized)?;
+        // Keep legacy Settings fields roughly in sync for older UI paths.
+        match normalized {
+            "forever" => {
+                self.set_setting("retention", "forever")?;
+            }
+            "30d" => {
+                self.set_setting("retention", "30")?;
+                self.set_setting("retention_days", "30")?;
+            }
+            "7d" => {
+                self.set_setting("retention", "custom")?;
+                self.set_setting("retention_days", "7")?;
+            }
+            "24h" | "6h" | "1h" => {
+                self.set_setting("retention", "custom")?;
+                self.set_setting("retention_days", "1")?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub fn message_keep_seconds(keep: &str) -> Option<i64> {
+        match keep {
+            "1h" => Some(60 * 60),
+            "6h" => Some(6 * 60 * 60),
+            "24h" => Some(24 * 60 * 60),
+            "7d" => Some(7 * 24 * 60 * 60),
+            "30d" => Some(30 * 24 * 60 * 60),
+            _ => None,
+        }
+    }
+
+    pub fn message_keep_cutoff(keep: &str) -> Option<i64> {
+        Self::message_keep_seconds(keep).map(|secs| unix_now() - secs)
+    }
+
+    /// Delete messages older than the configured keep window. Returns rows removed.
+    pub fn apply_message_keep(&self) -> Result<u64> {
+        let keep = self.message_keep()?;
+        let Some(cutoff) = Self::message_keep_cutoff(&keep) else {
+            return Ok(0);
+        };
+        let conn = self.lock();
+        let deleted = conn.execute(
+            "DELETE FROM messages WHERE received_at < ?1",
+            params![cutoff],
+        )?;
+        if deleted > 0 {
+            conn.execute(
+                "DELETE FROM paths WHERE message_id IS NOT NULL AND message_id NOT IN (SELECT id FROM messages)",
+                [],
+            )?;
+        }
+        Ok(deleted as u64)
     }
 
     pub fn upsert_radio(&self, transport: &str, address: &str, label: &str) -> Result<i64> {

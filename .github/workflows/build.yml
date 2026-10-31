@@ -32,7 +32,7 @@ jobs:
             artifact: metis-mesh-hq-windows-x86_64
             binary: target/release/metis-mesh-hq.exe
           - name: macOS
-            os: macos-14
+            os: macos-15
             artifact: metis-mesh-hq-macos-aarch64
             binary: target/release/metis-mesh-hq
 

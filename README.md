@@ -2,7 +2,7 @@
 
 Local emergency headquarters for [MeshCore](https://meshcore.co.uk/) communities.
 
-Churches, neighborhoods, and volunteer groups run this on a laptop or a LattePanda next to a MeshCore companion radio. It keeps talking when the internet is gone. No cloud account. No phone home.
+Churches, neighborhoods, and volunteer groups run this on a regular computer sitting next to a MeshCore companion radio. It keeps working when the internet drops. No cloud account, and it does not call home.
 
 ## What it does
 

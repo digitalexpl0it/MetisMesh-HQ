@@ -31,15 +31,17 @@ pub struct NodeRow {
     pub contact_type: u8,
     pub enrollment: Enrollment,
     pub last_heard: Option<i64>,
-    #[allow(dead_code)]
     pub last_advert: Option<i64>,
     pub lat: Option<f64>,
     pub lon: Option<f64>,
     pub has_gps: bool,
     pub prefix: String,
     pub hop_bytes: Vec<u8>,
-    #[allow(dead_code)]
     pub path_len: i64,
+    /// Relative file under `data/qr/` when a contact QR has been generated.
+    pub qr_file: Option<String>,
+    /// Exact `meshcore://contact/add…` URI the file encodes (stale if name/type changes).
+    pub qr_uri: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +94,8 @@ pub struct ChannelRow {
     pub unread_count: i64,
     pub last_message_at: Option<i64>,
     pub last_text: Option<String>,
+    /// Per-channel override: `1h`…`forever`, or `None` to use the global default.
+    pub message_keep: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -181,6 +185,18 @@ impl Db {
         );
         let _ = conn.execute(
             "ALTER TABLE channels ADD COLUMN created_at INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE channels ADD COLUMN message_keep TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE nodes ADD COLUMN qr_file TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE nodes ADD COLUMN qr_uri TEXT",
             [],
         );
         let _ = conn.execute_batch(
@@ -327,15 +343,6 @@ impl Db {
         Ok(())
     }
 
-    pub fn retention(&self) -> Result<(String, i64)> {
-        let mode = self.setting("retention")?.unwrap_or_else(|| "forever".into());
-        let days = self
-            .setting("retention_days")?
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(30);
-        Ok((mode, days))
-    }
-
     /// How long to keep channel/DM messages: `1h` | `6h` | `24h` | `7d` | `30d` | `forever`.
     pub fn message_keep(&self) -> Result<String> {
         Ok(self
@@ -386,24 +393,81 @@ impl Db {
         Self::message_keep_seconds(keep).map(|secs| unix_now() - secs)
     }
 
-    /// Delete messages older than the configured keep window. Returns rows removed.
-    pub fn apply_message_keep(&self) -> Result<u64> {
-        let keep = self.message_keep()?;
-        let Some(cutoff) = Self::message_keep_cutoff(&keep) else {
-            return Ok(0);
-        };
-        let conn = self.lock();
-        let deleted = conn.execute(
-            "DELETE FROM messages WHERE received_at < ?1",
-            params![cutoff],
+    /// Normalize a keep token; returns `None` for "use global default".
+    pub fn normalize_message_keep(keep: &str) -> Option<&'static str> {
+        match keep {
+            "1h" => Some("1h"),
+            "6h" => Some("6h"),
+            "24h" => Some("24h"),
+            "7d" => Some("7d"),
+            "30d" => Some("30d"),
+            "forever" => Some("forever"),
+            _ => None,
+        }
+    }
+
+    pub fn set_channel_message_keep(&self, name: &str, keep: Option<&str>) -> Result<()> {
+        let value = keep.and_then(Self::normalize_message_keep);
+        self.lock().execute(
+            "UPDATE channels SET message_keep = ?2 WHERE name = ?1",
+            params![name, value],
         )?;
+        Ok(())
+    }
+
+    /// Delete messages older than each channel's effective keep (override or global).
+    /// Non-channel messages (DMs) use the global default only.
+    pub fn apply_message_keep(&self) -> Result<u64> {
+        let global = self.message_keep()?;
+        let conn = self.lock();
+        let mut channel_keeps: Vec<(i64, Option<String>)> = {
+            let mut stmt = conn.prepare(
+                "SELECT slot, NULLIF(TRIM(COALESCE(message_keep, '')), '') FROM channels",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+        let mut deleted: u64 = 0;
+
+        for (slot, keep_raw) in channel_keeps.drain(..) {
+            let effective = keep_raw
+                .as_deref()
+                .and_then(Self::normalize_message_keep)
+                .unwrap_or(global.as_str());
+            let Some(cutoff) = Self::message_keep_cutoff(effective) else {
+                continue;
+            };
+            deleted += conn.execute(
+                "DELETE FROM messages
+                 WHERE kind = 'channel' AND channel_idx = ?1 AND received_at < ?2",
+                params![slot, cutoff],
+            )? as u64;
+        }
+
+        if let Some(cutoff) = Self::message_keep_cutoff(&global) {
+            // Orphan channel_idx rows plus DMs / other kinds.
+            deleted += conn.execute(
+                "DELETE FROM messages
+                 WHERE received_at < ?1
+                   AND (
+                     kind IS NULL OR kind != 'channel' OR channel_idx IS NULL
+                     OR channel_idx NOT IN (SELECT slot FROM channels)
+                   )",
+                params![cutoff],
+            )? as u64;
+        }
+
         if deleted > 0 {
             conn.execute(
                 "DELETE FROM paths WHERE message_id IS NOT NULL AND message_id NOT IN (SELECT id FROM messages)",
                 [],
             )?;
         }
-        Ok(deleted as u64)
+        Ok(deleted)
     }
 
     pub fn upsert_radio(&self, transport: &str, address: &str, label: &str) -> Result<i64> {
@@ -542,13 +606,18 @@ impl Db {
                      ORDER BY m.received_at DESC, m.id DESC LIMIT 1),
                     (SELECT m.display_text FROM messages m
                      WHERE m.kind = 'channel' AND m.channel_idx = c.slot
-                     ORDER BY m.received_at DESC, m.id DESC LIMIT 1)
+                     ORDER BY m.received_at DESC, m.id DESC LIMIT 1),
+                    NULLIF(TRIM(COALESCE(c.message_keep, '')), '')
              FROM channels c
              WHERE COALESCE(c.active, 1) = 1
              ORDER BY c.slot ASC, c.name COLLATE NOCASE",
         )?;
         let rows = stmt
             .query_map([], |row| {
+                let keep_raw: Option<String> = row.get(9)?;
+                let message_keep = keep_raw.and_then(|v| {
+                    Self::normalize_message_keep(&v).map(str::to_string)
+                });
                 Ok(ChannelRow {
                     name: row.get(0)?,
                     slot: row.get(1)?,
@@ -562,6 +631,7 @@ impl Db {
                     unread_count: row.get(6)?,
                     last_message_at: row.get(7)?,
                     last_text: row.get(8)?,
+                    message_keep,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -844,7 +914,7 @@ impl Db {
         let conn = self.lock();
         let mut stmt = conn.prepare(
             "SELECT pubkey, name, requested_name, contact_type, enrollment, last_heard,
-                    last_advert, lat, lon, prefix, hop_bytes, path_len
+                    last_advert, lat, lon, prefix, hop_bytes, path_len, qr_file, qr_uri
              FROM nodes WHERE pubkey LIKE ?1 || '%'",
         )?;
         let rows = stmt.query_map(params![prefix_hex], map_node)?;
@@ -855,7 +925,7 @@ impl Db {
         let conn = self.lock();
         let mut stmt = conn.prepare(
             "SELECT pubkey, name, requested_name, contact_type, enrollment, last_heard,
-                    last_advert, lat, lon, prefix, hop_bytes, path_len
+                    last_advert, lat, lon, prefix, hop_bytes, path_len, qr_file, qr_uri
              FROM nodes
              ORDER BY CASE enrollment
                 WHEN 'pending' THEN 0
@@ -866,6 +936,55 @@ impl Db {
         )?;
         let rows = stmt.query_map([], map_node)?;
         rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Error::from)
+    }
+
+    /// Slim row for the QR worker.
+    pub fn qr_contact_row(&self, pubkey: &str) -> Result<Option<QrContactRow>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT pubkey, name, contact_type, enrollment, qr_file, qr_uri
+             FROM nodes WHERE pubkey = ?1",
+            params![pubkey],
+            |row| {
+                Ok(QrContactRow {
+                    pubkey: row.get(0)?,
+                    name: row.get(1)?,
+                    contact_type: row.get(2)?,
+                    enrollment: row.get(3)?,
+                    qr_file: row.get(4)?,
+                    qr_uri: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Error::from)
+    }
+
+    pub fn set_node_qr(&self, pubkey: &str, qr_uri: &str, qr_file: &str) -> Result<()> {
+        self.lock().execute(
+            "UPDATE nodes SET qr_uri = ?2, qr_file = ?3 WHERE pubkey = ?1",
+            params![pubkey, qr_uri, qr_file],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_node_name(&self, pubkey: &str, name: &str) -> Result<()> {
+        self.lock().execute(
+            "UPDATE nodes SET name = ?2 WHERE pubkey = ?1",
+            params![pubkey, name],
+        )?;
+        Ok(())
+    }
+
+    /// All contact pubkeys — startup QR worker walks these and skips up-to-date rows.
+    pub fn list_qr_backfill_pubkeys(&self) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT pubkey FROM nodes WHERE TRIM(COALESCE(pubkey, '')) != ''",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::from)
     }
 
     pub fn pending_nodes(&self) -> Result<Vec<NodeRow>> {
@@ -1077,6 +1196,32 @@ impl Db {
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Error::from)
+    }
+
+    /// Latest RF sample per pubkey: (noise, rssi, snr, at).
+    pub fn latest_rf_by_pubkey(&self) -> Result<std::collections::HashMap<String, (i64, i64, f64, i64)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT pubkey, noise_floor, last_rssi, snr, at FROM rf_samples r
+             WHERE at = (SELECT MAX(at) FROM rf_samples r2 WHERE r2.pubkey = r.pubkey)",
+        )?;
+        let mut map = std::collections::HashMap::new();
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ),
+            ))
+        })?;
+        for row in rows {
+            let (key, sample) = row?;
+            map.insert(key, sample);
+        }
+        Ok(map)
     }
 
     pub fn queue_text(&self, pubkey: &str, body: &str, display: &str) -> Result<i64> {
@@ -1570,6 +1715,16 @@ impl Db {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct QrContactRow {
+    pub pubkey: String,
+    pub name: String,
+    pub contact_type: u8,
+    pub enrollment: String,
+    pub qr_file: Option<String>,
+    pub qr_uri: Option<String>,
+}
+
 fn map_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRow> {
     let lat: Option<f64> = row.get(7)?;
     let lon: Option<f64> = row.get(8)?;
@@ -1588,6 +1743,8 @@ fn map_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRow> {
         prefix: row.get(9)?,
         hop_bytes: row.get(10)?,
         path_len: row.get(11)?,
+        qr_file: row.get(12)?,
+        qr_uri: row.get(13)?,
     })
 }
 

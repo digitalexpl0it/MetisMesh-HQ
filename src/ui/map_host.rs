@@ -370,7 +370,7 @@ fn vector_theme(kind: BasemapKind) -> VectorTheme {
             neighbourhood_label: "#d6b981",
             highway_shield_text: "#1c1917",
         },
-        // Streets: orange freeways, slate arterials, pill street labels, cyan cities.
+        // Streets: orange freeways, muted arterials (so cities/labels read), pill labels.
         _ => VectorTheme {
             bg: "#0b1220",
             earth: "#1a2740",
@@ -379,12 +379,13 @@ fn vector_theme(kind: BasemapKind) -> VectorTheme {
             forest: "#163028",
             urban: "#243044",
             building: "#2a3548",
-            highway: "#f97316",
+            highway: "#c2410c",
             highway_casing: "#7c2d12",
-            major: "#cbd5e1",
-            minor: "#475569",
-            path: "#334155",
-            boundary: "#64748b",
+            // Darker than labels/cities so the grid doesn’t wash out text.
+            major: "#3d4f66",
+            minor: "#2a384c",
+            path: "#243044",
+            boundary: "#4b5c73",
             street_label: "#0f172a",
             street_halo: "#f1f5f9",
             city_label: "#38bdf8",

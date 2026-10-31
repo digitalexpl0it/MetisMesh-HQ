@@ -9,6 +9,9 @@ use std::sync::{Arc, OnceLock};
 use chrono::{Local, TimeZone, Timelike};
 use dioxus::prelude::*;
 
+use crate::contact_qr::{
+    contact_add_uri, enqueue_contact_qr, qr_data_url_from_file, qr_public_url,
+};
 use crate::db::{unix_now, Db, TelemetryPoint};
 use crate::radio::{channel_sender_and_body, BleRadio, RadioHandle, RadioStatus};
 use crate::radio_presets::{
@@ -1835,8 +1838,18 @@ fn MessagesPage() -> Element {
                             }
                         }
                     }
-                    if !note().is_empty() {
-                        p { class: "text-xs text-amber-200", "{note}" }
+                    div { class: "flex flex-wrap items-center gap-2",
+                        ChannelKeepSelect {
+                            channel_name: channel.name.clone(),
+                            current: channel
+                                .message_keep
+                                .clone()
+                                .unwrap_or_else(|| "default".into()),
+                            on_done: move |msg: String| note.set(msg),
+                        }
+                        if !note().is_empty() {
+                            p { class: "text-xs text-amber-200", "{note}" }
+                        }
                     }
                 }
                 div {
@@ -2134,9 +2147,9 @@ fn MessagesPage() -> Element {
             PageHeading { icon: IconName::Messages, title: "Channels".to_string(),
                 "Public and private channels on the headquarters companion. Secrets are never shown here."
             }
-            Card { title: "Keep messages".to_string(), icon: Some(IconName::Clock),
+            Card { title: "Default keep".to_string(), icon: Some(IconName::Clock),
                 p { class: "mb-3 text-sm text-muted-foreground",
-                    "Older channel messages are removed automatically. Roster, secrets, and audit stay."
+                    "System default for channels and DMs. Each channel can override this on its card or while open. Roster, secrets, and audit stay."
                 }
                 div { class: "flex flex-wrap gap-2",
                     RetentionChoice { label: "1 hour", value: "1h", current: message_keep(), onpick: move |value: String| {
@@ -2292,8 +2305,17 @@ fn MessagesPage() -> Element {
                                         span { "Slot {channel.slot}" }
                                     }
                                 }
-                                if can_toggle_visibility || can_delete {
-                                    div { class: "mt-3 flex flex-wrap gap-2 border-t border-border pt-3",
+                                div { class: "mt-3 flex flex-col gap-2 border-t border-border pt-3",
+                                    ChannelKeepSelect {
+                                        channel_name: name.clone(),
+                                        current: channel
+                                            .message_keep
+                                            .clone()
+                                            .unwrap_or_else(|| "default".into()),
+                                        on_done: move |msg: String| note.set(msg),
+                                    }
+                                    if can_toggle_visibility || can_delete {
+                                        div { class: "flex flex-wrap gap-2",
                                         if can_toggle_visibility {
                                             Button {
                                                 kind: ButtonKind::Ghost,
@@ -2351,6 +2373,7 @@ fn MessagesPage() -> Element {
                                                 Icon { name: IconName::Close, size: 14 }
                                                 "Delete"
                                             }
+                                        }
                                         }
                                     }
                                 }
@@ -3128,7 +3151,7 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
             }
             Card { title: "History", icon: Some(IconName::Clock),
                 p { class: "mb-3 text-sm text-muted-foreground",
-                    "Same keep window as Channels. Messages auto-trim; use Purge to also clear old routes, locations, and telemetry. Roster, secrets, and audit stay."
+                    "Default keep for channels and DMs (Channels page can override per channel). Messages auto-trim; use Purge to also clear old routes, locations, and telemetry. Roster, secrets, and audit stay."
                 }
                 div { class: "mb-3 flex flex-wrap gap-2",
                     RetentionChoice { label: "1 hour", value: "1h", current: message_keep(), onpick: move |value: String| {
@@ -3334,6 +3357,91 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                             p { class: "mb-3 break-all font-mono text-xs text-muted-foreground",
                                 if radio.public_key.is_empty() { "—" } else { "{radio.public_key}" }
                             }
+                            if !radio.public_key.is_empty() {
+                                {
+                                    let hq_label = if hq_name().trim().is_empty() {
+                                        "Metis HQ".to_string()
+                                    } else {
+                                        hq_name()
+                                    };
+                                    let uri = contact_add_uri(&hq_label, &radio.public_key, 1);
+                                    let hq_row = state()
+                                        .db
+                                        .qr_contact_row(&radio.public_key)
+                                        .ok()
+                                        .flatten();
+                                    let qr = hq_row
+                                        .as_ref()
+                                        .and_then(|row| row.qr_file.as_deref())
+                                        .and_then(qr_data_url_from_file)
+                                        .or_else(|| {
+                                            hq_row
+                                                .as_ref()
+                                                .and_then(|row| row.qr_file.as_deref())
+                                                .and_then(qr_public_url)
+                                        })
+                                        .unwrap_or_default();
+                                    if qr.is_empty() {
+                                        enqueue_contact_qr(&radio.public_key);
+                                    }
+                                    let uri_copy = uri.clone();
+                                    let qr_print = qr.clone();
+                                    let name_print = hq_label.clone();
+                                    let key_print = radio.public_key.clone();
+                                    rsx! {
+                                        div { class: "mb-4 flex flex-wrap items-start gap-4",
+                                            if !qr.is_empty() {
+                                                div {
+                                                    class: "shrink-0 overflow-hidden rounded-md border border-border bg-white p-1",
+                                                    style: "width:7.5rem;height:7.5rem;",
+                                                    img {
+                                                        src: "{qr}",
+                                                        alt: "HQ contact QR",
+                                                        class: "h-full w-full",
+                                                    }
+                                                }
+                                            } else {
+                                                p { class: "text-xs text-muted-foreground", "Generating QR…" }
+                                            }
+                                            div { class: "flex min-w-0 flex-1 flex-col gap-2",
+                                                p { class: "text-sm text-muted-foreground",
+                                                    "Scan with the MeshCore app to add this headquarters as a contact."
+                                                }
+                                                div { class: "flex flex-wrap gap-2",
+                                                    Button {
+                                                        kind: ButtonKind::Ghost,
+                                                        onclick: move |_| {
+                                                            let escaped = uri_copy
+                                                                .replace('\\', "\\\\")
+                                                                .replace('`', "\\`")
+                                                                .replace('$', "\\$");
+                                                            document::eval(&format!(
+                                                                "navigator.clipboard.writeText(`{escaped}`).catch(() => {{}})"
+                                                            ));
+                                                        },
+                                                        Icon { name: IconName::Copy, size: 14 }
+                                                        "Copy link"
+                                                    }
+                                                    Button {
+                                                        kind: ButtonKind::Ghost,
+                                                        disabled: qr_print.is_empty(),
+                                                        onclick: move |_| {
+                                                            print_contact_sheet(
+                                                                &name_print,
+                                                                &key_print,
+                                                                &uri,
+                                                                &qr_print,
+                                                            );
+                                                        },
+                                                        Icon { name: IconName::Inbox, size: 14 }
+                                                        "Print"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             div { class: "mb-3",
                                 label { class: "mb-1 block text-xs text-muted-foreground", "Share position in advert" }
                                 SelectInput {
@@ -3479,10 +3587,10 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                                 "Frequency, bandwidth, and spreading factor must match your local mesh. Some firmwares need a reboot after Apply."
                             }
                             div { class: "mb-3 flex flex-wrap items-center justify-between gap-2",
-                                div {
-                                    p { class: "text-xs uppercase tracking-[0.14em] text-muted-foreground", "Selected preset" }
+                                div { class: "min-w-0 flex-1 rounded-md border border-border bg-background px-3 py-2.5",
+                                    p { class: "mb-1.5 text-xs uppercase tracking-[0.14em] text-muted-foreground", "Selected preset" }
                                     p { class: "text-sm font-medium", "{active_preset}" }
-                                    p { class: "font-mono text-xs text-muted-foreground",
+                                    p { class: "mt-1 font-mono text-xs text-muted-foreground",
                                         "{current_freq:.3} MHz · SF{current_sf} · BW{current_bw} · CR{current_cr}"
                                     }
                                 }
@@ -3997,4 +4105,124 @@ fn RetentionChoice(
             "{label}"
         }
     }
+}
+
+/// Per-channel keep override (`default` = inherit global `message_keep`).
+#[component]
+fn ChannelKeepSelect(
+    channel_name: String,
+    current: String,
+    on_done: EventHandler<String>,
+) -> Element {
+    let select_id = format!("channel-keep-{}", channel_name.replace(' ', "-"));
+    rsx! {
+        div { class: "flex min-w-0 flex-wrap items-center gap-2",
+            label {
+                class: "text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground",
+                r#for: "{select_id.clone()}",
+                "Keep"
+            }
+            SelectInput {
+                id: select_id.clone(),
+                value: current.clone(),
+                onchange: {
+                    let channel_name = channel_name.clone();
+                    move |event: FormEvent| {
+                        let value = event.value();
+                        let keep = if value == "default" {
+                            None
+                        } else {
+                            Some(value.as_str())
+                        };
+                        match state().db.set_channel_message_keep(&channel_name, keep) {
+                            Ok(()) => {
+                                let _ = state().db.apply_message_keep();
+                                let label = match value.as_str() {
+                                    "default" => "default".into(),
+                                    other => other.to_string(),
+                                };
+                                on_done.call(format!("{channel_name} keep → {label}."));
+                            }
+                            Err(err) => on_done.call(err.to_string()),
+                        }
+                    }
+                },
+                option {
+                    value: "default",
+                    style: "background-color: #151a20; color: #f4f4f5;",
+                    "Use default"
+                }
+                option {
+                    value: "1h",
+                    style: "background-color: #151a20; color: #f4f4f5;",
+                    "1 hour"
+                }
+                option {
+                    value: "6h",
+                    style: "background-color: #151a20; color: #f4f4f5;",
+                    "6 hours"
+                }
+                option {
+                    value: "24h",
+                    style: "background-color: #151a20; color: #f4f4f5;",
+                    "24 hours"
+                }
+                option {
+                    value: "7d",
+                    style: "background-color: #151a20; color: #f4f4f5;",
+                    "1 week"
+                }
+                option {
+                    value: "30d",
+                    style: "background-color: #151a20; color: #f4f4f5;",
+                    "30 days"
+                }
+                option {
+                    value: "forever",
+                    style: "background-color: #151a20; color: #f4f4f5;",
+                    "Forever"
+                }
+            }
+        }
+    }
+}
+
+fn print_contact_sheet(name: &str, pubkey: &str, uri: &str, qr_data_url: &str) {
+    let payload = serde_json::json!({
+        "name": name,
+        "pubkey": pubkey,
+        "uri": uri,
+        "qr": qr_data_url,
+    });
+    let script = format!(
+        r#"(function(){{
+  var d = {payload};
+  var w = window.open('', '_blank', 'noopener,noreferrer,width=520,height=720');
+  if (!w) return;
+  function esc(s) {{
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }}
+  w.document.open();
+  w.document.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>' +
+    esc(d.name) + ' — MeshCore contact</title><style>' +
+    'body{{font-family:system-ui,sans-serif;padding:2rem;text-align:center;color:#0f172a;background:#fff}}' +
+    'h1{{font-size:1.35rem;margin:0 0 .35rem}}' +
+    'p{{margin:.35rem 0;color:#475569}}' +
+    'img{{width:240px;height:240px;margin:1.25rem auto;display:block;border:1px solid #e2e8f0}}' +
+    'code{{font-size:11px;word-break:break-all;display:block;margin-top:1rem}}' +
+    '.uri{{margin-top:1rem;font-size:11px;color:#64748b;word-break:break-all}}' +
+    '@media print{{body{{padding:0}}}}' +
+    '</style></head><body>' +
+    '<h1>' + esc(d.name) + '</h1>' +
+    '<p>Scan with MeshCore to add this contact</p>' +
+    '<img src="' + String(d.qr).replace(/"/g,'') + '" alt="Contact QR"/>' +
+    '<code>' + esc(d.pubkey) + '</code>' +
+    '<p class="uri">' + esc(d.uri) + '</p>' +
+    '<script>window.onload=function(){{try{{window.focus();window.print();}}catch(e){{}}}}<\/script>' +
+    '</body></html>');
+  w.document.close();
+}})()"#,
+        payload = payload
+    );
+    document::eval(&script);
 }

@@ -19,9 +19,9 @@ pub fn Button(
     children: Element,
 ) -> Element {
     let class = match kind {
-        ButtonKind::Primary => "inline-flex h-9 items-center justify-center gap-2 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40",
-        ButtonKind::Ghost => "inline-flex h-9 items-center justify-center gap-2 rounded-md border border-border bg-card px-3 text-sm text-foreground hover:bg-accent disabled:opacity-40",
-        ButtonKind::Danger => "inline-flex h-9 items-center justify-center gap-2 rounded-md bg-destructive px-3 text-sm font-medium text-white hover:opacity-90 disabled:opacity-40",
+        ButtonKind::Primary => "inline-flex h-9 shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40",
+        ButtonKind::Ghost => "inline-flex h-9 shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-border bg-card px-3 text-sm text-foreground hover:bg-accent disabled:opacity-40",
+        ButtonKind::Danger => "inline-flex h-9 shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-md bg-destructive px-3 text-sm font-medium text-white hover:opacity-90 disabled:opacity-40",
     };
     rsx! {
         button {

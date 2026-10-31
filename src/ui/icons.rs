@@ -19,7 +19,6 @@ pub enum IconName {
     Radio,
     Key,
     Clock,
-    Save,
     Signal,
     Locate,
     Dashboard,
@@ -118,11 +117,6 @@ fn icon_paths(name: IconName) -> &'static [&'static str] {
         IconName::Clock => &[
             "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z",
             "M12 6v6l4 2",
-        ],
-        IconName::Save => &[
-            "M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z",
-            "M17 21v-8H7v8",
-            "M7 3v5h8",
         ],
         IconName::Signal => &[
             "M2 20h2",

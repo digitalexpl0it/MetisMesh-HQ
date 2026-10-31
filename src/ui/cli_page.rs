@@ -88,16 +88,34 @@ pub fn CliPage(radio: RadioStatus) -> Element {
         };
         append_transcript(transcript, &format!("> {text}"));
         append_transcript(transcript, "… waiting for reply");
-        let expected_seq = state().radio.snapshot().cli_seq;
+        let snap = state().radio.snapshot();
+        if snap.protocol_ver > 0 && snap.protocol_ver < 14 && contact.is_empty() {
+            append_transcript(
+                transcript,
+                &format!(
+                    "error: companion protocol v{} — local CLI needs v14+.",
+                    snap.protocol_ver
+                ),
+            );
+            return;
+        }
+        let expected_seq = snap.cli_seq;
         state().radio.run_cli(contact, text);
         spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(14)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(18)).await;
             let snap = state().radio.snapshot();
             if snap.cli_seq == expected_seq {
-                append_transcript(
-                    transcript,
-                    "error: no CLI reply (timeout). Needs companion protocol v14+, and the radio link must be free.",
-                );
+                let hint = if snap.sync_phase != crate::radio::SyncPhase::Ready
+                    && snap.sync_phase != crate::radio::SyncPhase::Idle
+                {
+                    format!(
+                        "error: no CLI reply (timeout). Radio is busy ({}) — try again when Ready.",
+                        snap.sync_label
+                    )
+                } else {
+                    "error: no CLI reply (timeout). Needs companion protocol v14+, and the radio link must be free.".into()
+                };
+                append_transcript(transcript, &hint);
             }
         });
     };

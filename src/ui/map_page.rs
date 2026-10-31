@@ -4,6 +4,7 @@ use dioxus::prelude::*;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
+use crate::contact_qr::{contact_add_uri, enqueue_contact_qr, qr_public_url};
 use crate::db::unix_now;
 use crate::path::{build_line, MapLine};
 use crate::pmtiles_path;
@@ -179,6 +180,7 @@ fn build_model(
     let path_nodes = db.known_nodes_for_paths().unwrap_or_default();
     let hq = db.hq_position().ok().flatten();
     let rows = db.list_nodes().unwrap_or_default();
+    let rf_by_key = db.latest_rf_by_pubkey().unwrap_or_default();
 
     let node_features: Vec<Value> = rows
         .iter()
@@ -208,6 +210,30 @@ fn build_model(
             };
             let favorited = favorites.contains(&node.pubkey);
             let color = type_color(enrollment, node.contact_type);
+            let share_type = if enrollment == "hq" {
+                1
+            } else if (1..=4).contains(&node.contact_type) {
+                node.contact_type
+            } else {
+                1
+            };
+            let contact_uri = contact_add_uri(&node.name, &node.pubkey, share_type);
+            // Read-only: background worker writes data/qr + nodes.qr_file / qr_uri.
+            let qr_url = match (node.qr_file.as_deref(), node.qr_uri.as_deref()) {
+                (Some(file), Some(stored)) if stored == contact_uri => {
+                    qr_public_url(file).unwrap_or_default()
+                }
+                (Some(file), _) => qr_public_url(file).unwrap_or_default(),
+                _ => String::new(),
+            };
+            let hops = if node.path_len > 0 && node.path_len < 64 {
+                Some(node.path_len)
+            } else if !node.hop_bytes.is_empty() {
+                Some(node.hop_bytes.len() as i64)
+            } else {
+                None
+            };
+            let rf = rf_by_key.get(&node.pubkey);
             Some(json!({
                 "type": "Feature",
                 "properties": {
@@ -217,10 +243,18 @@ fn build_model(
                     "type_key": type_key(enrollment, node.contact_type),
                     "contact_type": node.contact_type,
                     "pubkey": node.pubkey,
+                    "prefix": node.prefix,
                     "favorite": favorited,
                     "lat": lat,
                     "lon": lon,
                     "last_heard_label": relative_ago(node.last_heard),
+                    "last_advert_label": relative_ago(node.last_advert),
+                    "hops": hops,
+                    "noise": rf.map(|s| s.0),
+                    "rssi": rf.map(|s| s.1),
+                    "snr": rf.map(|s| s.2),
+                    "contact_uri": contact_uri,
+                    "qr_url": qr_url,
                     "color": color,
                     "radius": if enrollment == "hq" { 11 } else { 9 },
                 },
@@ -628,8 +662,9 @@ pub fn MapPage() -> Element {
 
     use_effect(move || {
         spawn(async move {
+            let mut cam_ticks: u32 = 0;
             loop {
-                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                 if let Some(key) = map_take_favorite_toggle().await {
                     if !key.is_empty() {
                         favorites.with_mut(|set| {
@@ -642,9 +677,28 @@ pub fn MapPage() -> Element {
                         });
                     }
                 }
-                let _ = map_take_selection().await;
-                if let Some(cam) = map_get_camera().await {
-                    save_camera(cam);
+                // If a pin opened without a cached QR yet, enqueue background encode
+                // (next map refresh picks up qr_url). Never encode on this thread.
+                if let Some(raw) = map_take_selection().await {
+                    if let Ok(props) = serde_json::from_str::<Value>(&raw) {
+                        let needs_qr = props
+                            .get("qr_url")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .is_empty();
+                        if needs_qr {
+                            if let Some(key) = props.get("pubkey").and_then(|v| v.as_str()) {
+                                enqueue_contact_qr(key);
+                            }
+                        }
+                    }
+                }
+                // Camera persistence: every ~2s, not every poll (was locking the webview).
+                cam_ticks = cam_ticks.wrapping_add(1);
+                if cam_ticks % 14 == 0 {
+                    if let Some(cam) = map_get_camera().await {
+                        save_camera(cam);
+                    }
                 }
             }
         });

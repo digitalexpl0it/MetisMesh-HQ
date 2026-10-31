@@ -51,6 +51,7 @@
       pubkey.length > 16
         ? escapeHtml(pubkey.slice(0, 10) + "…" + pubkey.slice(-6))
         : escapeHtml(pubkey);
+    var prefix = String(props.prefix || "");
     var lat = props.lat != null ? Number(props.lat) : null;
     var lon = props.lon != null ? Number(props.lon) : null;
     var coords =
@@ -58,14 +59,42 @@
         ? lat.toFixed(4) + ", " + lon.toFixed(4)
         : "—";
     var heard = escapeHtml(props.last_heard_label || "unknown");
+    var advert = props.last_advert_label
+      ? escapeHtml(String(props.last_advert_label))
+      : "";
+    var hops =
+      props.hops != null && props.hops !== "" && Number(props.hops) >= 0
+        ? String(Number(props.hops))
+        : "";
+    var contactUri = String(props.contact_uri || "");
+    var qrUrl = String(props.qr_url || props.qr_data_url || "");
+    var wantQr = !!(qrUrl || contactUri);
     var favorited =
       props.favorite === true ||
       props.favorite === "true" ||
       props.favorite === 1 ||
       props.favorite === "1";
+    function rfLine() {
+      var parts = [];
+      if (props.noise != null && props.noise !== "")
+        parts.push("noise " + Number(props.noise) + " dBm");
+      if (props.rssi != null && props.rssi !== "")
+        parts.push("RSSI " + Number(props.rssi) + " dBm");
+      if (props.snr != null && props.snr !== "")
+        parts.push("SNR " + Number(props.snr).toFixed(1) + " dB");
+      return parts.join(" · ");
+    }
+    var rf = rfLine();
     var bits = ['<div class="metis-map-detail">'];
     bits.push('<div class="metis-map-detail-title">' + name + "</div>");
-    bits.push('<div class="metis-map-detail-row"><span>Type</span><b>' + typeLabel + "</b></div>");
+    bits.push('<div class="metis-map-detail-body">');
+    bits.push('<div class="metis-map-detail-cols">');
+    bits.push('<div class="metis-map-detail-meta">');
+    bits.push(
+      '<div class="metis-map-detail-row"><span>Type</span><b>' +
+        typeLabel +
+        "</b></div>"
+    );
     if (enrollment) {
       bits.push(
         '<div class="metis-map-detail-row"><span>Status</span><b>' +
@@ -74,13 +103,43 @@
       );
     }
     bits.push(
-      '<div class="metis-map-detail-row"><span>Updated</span><b>' + heard + "</b></div>"
+      '<div class="metis-map-detail-row"><span>Updated</span><b>' +
+        heard +
+        "</b></div>"
     );
+    if (advert && advert !== "unknown") {
+      bits.push(
+        '<div class="metis-map-detail-row"><span>Last advert</span><b>' +
+          advert +
+          "</b></div>"
+      );
+    }
+    if (hops) {
+      bits.push(
+        '<div class="metis-map-detail-row"><span>Hops</span><b>' +
+          escapeHtml(hops) +
+          "</b></div>"
+      );
+    }
+    if (prefix) {
+      bits.push(
+        '<div class="metis-map-detail-row"><span>Prefix</span><b class="metis-mono">' +
+          escapeHtml(prefix) +
+          "</b></div>"
+      );
+    }
     bits.push(
       '<div class="metis-map-detail-row"><span>Coordinates</span><b class="metis-mono">' +
         escapeHtml(coords) +
         "</b></div>"
     );
+    if (rf) {
+      bits.push(
+        '<div class="metis-map-detail-row metis-map-detail-rf"><span>Last RF</span><b>' +
+          escapeHtml(rf) +
+          "</b></div>"
+      );
+    }
     if (pubkey) {
       bits.push(
         '<div class="metis-map-detail-row metis-map-detail-key"><span>Public key</span>' +
@@ -91,6 +150,25 @@
           "</button></div>"
       );
     }
+    bits.push("</div>");
+    if (wantQr) {
+      bits.push('<div class="metis-map-detail-qr">');
+      if (qrUrl) {
+        bits.push(
+          '<img class="metis-map-detail-qr-img" alt="Contact QR" src="' +
+            escapeHtml(qrUrl) +
+            '"/>'
+        );
+      } else {
+        // Contact URI known but URL not on the feature yet — placeholder until inject.
+        bits.push(
+          '<img class="metis-map-detail-qr-img" alt="Contact QR" src="" hidden/>' +
+            '<div class="metis-map-detail-qr-pending">QR…</div>'
+        );
+      }
+      bits.push("</div>");
+    }
+    bits.push("</div></div>");
     bits.push('<div class="metis-map-detail-actions">');
     bits.push(
       '<button type="button" class="metis-map-action" data-metis-fav="' +
@@ -99,6 +177,13 @@
         (favorited ? "Unfavorite" : "Favorite") +
         "</button>"
     );
+    if (contactUri) {
+      bits.push(
+        '<button type="button" class="metis-map-action" data-metis-copy="' +
+          escapeHtml(contactUri) +
+          '">Copy link</button>'
+      );
+    }
     bits.push("</div></div>");
     return bits.join("");
   }
@@ -254,8 +339,31 @@
     );
   }
 
+  function hydrateDetailQr(root) {
+    if (!root) return;
+    var img = root.querySelector(".metis-map-detail-qr-img");
+    if (!img) return;
+    var src = img.getAttribute("src") || "";
+    if (src.indexOf("metis://") !== 0) return;
+    fetch(src)
+      .then(function (res) {
+        if (!res.ok) throw new Error("qr " + res.status);
+        return res.text();
+      })
+      .then(function (svg) {
+        img.removeAttribute("hidden");
+        img.hidden = false;
+        img.src =
+          "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+        var pending = root.querySelector(".metis-map-detail-qr-pending");
+        if (pending) pending.remove();
+      })
+      .catch(function () {});
+  }
+
   function wireDetailActions(root) {
     if (!root) return;
+    hydrateDetailQr(root);
     root.querySelectorAll("[data-metis-copy]").forEach(function (btn) {
       wireSealedClick(btn, function () {
         var text = btn.getAttribute("data-metis-copy") || "";
@@ -496,13 +604,53 @@
       setTimeout(function () {
         wireDetailActions(popup.getElement());
       }, 0);
-      global.__metisMapSelection = JSON.stringify(props);
+      // Always JSON so Rust eval cannot mangle meshcore:// URIs.
+      global.__metisMapSelection = JSON.stringify({
+        contact_uri: String(props.contact_uri || ""),
+        pubkey: String(props.pubkey || ""),
+        qr_url: String(props.qr_url || ""),
+      });
     },
 
     hideDetail: function (mapId) {
       var popup = this.detailPopups[mapId];
       if (popup) popup.remove();
       this.detailOpen[mapId] = false;
+    },
+
+    setDetailQr: function (mapId, url) {
+      var popup = this.detailPopups[mapId];
+      if (!popup || !url) return false;
+      var root = popup.getElement();
+      if (!root) return false;
+      var img = root.querySelector(".metis-map-detail-qr-img");
+      if (!img) return false;
+      function applySrc(src) {
+        img.removeAttribute("hidden");
+        img.hidden = false;
+        img.src = src;
+        var pending = root.querySelector(".metis-map-detail-qr-pending");
+        if (pending) pending.remove();
+      }
+      // metis:// often fails as a raw <img src>; fetch then use a data URL.
+      if (String(url).indexOf("metis://") === 0) {
+        fetch(url)
+          .then(function (res) {
+            if (!res.ok) throw new Error("qr fetch " + res.status);
+            return res.text();
+          })
+          .then(function (svg) {
+            applySrc(
+              "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg)
+            );
+          })
+          .catch(function () {
+            applySrc(url);
+          });
+        return true;
+      }
+      applySrc(url);
+      return true;
     },
 
     ensureNodeLayers: function (mapId, cluster) {

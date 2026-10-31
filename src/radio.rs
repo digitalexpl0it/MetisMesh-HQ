@@ -10,6 +10,7 @@ use meshcore_rs::MeshCore;
 use serde_json::json;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
+use crate::contact_qr;
 use crate::db::{contact_snapshot, unix_now, Db};
 use crate::path::{hop_count_from_path_len, parse_advert_path};
 use crate::secrets::{Secrets, CHANNEL_NAME};
@@ -87,6 +88,8 @@ pub struct RadioStatus {
     /// Inferred from rising voltage between polls (companion has no charge flag).
     pub battery_charging: bool,
     pub firmware: String,
+    /// Companion protocol version from device query (`fw_version_code`). CLI needs ≥14.
+    pub protocol_ver: u8,
     pub model: String,
     pub hq_lat: Option<f64>,
     pub hq_lon: Option<f64>,
@@ -138,6 +141,7 @@ impl Default for RadioStatus {
             battery_mv: None,
             battery_charging: false,
             firmware: String::new(),
+            protocol_ver: 0,
             model: String::new(),
             hq_lat: None,
             hq_lon: None,
@@ -353,6 +357,7 @@ fn clear_session_telemetry(status: &Mutex<RadioStatus>) {
     guard.battery_mv = None;
     guard.battery_charging = false;
     guard.firmware.clear();
+    guard.protocol_ver = 0;
     guard.model.clear();
     guard.hq_lat = None;
     guard.hq_lon = None;
@@ -632,6 +637,7 @@ async fn radio_loop(
                         guard.battery_mv = None;
                         guard.battery_charging = false;
                         guard.firmware.clear();
+                        guard.protocol_ver = 0;
                         guard.model.clear();
                         guard.hq_lat = None;
                         guard.hq_lon = None;
@@ -894,10 +900,19 @@ fn parse_cli_reply_bytes(bytes: &[u8], tag: &str) -> Option<String> {
 
 /// Companion `CMD_RUN_CLI_COMMAND` (66). Reply is code 29 → EventType::Unknown + Bytes.
 /// Wire body is `xx|command` (protocol v14+), matching mesh-client / firmware.
+///
+/// Subscribes to the dispatcher *before* send so a fast reply is not missed
+/// (meshcore-rs `send_multi` subscribes after writing the frame).
 async fn apply_local_cli(
-    commands: &meshcore_rs::commands::CommandHandler,
+    meshcore: &MeshCore,
     text: &str,
+    protocol_ver: u8,
 ) -> Result<String, String> {
+    if protocol_ver > 0 && protocol_ver < 14 {
+        return Err(format!(
+            "Companion protocol v{protocol_ver} — local CLI needs v14+. Update the companion firmware."
+        ));
+    }
     let command = text.trim_start();
     if command.is_empty() {
         return Err("Empty command.".into());
@@ -909,18 +924,41 @@ async fn apply_local_cli(
     }
     let mut data = vec![66u8];
     data.extend_from_slice(framed.as_bytes());
-    let event = commands
-        .send_multi(
+
+    let mut early_rx = meshcore.dispatcher().receiver();
+    let commands = meshcore.commands().lock().await;
+
+    let event = tokio::select! {
+        result = commands.send_multi(
             &data,
             &[EventType::Unknown, EventType::Error, EventType::Ok],
             Duration::from_secs(12),
-        )
-        .await
-        .map_err(|err| {
-            format!(
-                "{err} — companion CLI needs firmware protocol v14+. Try `version` after updating."
-            )
-        })?;
+        ) => {
+            result.map_err(|err| {
+                format!(
+                    "{err} — no CLI reply. Needs protocol v14+, and the radio must not be mid-sync."
+                )
+            })?
+        }
+        event = async {
+            loop {
+                match early_rx.recv().await {
+                    Ok(event)
+                        if matches!(
+                            event.event_type,
+                            EventType::Unknown | EventType::Error | EventType::Ok
+                        ) =>
+                    {
+                        return Ok(event);
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(_) => return Err("CLI event stream closed.".to_string()),
+                }
+            }
+        } => event?,
+    };
+
     match event.event_type {
         EventType::Error => match event.payload {
             EventPayload::String(s) => Err(s),
@@ -1010,6 +1048,7 @@ async fn run_session(
                 if let Err(err) = db.save_hq(&pubkey, &info.name, info.adv_lat, info.adv_lon, &raw) {
                     return SessionEnd::Lost(err.to_string());
                 }
+                contact_qr::enqueue_contact_qr(&pubkey);
                 let label = if info.name.trim().is_empty() {
                     name
                 } else {
@@ -1059,6 +1098,7 @@ async fn run_session(
                 let _ = db.save_device_info(radio, &raw);
                 let mut guard = status.lock().unwrap_or_else(|err| err.into_inner());
                 guard.firmware = firmware;
+                guard.protocol_ver = info.fw_version_code;
                 guard.model = model;
                 if let Some(repeat) = info.repeat {
                     guard.client_repeat = repeat;
@@ -1247,6 +1287,15 @@ async fn run_session(
                                 write_status(status, "connected", err.to_string());
                             } else {
                                 let _ = db.set_setting("hq_name", &advert);
+                                let hq_key = status
+                                    .lock()
+                                    .unwrap_or_else(|err| err.into_inner())
+                                    .public_key
+                                    .clone();
+                                if !hq_key.is_empty() {
+                                    let _ = db.update_node_name(&hq_key, &advert);
+                                    contact_qr::enqueue_contact_qr(&hq_key);
+                                }
                                 write_status(status, "connected", format!("Advert name set to {advert}."));
                             }
                         }
@@ -1520,10 +1569,14 @@ async fn run_session(
                             push_cli_line(status, "Empty command.");
                             continue;
                         }
-                        let commands = meshcore.commands().lock().await;
+                        let protocol_ver = status
+                            .lock()
+                            .unwrap_or_else(|err| err.into_inner())
+                            .protocol_ver;
                         let result = if contact_hex.trim().is_empty() {
-                            apply_local_cli(&commands, &text).await
+                            apply_local_cli(&meshcore, &text, protocol_ver).await
                         } else {
+                            let commands = meshcore.commands().lock().await;
                             match parse_pubkey_prefix(&contact_hex) {
                                 Ok(prefix) => apply_remote_cli(&commands, prefix, &text).await,
                                 Err(err) => Err(err),
@@ -1765,6 +1818,7 @@ async fn sync_contacts(
             &raw,
         )
         .map_err(|err| err.to_string())?;
+        contact_qr::enqueue_contact_qr(&pubkey);
         if let Some(status) = status {
             write_sync(
                 status,

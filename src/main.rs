@@ -1,4 +1,5 @@
 mod ble_pair;
+mod contact_qr;
 mod db;
 mod map_tiles;
 mod path;
@@ -36,6 +37,7 @@ fn main() {
     }
     let db = Arc::new(db);
     let secrets = Arc::new(Secrets::new(&data));
+    contact_qr::spawn_qr_worker(db.clone(), data.clone());
     let radio = spawn_radio(db.clone(), secrets.clone());
     install(AppState { db, secrets, radio });
     launch_window();
@@ -111,6 +113,29 @@ fn serve_metis_protocol(
 
     let path = request.uri().path();
     let host = request.uri().host().unwrap_or("");
+
+    // Contact QR SVGs from data/qr/{pubkey}.svg (written by the background worker).
+    let qr_name = path
+        .strip_prefix("/qr/")
+        .or_else(|| path.rsplit_once("/qr/").map(|(_, rest)| rest))
+        .map(|s| s.trim_start_matches('/'))
+        .filter(|s| !s.is_empty());
+    if let Some(name) = qr_name {
+        if let Some(body) = contact_qr::read_qr_file(name) {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8")
+                .header(header::CONTENT_LENGTH, body.len().to_string())
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .header(header::CACHE_CONTROL, "public, max-age=86400")
+                .body(Cow::Owned(body))
+                .unwrap_or_else(|_| Response::new(Cow::Borrowed(b"" as &[u8])));
+        }
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Cow::Borrowed(b"qr not found" as &[u8]))
+            .unwrap_or_else(|_| Response::new(Cow::Borrowed(b"qr not found" as &[u8])));
+    }
 
     // Bundled outline GeoJSON (tiny style JSON references these URLs).
     let geojson_name = path

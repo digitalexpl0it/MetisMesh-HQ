@@ -387,8 +387,10 @@ option {
   background: #151a20;
   color: #d4d4d8;
   border-radius: 0.4rem;
-  padding: 0.3rem 0.65rem;
+  padding: 0.4rem 0.75rem;
   font-size: 0.75rem;
+  line-height: 1.25;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -867,8 +869,8 @@ option {
 }
 
 .metis-map-detail {
-  min-width: 14rem;
-  max-width: 18rem;
+  min-width: 16rem;
+  max-width: 24rem;
   color: #f4f4f5;
   font-size: 0.78rem;
   line-height: 1.4;
@@ -879,6 +881,44 @@ option {
   font-weight: 650;
   margin-bottom: 0.55rem;
   padding-right: 1rem;
+}
+
+.metis-map-detail-cols {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+}
+
+.metis-map-detail-meta {
+  min-width: 0;
+  flex: 1;
+}
+
+.metis-map-detail-qr {
+  flex-shrink: 0;
+  width: 5.5rem;
+  height: 5.5rem;
+  border-radius: 0.35rem;
+  overflow: hidden;
+  background: #fff;
+  border: 1px solid #ffffff24;
+}
+
+.metis-map-detail-qr img {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.metis-map-detail-qr-pending {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-size: 0.65rem;
+  color: #64748b;
+  background: #f8fafc;
 }
 
 .metis-map-detail-row {
@@ -898,8 +938,15 @@ option {
   text-align: right;
 }
 
-.metis-map-detail-key {
+.metis-map-detail-key,
+.metis-map-detail-rf {
   align-items: flex-start;
+}
+
+.metis-map-detail-rf b {
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: #d4d4d8;
 }
 
 .metis-mono {

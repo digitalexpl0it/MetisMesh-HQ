@@ -35,7 +35,18 @@ enum TrafficWindow {
 struct SelectedNode {
     name: String,
     enrollment: String,
+    type_label: String,
     pubkey: String,
+}
+
+fn node_type_label(contact_type: u8) -> &'static str {
+    match contact_type {
+        1 => "Chat",
+        2 => "Repeater",
+        3 => "Room",
+        4 => "Sensor",
+        _ => "Node",
+    }
 }
 
 fn collection(features: Vec<Value>) -> Value {
@@ -125,11 +136,18 @@ fn build_model(
             if !keep {
                 return None;
             }
+            let type_label = if enrollment == "hq" {
+                "HQ"
+            } else {
+                node_type_label(node.contact_type)
+            };
             Some(json!({
                 "type": "Feature",
                 "properties": {
                     "name": node.name,
                     "enrollment": enrollment,
+                    "type_label": type_label,
+                    "contact_type": node.contact_type,
                     "pubkey": node.pubkey,
                     "color": enrollment_color(enrollment),
                     "radius": if enrollment == "hq" { 9 } else { 6 },
@@ -265,9 +283,9 @@ fn build_model(
             solid.len(),
             dashed.len(),
             if pmtiles_ok {
-                " · offline basemap"
+                " · offline PMTiles basemap"
             } else {
-                " · dark basemap (set PMTiles in Settings)"
+                " · land outline basemap (optional PMTiles in Settings)"
             }
         )
     };
@@ -492,6 +510,11 @@ pub fn MapPage() -> Element {
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("")
                                 .into(),
+                            type_label: value
+                                .get("type_label")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Node")
+                                .into(),
                             pubkey: value
                                 .get("pubkey")
                                 .and_then(|v| v.as_str())
@@ -518,7 +541,7 @@ pub fn MapPage() -> Element {
             }
             if !model.pmtiles_ok {
                 p { class: "text-xs text-muted-foreground",
-                    "Add a regional PMTiles path in Settings → Offline map tiles for an offline basemap."
+                    "Showing bundled land outlines. Add a regional PMTiles path in Settings → Offline map tiles for a full offline basemap."
                 }
             }
             div { class: "map-toolbar",
@@ -618,7 +641,9 @@ pub fn MapPage() -> Element {
                 if let Some(node) = selected() {
                     div { class: "map-popup-panel",
                         p { class: "text-sm font-medium", "{node.name}" }
-                        p { class: "font-mono text-[0.65rem] text-muted-foreground", "{node.enrollment}" }
+                        p { class: "text-xs text-muted-foreground",
+                            "{node.type_label} · {node.enrollment}"
+                        }
                         if !node.pubkey.is_empty() {
                             p { class: "mt-1 break-all font-mono text-[0.65rem] text-muted-foreground", "{node.pubkey}" }
                         }
@@ -635,6 +660,11 @@ pub fn MapPage() -> Element {
                     {
                         let name = node.name.clone();
                         let enrollment = node.enrollment.as_str().to_string();
+                        let type_label = if enrollment == "hq" {
+                            "HQ".to_string()
+                        } else {
+                            node_type_label(node.contact_type).to_string()
+                        };
                         let color = enrollment_color(enrollment.as_str());
                         let pubkey = node.pubkey.clone();
                         let lat = node.lat.unwrap_or(0.0);
@@ -647,12 +677,14 @@ pub fn MapPage() -> Element {
                                     selected.set(Some(SelectedNode {
                                         name: name.clone(),
                                         enrollment: enrollment.clone(),
+                                        type_label: type_label.clone(),
                                         pubkey: pubkey.clone(),
                                     }));
                                     spawn(async move { map_fly_to(lon, lat, 12.0).await; });
                                 },
                                 span { class: "map-swatch", style: "background:{color};" }
-                                span { class: "truncate text-sm", "{name}" }
+                                span { class: "min-w-0 flex-1 truncate text-left text-sm", "{name}" }
+                                span { class: "shrink-0 text-[0.65rem] text-muted-foreground", "{type_label}" }
                                 span { class: "font-mono text-[0.65rem] text-muted-foreground", "{lat:.3}, {lon:.3}" }
                             }
                         }

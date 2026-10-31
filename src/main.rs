@@ -105,8 +105,14 @@ fn serve_metis_protocol(
 ) -> dioxus::desktop::wry::http::Response<Cow<'static, [u8]>> {
     use dioxus::desktop::wry::http::{header, Response, StatusCode};
 
+    // wry/http parses `metis://pmtiles/basemap` as host=`pmtiles`, path=`/basemap`.
+    // Prefer `metis://local/pmtiles/basemap` (path `/pmtiles/basemap`); accept both.
     let path = request.uri().path();
-    if path != "/pmtiles/basemap" && !path.ends_with("/pmtiles/basemap") {
+    let host = request.uri().host().unwrap_or("");
+    let is_basemap = path == "/pmtiles/basemap"
+        || path.ends_with("/pmtiles/basemap")
+        || (host == "pmtiles" && (path == "/basemap" || path.ends_with("/basemap")));
+    if !is_basemap {
         return Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(Cow::Borrowed(b"not found" as &[u8]))

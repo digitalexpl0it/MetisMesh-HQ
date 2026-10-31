@@ -14,6 +14,18 @@ fn is_destructive_cli(command: &str) -> bool {
         .any(|prefix| lower == *prefix || lower.starts_with(&format!("{prefix} ")))
 }
 
+fn append_transcript(mut transcript: Signal<Vec<String>>, text: &str) {
+    transcript.with_mut(|lines| {
+        for part in text.lines() {
+            lines.push(part.to_string());
+        }
+        if lines.len() > 400 {
+            let skip = lines.len() - 400;
+            lines.drain(0..skip);
+        }
+    });
+}
+
 #[component]
 pub fn CliPage(radio: RadioStatus) -> Element {
     let mut draft = use_signal(String::new);
@@ -28,6 +40,18 @@ pub fn CliPage(radio: RadioStatus) -> Element {
     let mut confirm_open = use_signal(|| false);
     let mut pending = use_signal(String::new);
     let mut last_seq = use_signal(|| 0u64);
+    let mut poll = use_signal(|| 0u32);
+    let mut poll_started = use_signal(|| false);
+
+    if !poll_started() {
+        poll_started.set(true);
+        spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                poll.with_mut(|n| *n = n.wrapping_add(1));
+            }
+        });
+    }
 
     let linked = radio.state == "connected";
     let contacts = state()
@@ -41,26 +65,20 @@ pub fn CliPage(radio: RadioStatus) -> Element {
         })
         .collect::<Vec<_>>();
 
-    // Append radio CLI replies as they arrive.
-    if radio.cli_seq != last_seq() && !radio.cli_line.is_empty() {
-        last_seq.set(radio.cli_seq);
-        let line = radio.cli_line.clone();
-        transcript.with_mut(|lines| {
-            for part in line.lines() {
-                lines.push(part.to_string());
-            }
-            if lines.len() > 400 {
-                let skip = lines.len() - 400;
-                lines.drain(0..skip);
-            }
-        });
-    }
+    // Poll radio status for CLI replies (avoid mutating signals during render).
+    use_effect(move || {
+        let _ = poll();
+        let snap = state().radio.snapshot();
+        if snap.cli_seq == 0 || snap.cli_seq == last_seq() || snap.cli_line.is_empty() {
+            return;
+        }
+        last_seq.set(snap.cli_seq);
+        append_transcript(transcript, &snap.cli_line);
+    });
 
-    let mut send_command = move |text: String| {
+    let send_command = move |text: String| {
         if !linked {
-            transcript.with_mut(|lines| {
-                lines.push("Not connected — pair a companion first.".into());
-            });
+            append_transcript(transcript, "Not connected — pair a companion first.");
             return;
         }
         let contact = if target() == "local" {
@@ -68,6 +86,8 @@ pub fn CliPage(radio: RadioStatus) -> Element {
         } else {
             target()
         };
+        append_transcript(transcript, &format!("> {text}"));
+        append_transcript(transcript, "… waiting for reply");
         state().radio.run_cli(contact, text);
     };
 
@@ -168,7 +188,7 @@ pub fn CliPage(radio: RadioStatus) -> Element {
                 p { class: "mb-3 text-sm text-muted-foreground",
                     "Send `{pending()}`? This may reboot or erase the target device."
                 }
-                div { class: "flex flex-wrap gap-2",
+                div { class: "flex flex-wrap items-center gap-2",
                     Button {
                         kind: ButtonKind::Danger,
                         onclick: move |_| {

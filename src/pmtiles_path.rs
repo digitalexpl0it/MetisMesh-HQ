@@ -29,5 +29,6 @@ pub fn current_pmtiles_path() -> Option<PathBuf> {
 
 /// URL the MapLibre PMTiles protocol should fetch (custom `metis` scheme).
 pub fn basemap_protocol_url() -> Option<&'static str> {
-    current_pmtiles_path().map(|_| "metis://pmtiles/basemap")
+    // Host `local` so the path is `/pmtiles/basemap` (not host=`pmtiles`, path=`/basemap`).
+    current_pmtiles_path().map(|_| "metis://local/pmtiles/basemap")
 }

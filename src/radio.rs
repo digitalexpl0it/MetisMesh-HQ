@@ -807,6 +807,18 @@ async fn apply_idle_cmd(
             );
             true
         }
+        Some(RadioCmd::RunCli { .. }) => {
+            push_cli_line(
+                status,
+                "error: Connect the radio before running CLI commands.",
+            );
+            write_status(
+                status,
+                "disconnected",
+                "Connect the radio before changing device settings.",
+            );
+            true
+        }
         Some(RadioCmd::RefreshDeviceSettings)
         | Some(RadioCmd::SetCustomVar { .. })
         | Some(RadioCmd::SetCoords { .. })
@@ -817,7 +829,6 @@ async fn apply_idle_cmd(
         | Some(RadioCmd::SetFloodScope(_))
         | Some(RadioCmd::SendAdvert { .. })
         | Some(RadioCmd::Reboot)
-        | Some(RadioCmd::RunCli { .. })
         | Some(RadioCmd::ProbeNoise) => {
             write_status(
                 status,
@@ -857,16 +868,41 @@ async fn apply_local_cli(
     let mut data = vec![66u8];
     data.extend_from_slice(text.as_bytes());
     let event = commands
-        .send_with_timeout(&data, Some(EventType::Unknown), Duration::from_secs(8))
+        .send_multi(
+            &data,
+            &[EventType::Unknown, EventType::Error, EventType::Ok],
+            Duration::from_secs(12),
+        )
         .await
         .map_err(|err| err.to_string())?;
-    match event.payload {
-        EventPayload::Bytes(bytes) if !bytes.is_empty() && bytes[0] == 29 => {
-            Ok(String::from_utf8_lossy(&bytes[1..]).trim().to_string())
-        }
-        EventPayload::Bytes(bytes) => Ok(format!("raw reply: {}", hex::encode(bytes))),
-        EventPayload::String(s) => Ok(s),
-        _ => Ok("(empty CLI reply)".into()),
+    match event.event_type {
+        EventType::Error => match event.payload {
+            EventPayload::String(s) => Err(s),
+            _ => Err("Companion rejected the CLI command.".into()),
+        },
+        EventType::Ok => Ok("(ok)".into()),
+        _ => match event.payload {
+            EventPayload::Bytes(bytes) if !bytes.is_empty() && bytes[0] == 29 => {
+                let body = String::from_utf8_lossy(&bytes[1..]).trim().to_string();
+                if body.is_empty() {
+                    Ok("(empty CLI reply)".into())
+                } else {
+                    Ok(body)
+                }
+            }
+            EventPayload::Bytes(bytes) if !bytes.is_empty() => {
+                // Some firmwares emit reply text without wrapping code 29 in payload[0]
+                // when meshcore-rs already classified the packet as Unknown.
+                if bytes[0].is_ascii_graphic() || bytes[0].is_ascii_whitespace() {
+                    Ok(String::from_utf8_lossy(&bytes).trim().to_string())
+                } else {
+                    Ok(format!("raw reply: {}", hex::encode(bytes)))
+                }
+            }
+            EventPayload::Bytes(_) => Ok("(empty CLI reply)".into()),
+            EventPayload::String(s) => Ok(s),
+            _ => Ok("(empty CLI reply)".into()),
+        },
     }
 }
 
@@ -1415,11 +1451,12 @@ async fn run_session(
                         };
                         match result {
                             Ok(reply) => {
-                                push_cli_line(status, format!("> {text}\n{reply}"));
+                                // UI already echoes `> cmd`; push reply body only.
+                                push_cli_line(status, reply);
                                 write_status(status, "connected", "CLI command completed.");
                             }
                             Err(err) => {
-                                push_cli_line(status, format!("> {text}\nerror: {err}"));
+                                push_cli_line(status, format!("error: {err}"));
                                 write_status(status, "connected", err);
                             }
                         }

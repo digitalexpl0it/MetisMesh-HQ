@@ -146,6 +146,11 @@ pub async fn map_take_selection() -> Option<String> {
     }
 }
 
+fn world_land_geojson() -> Value {
+    serde_json::from_str(include_str!("../../assets/world-land.geojson"))
+        .unwrap_or_else(|_| serde_json::json!({ "type": "FeatureCollection", "features": [] }))
+}
+
 pub fn dark_basemap_style(pmtiles_url: Option<&str>) -> Value {
     let mut sources = serde_json::Map::new();
     let mut layers = vec![serde_json::json!({
@@ -170,6 +175,33 @@ pub fn dark_basemap_style(pmtiles_url: Option<&str>) -> Value {
             "type": "raster",
             "source": "basemap",
             "paint": { "raster-opacity": 0.92 }
+        }));
+    } else {
+        // Bundled Natural Earth 110m land — geography without CDN or PMTiles.
+        sources.insert(
+            "world-land".into(),
+            serde_json::json!({
+                "type": "geojson",
+                "data": world_land_geojson(),
+            }),
+        );
+        layers.push(serde_json::json!({
+            "id": "world-land-fill",
+            "type": "fill",
+            "source": "world-land",
+            "paint": {
+                "fill-color": "#1a2740",
+                "fill-opacity": 1.0
+            }
+        }));
+        layers.push(serde_json::json!({
+            "id": "world-land-outline",
+            "type": "line",
+            "source": "world-land",
+            "paint": {
+                "line-color": "#2f4060",
+                "line-width": 0.6
+            }
         }));
     }
 

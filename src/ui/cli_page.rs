@@ -7,6 +7,141 @@ use super::state;
 use super::widgets::{Button, ButtonKind, Dialog, PageHeading, SelectInput, TextInput};
 use crate::radio::RadioStatus;
 
+/// Firmware role for which CLI vocabulary to offer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CliMode {
+    Companion,
+    Repeater,
+    Room,
+    Sensor,
+}
+
+impl CliMode {
+    fn from_contact_type(contact_type: u8) -> Self {
+        match contact_type {
+            2 => Self::Repeater,
+            3 => Self::Room,
+            4 => Self::Sensor,
+            // Chat / unknown / enrolled companion → companion CLI.
+            _ => Self::Companion,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Companion => "Companion",
+            Self::Repeater => "Repeater",
+            Self::Room => "Room / data server",
+            Self::Sensor => "Sensor",
+        }
+    }
+}
+
+/// Local companion CLI (firmware v1.18+ / protocol 14+). Not the repeater docs set.
+const COMPANION_COMMANDS: &[(&str, &str)] = &[
+    ("ver", "Firmware version"),
+    ("board", "Board name"),
+    ("get name", "Node name"),
+    ("get radio", "Freq / BW / SF / CR"),
+    ("get freq", "Frequency only"),
+    ("get tx", "TX power"),
+    ("get af", "Airtime factor"),
+    ("get dutycycle", "Duty cycle %"),
+    ("get radio.rxgain", "RX boosted gain"),
+    ("get rxdelay", "RX delay base"),
+    ("get txdelay", "Flood TX delay"),
+    ("get direct.txdelay", "Direct TX delay"),
+    ("get cad", "Channel activity detect"),
+    ("get int.thresh", "Interference threshold"),
+    ("get path.hash.mode", "Path hash size"),
+    ("get multi.acks", "Multi-ACK"),
+    ("get tz.offset", "Timezone offset"),
+    ("get wifi.enabled", "WiFi enabled"),
+    ("get wifi.ssid", "WiFi SSID"),
+    ("get wifi.status", "WiFi status"),
+    ("get wifi.ip", "WiFi IP"),
+    ("reboot", "Reboot companion"),
+];
+
+/// Shared repeater / room / sensor reads from docs.meshcore.io/cli_commands.
+const INFRA_COMMON: &[(&str, &str)] = &[
+    ("ver", "Firmware version"),
+    ("board", "Board name"),
+    ("clock", "Current UTC time"),
+    ("clock sync", "Sync clock from sender"),
+    ("get name", "Node name"),
+    ("get public.key", "Public key"),
+    ("get radio", "Freq / BW / SF / CR"),
+    ("get freq", "Frequency"),
+    ("get tx", "TX power"),
+    ("get lat", "Latitude"),
+    ("get lon", "Longitude"),
+    ("advert", "Flood advert"),
+    ("advert.zerohop", "Zero-hop advert"),
+    ("neighbors", "Nearby neighbors"),
+    ("discover.neighbors", "Discover zero-hop neighbors"),
+    ("get repeat", "Repeat flag"),
+    ("get path.hash.mode", "Path hash size"),
+    ("get loop.detect", "Loop detection"),
+    ("get txdelay", "Flood TX delay"),
+    ("get direct.txdelay", "Direct TX delay"),
+    ("get rxdelay", "RX delay"),
+    ("get dutycycle", "Duty cycle %"),
+    ("get af", "Airtime factor (legacy)"),
+    ("get radio.rxgain", "RX boosted gain"),
+    ("get cad", "Channel activity detect"),
+    ("get int.thresh", "Interference threshold"),
+    ("get flood.advert.interval", "Flood advert interval"),
+    ("get advert.interval", "Zero-hop advert interval"),
+    ("get flood.max", "Flood hop limit"),
+    ("get flood.max.unscoped", "Unscoped flood hop limit"),
+    ("get flood.max.advert", "Advert flood hop limit"),
+    ("region", "Dump regions"),
+    ("clear stats", "Clear stats"),
+    ("reboot", "Reboot node"),
+];
+
+const REPEATER_COMMANDS: &[(&str, &str)] = INFRA_COMMON;
+
+const ROOM_EXTRA: &[(&str, &str)] = &[
+    ("get guest.password", "Guest password"),
+    ("get allow.read.only", "Read-only room flag"),
+    ("get owner.info", "Owner info"),
+];
+
+const SENSOR_EXTRA: &[(&str, &str)] = &[
+    ("gps", "GPS status"),
+    ("gps sync", "Sync clock from GPS"),
+    ("gps setloc", "Set lat/lon from GPS"),
+    ("gps advert", "GPS advert policy"),
+    ("sensor list", "List sensors"),
+];
+
+fn room_commands() -> Vec<(&'static str, &'static str)> {
+    let mut out = INFRA_COMMON.to_vec();
+    out.extend_from_slice(ROOM_EXTRA);
+    out
+}
+
+fn sensor_commands() -> Vec<(&'static str, &'static str)> {
+    let mut out = INFRA_COMMON.to_vec();
+    out.extend_from_slice(SENSOR_EXTRA);
+    out
+}
+
+// Pre-built for Room/Sensor so `commands()` can return a slice without allocating each render.
+// Room and Sensor need extras; use lazy static via once_cell or just allocate in the component.
+// Simpler: return owned Vec from a helper used once when mode changes.
+
+fn commands_for(mode: CliMode) -> Vec<(&'static str, &'static str)> {
+    match mode {
+        CliMode::Companion => COMPANION_COMMANDS.to_vec(),
+        CliMode::Repeater => REPEATER_COMMANDS.to_vec(),
+        CliMode::Room => room_commands(),
+        CliMode::Sensor => sensor_commands(),
+    }
+}
+
 fn is_destructive_cli(command: &str) -> bool {
     let lower = command.trim().to_ascii_lowercase();
     ["erase", "reboot", "poweroff", "shutdown", "factory", "clkreboot"]
@@ -26,15 +161,26 @@ fn append_transcript(mut transcript: Signal<Vec<String>>, text: &str) {
     });
 }
 
+fn contact_type_label(value: u8) -> &'static str {
+    match value {
+        1 => "Companion",
+        2 => "Repeater",
+        3 => "Room / data server",
+        4 => "Sensor",
+        _ => "Node",
+    }
+}
+
 #[component]
 pub fn CliPage(radio: RadioStatus) -> Element {
     let mut draft = use_signal(String::new);
     let mut target = use_signal(|| "local".to_string());
+    let mut preset = use_signal(|| String::new());
     let mut transcript = use_signal(|| {
         vec![
-            "MeshCore CLI — local companion uses firmware v14+ opcode 66.".to_string(),
-            "Remote targets send TXT_TYPE_CLI_COMMAND to a contact.".to_string(),
-            "Docs: https://docs.meshcore.io/cli_commands/".to_string(),
+            "MeshCore CLI — command list follows the selected target's role.".to_string(),
+            "Companion uses protocol v14+ opcode 66; remote uses TXT_TYPE_CLI_COMMAND.".to_string(),
+            "Docs (repeater / room / sensor): https://docs.meshcore.io/cli_commands/".to_string(),
         ]
     });
     let mut confirm_open = use_signal(|| false);
@@ -60,10 +206,25 @@ pub fn CliPage(radio: RadioStatus) -> Element {
         .unwrap_or_default()
         .into_iter()
         .filter(|n| {
-            // 2 repeater, 3 room, 4 sensor — also allow enrolled companions for lab use.
-            matches!(n.contact_type, 2 | 3 | 4) || n.enrollment.as_str() == "enrolled"
+            // 2 repeater, 3 room, 4 sensor — also allow chat / enrolled for remote companion CLI.
+            matches!(n.contact_type, 1 | 2 | 3 | 4) || n.enrollment.as_str() == "enrolled"
         })
         .collect::<Vec<_>>();
+
+    let mode = if target() == "local" {
+        CliMode::Companion
+    } else {
+        contacts
+            .iter()
+            .find(|n| n.pubkey == target())
+            .map(|n| CliMode::from_contact_type(n.contact_type))
+            .unwrap_or(CliMode::Companion)
+    };
+    let catalog = commands_for(mode);
+    let placeholder = catalog
+        .first()
+        .map(|(cmd, _)| (*cmd).to_string())
+        .unwrap_or_else(|| "ver".into());
 
     // Poll radio status for CLI replies (avoid mutating signals during render).
     use_effect(move || {
@@ -123,7 +284,7 @@ pub fn CliPage(radio: RadioStatus) -> Element {
     rsx! {
         div { class: "mx-auto flex h-full min-h-0 max-w-4xl flex-col gap-3",
             PageHeading { icon: IconName::Messages, title: "Device CLI".to_string(),
-                "Run MeshCore CLI commands on this companion or a remote repeater / room / sensor."
+                "Run MeshCore CLI on this companion or a remote repeater, room / data server, or sensor. Command list follows the target role."
             }
             if !linked {
                 p { class: "text-sm text-muted-foreground",
@@ -136,7 +297,11 @@ pub fn CliPage(radio: RadioStatus) -> Element {
                     SelectInput {
                         id: "cli-target".to_string(),
                         value: target(),
-                        onchange: move |event: FormEvent| target.set(event.value()),
+                        onchange: move |event: FormEvent| {
+                            target.set(event.value());
+                            preset.set(String::new());
+                            draft.set(String::new());
+                        },
                         option {
                             value: "local",
                             style: "background-color:#101418;color:#f4f4f5;",
@@ -147,9 +312,14 @@ pub fn CliPage(radio: RadioStatus) -> Element {
                                 key: "{node.pubkey}",
                                 value: "{node.pubkey}",
                                 style: "background-color:#101418;color:#f4f4f5;",
-                                "{node.name} · type {node.contact_type}"
+                                "{node.name} · {contact_type_label(node.contact_type)}"
                             }
                         }
+                    }
+                }
+                div { class: "flex items-center gap-2 pb-1 text-xs text-muted-foreground",
+                    span { class: "rounded-md border border-border bg-card px-2 py-1",
+                        "Mode: {mode.label()}"
                     }
                 }
                 Button {
@@ -158,21 +328,31 @@ pub fn CliPage(radio: RadioStatus) -> Element {
                     "Clear"
                 }
             }
-            div { class: "cli-chips",
-                for cmd in ["clock", "neighbors", "advert", "get radio.freq", "get gps.en"].iter() {
-                    {
-                        let cmd = (*cmd).to_string();
-                        rsx! {
-                            button {
-                                key: "{cmd}",
-                                class: "map-chip",
-                                disabled: !linked,
-                                onclick: move |_| {
-                                    draft.set(cmd.clone());
-                                    send_command(cmd.clone());
-                                },
-                                "{cmd}"
-                            }
+            div { class: "min-w-0",
+                label { class: "mb-1 block text-xs text-muted-foreground",
+                    "Command ({mode.label()} presets — or type below)"
+                }
+                SelectInput {
+                    id: "cli-preset".to_string(),
+                    value: preset(),
+                    onchange: move |event: FormEvent| {
+                        let value = event.value();
+                        preset.set(value.clone());
+                        if !value.is_empty() {
+                            draft.set(value);
+                        }
+                    },
+                    option {
+                        value: "",
+                        style: "background-color:#101418;color:#f4f4f5;",
+                        "Select a command…"
+                    }
+                    for (cmd, hint) in catalog.iter() {
+                        option {
+                            key: "{cmd}",
+                            value: "{cmd}",
+                            style: "background-color:#101418;color:#f4f4f5;",
+                            "{cmd} — {hint}"
                         }
                     }
                 }
@@ -185,8 +365,17 @@ pub fn CliPage(radio: RadioStatus) -> Element {
             div { class: "flex gap-2",
                 TextInput {
                     value: draft(),
-                    placeholder: "clock",
-                    oninput: move |event: FormEvent| draft.set(event.value()),
+                    placeholder: "{placeholder}",
+                    oninput: move |event: FormEvent| {
+                        let v = event.value();
+                        draft.set(v.clone());
+                        // Keep preset in sync when the line still matches a catalog entry.
+                        if catalog.iter().any(|(cmd, _)| *cmd == v) {
+                            preset.set(v);
+                        } else if !preset().is_empty() && preset() != v {
+                            preset.set(String::new());
+                        }
+                    },
                 }
                 Button {
                     disabled: !linked || draft().trim().is_empty(),
@@ -200,6 +389,7 @@ pub fn CliPage(radio: RadioStatus) -> Element {
                             confirm_open.set(true);
                         } else {
                             draft.set(String::new());
+                            preset.set(String::new());
                             send_command(text);
                         }
                     },
@@ -225,6 +415,7 @@ pub fn CliPage(radio: RadioStatus) -> Element {
                             confirm_open.set(false);
                             pending.set(String::new());
                             draft.set(String::new());
+                            preset.set(String::new());
                             send_command(text);
                         },
                         "Send anyway"

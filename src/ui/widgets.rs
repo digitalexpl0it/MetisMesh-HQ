@@ -2,6 +2,7 @@ use dioxus::html::FormValue;
 use dioxus::prelude::*;
 
 use super::icons::{Icon, IconName};
+use crate::toast::{self, ToastKind};
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum ButtonKind {
@@ -15,7 +16,10 @@ pub enum ButtonKind {
 pub fn Button(
     #[props(default)] kind: ButtonKind,
     #[props(default = false)] disabled: bool,
-    onclick: EventHandler<MouseEvent>,
+    /// Use inside a `<form>` when `onsubmit` owns the action (Enter key works).
+    #[props(default = false)]
+    submit: bool,
+    #[props(default)] onclick: EventHandler<MouseEvent>,
     children: Element,
 ) -> Element {
     let class = match kind {
@@ -23,8 +27,11 @@ pub fn Button(
         ButtonKind::Ghost => "inline-flex h-9 shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-border bg-card px-3 text-sm text-foreground hover:bg-accent disabled:opacity-40",
         ButtonKind::Danger => "inline-flex h-9 shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-md bg-destructive px-3 text-sm font-medium text-white hover:opacity-90 disabled:opacity-40",
     };
+    let button_type = if submit { "submit" } else { "button" };
     rsx! {
         button {
+            // Default type=button so we do not double-fire with form onsubmit.
+            r#type: "{button_type}",
             class: "{class} cursor-pointer",
             disabled,
             onclick: move |event| onclick.call(event),
@@ -840,6 +847,53 @@ pub fn EmojiPickerButton(
                                     },
                                     "{*emoji}"
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Fixed toast stack (bottom-right). Poll the toast store from the parent via `tick`.
+#[component]
+pub fn ToastHost(tick: u32) -> Element {
+    let _ = tick;
+    let toasts = toast::snapshot();
+    if toasts.is_empty() {
+        return rsx! {};
+    }
+    rsx! {
+        div {
+            class: "toast-host",
+            role: "status",
+            aria_live: "polite",
+            for entry in toasts.into_iter() {
+                {
+                    let id = entry.id;
+                    let icon = match entry.kind {
+                        ToastKind::Success => IconName::Check,
+                        ToastKind::Error => IconName::Ban,
+                        ToastKind::Warn => IconName::Clock,
+                        ToastKind::Info => IconName::Messages,
+                    };
+                    rsx! {
+                        div {
+                            key: "{id}",
+                            class: "{entry.kind.class()}",
+                            div { class: "toast-body",
+                                span { class: "toast-icon",
+                                    Icon { name: icon, size: 14 }
+                                }
+                                p { class: "toast-message", "{entry.message}" }
+                            }
+                            button {
+                                class: "toast-dismiss",
+                                r#type: "button",
+                                title: "Dismiss",
+                                onclick: move |_| toast::dismiss(id),
+                                Icon { name: IconName::Close, size: 12 }
                             }
                         }
                     }

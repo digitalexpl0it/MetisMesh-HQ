@@ -393,17 +393,69 @@
     nodeData: {},
     clusterEnabled: {},
     protocolReady: false,
+    _pmtilesProtocol: null,
+    coverageDrag: {},
+    coverageBbox: {},
+    /** Pending place/adjust shape before confirm: { shape, radiusMiles, lng, lat, mode } */
+    regionDraft: {},
+    regionDraftMarkers: {},
 
     ensureProtocol: function () {
       if (this.protocolReady || !global.maplibregl || !global.pmtiles) return;
       var protocol = new global.pmtiles.Protocol();
       global.maplibregl.addProtocol("pmtiles", protocol.tile);
+      this._pmtilesProtocol = protocol;
       this.protocolReady = true;
+    },
+
+    /** Drop cached PMTiles readers so a re-download of the same region id loads. */
+    clearPmtilesCache: function () {
+      var protocol = this._pmtilesProtocol;
+      if (!protocol) return;
+      try {
+        if (protocol.tiles && typeof protocol.tiles.clear === "function") {
+          protocol.tiles.clear();
+        }
+      } catch (_) {}
+    },
+
+    /** Remember pack bbox from the style's tile-coverage source (if present). */
+    rememberCoverageFromStyle: function (mapId, style) {
+      try {
+        var src = style && style.sources && style.sources["tile-coverage"];
+        var ring =
+          src &&
+          src.data &&
+          src.data.features &&
+          src.data.features[0] &&
+          src.data.features[0].geometry &&
+          src.data.features[0].geometry.coordinates[0];
+        if (!ring || ring.length < 4) {
+          delete this.coverageBbox[mapId];
+          return;
+        }
+        var lons = ring.map(function (p) {
+          return p[0];
+        });
+        var lats = ring.map(function (p) {
+          return p[1];
+        });
+        this.coverageBbox[mapId] = [
+          Math.min.apply(null, lons),
+          Math.min.apply(null, lats),
+          Math.max.apply(null, lons),
+          Math.max.apply(null, lats),
+        ];
+      } catch (_) {
+        delete this.coverageBbox[mapId];
+      }
     },
 
     init: async function (mapId, containerId, style, lng, lat, zoom) {
       var maplibregl = await waitForMaplibre(8000);
       this.ensureProtocol();
+      this.clearPmtilesCache();
+      this.rememberCoverageFromStyle(mapId, style);
       var existing = this.maps[mapId];
       if (existing) {
         try {
@@ -442,16 +494,14 @@
       this.detailPopups[mapId].on("close", function () {
         self.detailOpen[mapId] = false;
       });
-      // Keep canvas sized to the stage (avoids tiny black corner canvas).
+      // Keep GL buffer matched to the stage (avoids cut-off tiles / black gutters).
       this.watchResize(mapId, container);
       await new Promise(function (resolve) {
         var settled = false;
         function done() {
           if (settled) return;
           settled = true;
-          try {
-            map.resize();
-          } catch (_) {}
+          self.forceResize(mapId);
           resolve(true);
         }
         map.once("load", done);
@@ -459,16 +509,18 @@
         map.on("error", function () {});
         setTimeout(done, 4000);
       });
-      try {
-        map.resize();
-      } catch (_) {}
+      this.forceResize(mapId);
       setTimeout(function () {
-        try {
-          map.resize();
-        } catch (_) {}
-      }, 200);
+        self.forceResize(mapId);
+      }, 250);
       try {
         await this.hydrateOutlineSources(mapId);
+      } catch (_) {}
+      try {
+        if (this.regionDraft[mapId]) {
+          this.renderRegionDraft(mapId);
+          this.bindDraftDrag(mapId);
+        }
       } catch (_) {}
       function publishCamera() {
         var c = map.getCenter();
@@ -542,12 +594,20 @@
     },
 
     destroy: function (mapId) {
+      this.teardownCoverageDrag(mapId);
+      this.clearRegionDraft(mapId);
       var map = this.maps[mapId];
       if (this._resizeObs && this._resizeObs[mapId]) {
         try {
           this._resizeObs[mapId].disconnect();
         } catch (_) {}
         delete this._resizeObs[mapId];
+      }
+      if (this._windowResize && this._windowResize[mapId]) {
+        try {
+          window.removeEventListener("resize", this._windowResize[mapId]);
+        } catch (_) {}
+        delete this._windowResize[mapId];
       }
       ["tipPopups", "detailPopups"].forEach(function (bag) {
         if (MetisMap[bag][mapId]) {
@@ -816,6 +876,45 @@
       return true;
     },
 
+    forceResize: function (mapId) {
+      var map = this.maps[mapId];
+      if (!map) return;
+      try {
+        // Prefer the stage host size so flex layout wins over a stale child box.
+        var container = map.getContainer();
+        var host = container && container.parentElement;
+        if (host && container) {
+          var w = host.clientWidth;
+          var h = host.clientHeight;
+          if (w > 0 && h > 0) {
+            container.style.width = w + "px";
+            container.style.height = h + "px";
+          }
+        }
+        map.resize();
+      } catch (_) {}
+      // Second pass after layout/paint — WebView often reports the old box once.
+      var self = this;
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(function () {
+          try {
+            map.resize();
+          } catch (_) {}
+          requestAnimationFrame(function () {
+            try {
+              map.resize();
+            } catch (_) {}
+          });
+        });
+      } else {
+        setTimeout(function () {
+          try {
+            self.maps[mapId] && self.maps[mapId].resize();
+          } catch (_) {}
+        }, 50);
+      }
+    },
+
     watchResize: function (mapId, container) {
       var map = this.maps[mapId];
       if (!map || !container) return;
@@ -825,14 +924,30 @@
         } catch (_) {}
       }
       if (!this._resizeObs) this._resizeObs = {};
-      if (typeof ResizeObserver === "undefined") return;
-      var obs = new ResizeObserver(function () {
-        try {
-          map.resize();
-        } catch (_) {}
-      });
-      obs.observe(container);
-      this._resizeObs[mapId] = obs;
+      var self = this;
+      var schedule = function () {
+        if (self._resizeTimer) clearTimeout(self._resizeTimer);
+        self._resizeTimer = setTimeout(function () {
+          self.forceResize(mapId);
+        }, 40);
+      };
+      if (typeof ResizeObserver !== "undefined") {
+        var obs = new ResizeObserver(schedule);
+        obs.observe(container);
+        if (container.parentElement) obs.observe(container.parentElement);
+        this._resizeObs[mapId] = obs;
+      }
+      if (typeof window !== "undefined") {
+        if (this._windowResize && this._windowResize[mapId]) {
+          try {
+            window.removeEventListener("resize", this._windowResize[mapId]);
+          } catch (_) {}
+        }
+        if (!this._windowResize) this._windowResize = {};
+        this._windowResize[mapId] = schedule;
+        window.addEventListener("resize", schedule);
+      }
+      schedule();
     },
 
     /** If outline GeoJSON URL sources failed to populate, fetch via metis:// and setData. */
@@ -856,6 +971,8 @@
     setStyle: async function (mapId, style, camera) {
       var map = this.maps[mapId];
       if (!map) return false;
+      this.clearPmtilesCache();
+      this.rememberCoverageFromStyle(mapId, style);
       var center =
         camera && isFinite(camera.lng) && isFinite(camera.lat)
           ? [camera.lng, camera.lat]
@@ -878,11 +995,16 @@
       }
       // Drop overlay state that belonged to the previous style.
       this.clearLabels(mapId);
+      this.teardownCoverageDrag(mapId);
       if (self.clusterEnabled) delete self.clusterEnabled[mapId];
       if (this.nodeFp) delete this.nodeFp[mapId];
       // Reset click binders so layers can rebind after style.load.
       Object.keys(map).forEach(function (k) {
-        if (k.indexOf("__metisClick_") === 0 || k.indexOf("__metisCluster_") === 0) {
+        if (
+          k.indexOf("__metisClick_") === 0 ||
+          k.indexOf("__metisCluster_") === 0 ||
+          k === "__metisCoverageBound"
+        ) {
           try {
             delete map[k];
           } catch (_) {}
@@ -910,6 +1032,12 @@
       });
       try {
         await this.hydrateOutlineSources(mapId);
+      } catch (_) {}
+      try {
+        if (this.regionDraft[mapId]) {
+          this.renderRegionDraft(mapId);
+          this.bindDraftDrag(mapId);
+        }
       } catch (_) {}
       restoreCamera();
       return true;
@@ -1098,6 +1226,446 @@
       var raw = global.__metisMapFavoriteToggle;
       global.__metisMapFavoriteToggle = null;
       return raw || "";
+    },
+
+    coveragePolygon: function (bbox) {
+      var w = bbox[0],
+        s = bbox[1],
+        e = bbox[2],
+        n = bbox[3];
+      return {
+        type: "FeatureCollection",
+        features: [
+          {
+            type: "Feature",
+            properties: { shape: "rectangle" },
+            geometry: {
+              type: "Polygon",
+              coordinates: [
+                [
+                  [w, s],
+                  [e, s],
+                  [e, n],
+                  [w, n],
+                  [w, s],
+                ],
+              ],
+            },
+          },
+        ],
+      };
+    },
+
+    readCoverageBbox: function (mapId) {
+      var bbox = this.coverageBbox[mapId];
+      return bbox && bbox.length === 4 ? bbox.slice() : null;
+    },
+
+    setCoverageBbox: function (mapId, bbox) {
+      var map = this.maps[mapId];
+      if (!map || !bbox) return false;
+      this.coverageBbox[mapId] = bbox.slice();
+      var source = map.getSource("tile-coverage");
+      if (!source || typeof source.setData !== "function") return false;
+      source.setData(this.coveragePolygon(bbox));
+      return true;
+    },
+
+    /** Committed pack ring is display-only; placement uses the draft shape + ✓/✕. */
+    teardownCoverageDrag: function (mapId) {
+      var map = this.maps[mapId];
+      var state = this.coverageDrag[mapId];
+      if (state && map) {
+        try {
+          if (state.onMove) map.off("mousemove", state.onMove);
+          if (state.onUp) {
+            map.off("mouseup", state.onUp);
+            map.off("touchend", state.onUp);
+          }
+          if (state.onDownFill) map.off("mousedown", "tile-coverage-fill", state.onDownFill);
+          if (state.onDownLine) map.off("mousedown", "tile-coverage-line", state.onDownLine);
+          if (state.onEnter) {
+            map.off("mouseenter", "tile-coverage-fill", state.onEnter);
+            map.off("mouseenter", "tile-coverage-line", state.onEnter);
+          }
+          if (state.onLeave) {
+            map.off("mouseleave", "tile-coverage-fill", state.onLeave);
+            map.off("mouseleave", "tile-coverage-line", state.onLeave);
+          }
+        } catch (_) {}
+      }
+      delete this.coverageDrag[mapId];
+      if (map) {
+        try {
+          delete map.__metisCoverageBound;
+          map.dragPan.enable();
+          map.getCanvas().style.cursor = "";
+        } catch (_) {}
+      }
+    },
+
+    bindCoverageDrag: function () {
+      // No-op: editing goes through placeRegionDraft + confirm/cancel markers.
+      return false;
+    },
+
+    offsetLngLat: function (lng, lat, eastMiles, northMiles) {
+      var cos = Math.cos((lat * Math.PI) / 180);
+      if (Math.abs(cos) < 0.2) cos = cos < 0 ? -0.2 : 0.2;
+      return [lng + eastMiles / (69.0 * cos), lat + northMiles / 69.0];
+    },
+
+    shapeRing: function (shape, lng, lat, radiusMiles) {
+      var r = Math.max(5, Math.min(300, radiusMiles || 50));
+      if (shape === "circle") {
+        var ring = [];
+        var steps = 64;
+        for (var i = 0; i <= steps; i++) {
+          var ang = (i / steps) * Math.PI * 2;
+          ring.push(
+            this.offsetLngLat(lng, lat, Math.sin(ang) * r, Math.cos(ang) * r)
+          );
+        }
+        return ring;
+      }
+      if (shape === "triangle") {
+        var top = this.offsetLngLat(lng, lat, 0, r);
+        var bl = this.offsetLngLat(lng, lat, -r * 0.9, -r * 0.75);
+        var br = this.offsetLngLat(lng, lat, r * 0.9, -r * 0.75);
+        return [top, br, bl, top];
+      }
+      // rectangle (axis-aligned)
+      var nw = this.offsetLngLat(lng, lat, -r, r);
+      var ne = this.offsetLngLat(lng, lat, r, r);
+      var se = this.offsetLngLat(lng, lat, r, -r);
+      var sw = this.offsetLngLat(lng, lat, -r, -r);
+      return [nw, ne, se, sw, nw];
+    },
+
+    ringBbox: function (ring) {
+      var lons = ring.map(function (p) {
+        return p[0];
+      });
+      var lats = ring.map(function (p) {
+        return p[1];
+      });
+      return [
+        Math.min.apply(null, lons),
+        Math.min.apply(null, lats),
+        Math.max.apply(null, lons),
+        Math.max.apply(null, lats),
+      ];
+    },
+
+    draftFeatureCollection: function (draft) {
+      var ring = this.shapeRing(draft.shape, draft.lng, draft.lat, draft.radiusMiles);
+      return {
+        type: "FeatureCollection",
+        features: [
+          {
+            type: "Feature",
+            properties: {
+              shape: draft.shape,
+              mode: draft.mode || "new",
+            },
+            geometry: { type: "Polygon", coordinates: [ring] },
+          },
+        ],
+      };
+    },
+
+    ensureDraftLayers: function (mapId) {
+      var map = this.maps[mapId];
+      if (!map) return false;
+      if (!map.getSource("region-draft")) {
+        map.addSource("region-draft", {
+          type: "geojson",
+          data: { type: "FeatureCollection", features: [] },
+        });
+      }
+      if (!map.getLayer("region-draft-fill")) {
+        map.addLayer({
+          id: "region-draft-fill",
+          type: "fill",
+          source: "region-draft",
+          paint: {
+            "fill-color": "#34d399",
+            "fill-opacity": 0.14,
+          },
+        });
+      }
+      if (!map.getLayer("region-draft-line")) {
+        map.addLayer({
+          id: "region-draft-line",
+          type: "line",
+          source: "region-draft",
+          paint: {
+            "line-color": "#34d399",
+            "line-width": 2.25,
+            "line-dasharray": [1.5, 1.25],
+            "line-opacity": 0.95,
+          },
+        });
+      }
+      return true;
+    },
+
+    clearRegionDraftMarkers: function (mapId) {
+      var bag = this.regionDraftMarkers[mapId];
+      if (!bag) return;
+      try {
+        if (bag.actions) bag.actions.remove();
+      } catch (_) {}
+      delete this.regionDraftMarkers[mapId];
+    },
+
+    updateRegionDraftMarkers: function (mapId) {
+      var map = this.maps[mapId];
+      var draft = this.regionDraft[mapId];
+      if (!map || !draft || !global.maplibregl) {
+        this.clearRegionDraftMarkers(mapId);
+        return;
+      }
+      var ring = this.shapeRing(draft.shape, draft.lng, draft.lat, draft.radiusMiles);
+      var bbox = this.ringBbox(ring);
+      var anchor = [bbox[2], bbox[3]]; // NE corner
+      var bag = this.regionDraftMarkers[mapId];
+      if (!bag) {
+        var el = document.createElement("div");
+        el.className = "map-region-actions";
+        el.innerHTML =
+          '<button type="button" class="map-region-btn map-region-confirm" title="Confirm area">✓</button>' +
+          '<button type="button" class="map-region-btn map-region-cancel" title="Remove">✕</button>';
+        var self = this;
+        el.querySelector(".map-region-confirm").addEventListener("click", function (ev) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          self.confirmRegionDraft(mapId);
+        });
+        el.querySelector(".map-region-cancel").addEventListener("click", function (ev) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          self.cancelRegionDraft(mapId);
+        });
+        // Keep map drag from eating button clicks.
+        el.addEventListener("mousedown", function (ev) {
+          ev.stopPropagation();
+        });
+        el.addEventListener("click", function (ev) {
+          ev.stopPropagation();
+        });
+        bag = {
+          actions: new global.maplibregl.Marker({
+            element: el,
+            anchor: "bottom-left",
+            offset: [6, -6],
+          })
+            .setLngLat(anchor)
+            .addTo(map),
+        };
+        this.regionDraftMarkers[mapId] = bag;
+      } else {
+        bag.actions.setLngLat(anchor);
+      }
+    },
+
+    renderRegionDraft: function (mapId) {
+      var map = this.maps[mapId];
+      var draft = this.regionDraft[mapId];
+      if (!map || !draft) return false;
+      if (!this.ensureDraftLayers(mapId)) return false;
+      var source = map.getSource("region-draft");
+      if (!source) return false;
+      source.setData(this.draftFeatureCollection(draft));
+      this.updateRegionDraftMarkers(mapId);
+      return true;
+    },
+
+    placeRegionDraft: function (mapId, opts) {
+      var map = this.maps[mapId];
+      if (!map) return false;
+      opts = opts || {};
+      var center = map.getCenter();
+      var lng = isFinite(opts.lng) ? opts.lng : center.lng;
+      var lat = isFinite(opts.lat) ? opts.lat : center.lat;
+      var shape = opts.shape || "rectangle";
+      if (shape !== "circle" && shape !== "triangle" && shape !== "rectangle") {
+        shape = "rectangle";
+      }
+      var radius = isFinite(opts.radiusMiles) ? opts.radiusMiles : 50;
+      radius = Math.max(5, Math.min(300, radius));
+      this.regionDraft[mapId] = {
+        shape: shape,
+        radiusMiles: radius,
+        lng: lng,
+        lat: lat,
+        mode: opts.mode === "adjust" ? "adjust" : "new",
+      };
+      this.teardownDraftDrag(mapId);
+      this.renderRegionDraft(mapId);
+      this.bindDraftDrag(mapId);
+      return true;
+    },
+
+    clearRegionDraft: function (mapId) {
+      this.teardownDraftDrag(mapId);
+      this.clearRegionDraftMarkers(mapId);
+      delete this.regionDraft[mapId];
+      var map = this.maps[mapId];
+      if (map && map.getSource("region-draft")) {
+        try {
+          map.getSource("region-draft").setData({
+            type: "FeatureCollection",
+            features: [],
+          });
+        } catch (_) {}
+      }
+      return true;
+    },
+
+    confirmRegionDraft: function (mapId) {
+      var draft = this.regionDraft[mapId];
+      if (!draft) return false;
+      var ring = this.shapeRing(draft.shape, draft.lng, draft.lat, draft.radiusMiles);
+      var bbox = this.ringBbox(ring);
+      global.__metisRegionConfirm = JSON.stringify({
+        shape: draft.shape,
+        mode: draft.mode || "new",
+        radiusMiles: draft.radiusMiles,
+        lng: draft.lng,
+        lat: draft.lat,
+        west: bbox[0],
+        south: bbox[1],
+        east: bbox[2],
+        north: bbox[3],
+      });
+      this.clearRegionDraft(mapId);
+      return true;
+    },
+
+    cancelRegionDraft: function (mapId) {
+      if (!this.regionDraft[mapId]) return false;
+      global.__metisRegionCancel = "1";
+      this.clearRegionDraft(mapId);
+      return true;
+    },
+
+    teardownDraftDrag: function (mapId) {
+      var map = this.maps[mapId];
+      var state = this.coverageDrag[mapId];
+      if (state && map) {
+        try {
+          if (state.onMove) map.off("mousemove", state.onMove);
+          if (state.onUp) {
+            map.off("mouseup", state.onUp);
+            map.off("touchend", state.onUp);
+          }
+          if (state.onDownFill) map.off("mousedown", "region-draft-fill", state.onDownFill);
+          if (state.onDownLine) map.off("mousedown", "region-draft-line", state.onDownLine);
+          if (state.onEnter) {
+            map.off("mouseenter", "region-draft-fill", state.onEnter);
+            map.off("mouseenter", "region-draft-line", state.onEnter);
+          }
+          if (state.onLeave) {
+            map.off("mouseleave", "region-draft-fill", state.onLeave);
+            map.off("mouseleave", "region-draft-line", state.onLeave);
+          }
+        } catch (_) {}
+      }
+      delete this.coverageDrag[mapId];
+      if (map) {
+        try {
+          delete map.__metisDraftBound;
+          map.dragPan.enable();
+          map.getCanvas().style.cursor = "";
+        } catch (_) {}
+      }
+    },
+
+    bindDraftDrag: function (mapId) {
+      var map = this.maps[mapId];
+      if (!map || !map.getLayer("region-draft-fill")) return false;
+      this.teardownDraftDrag(mapId);
+      var self = this;
+      var state = {
+        dragging: false,
+        startLngLat: null,
+        startCenter: null,
+      };
+
+      function beginDrag(e) {
+        var draft = self.regionDraft[mapId];
+        if (!draft || !e || !e.lngLat) return;
+        state.dragging = true;
+        state.startLngLat = e.lngLat;
+        state.startCenter = { lng: draft.lng, lat: draft.lat };
+        map.dragPan.disable();
+        map.getCanvas().style.cursor = "grabbing";
+        if (e.originalEvent && e.originalEvent.preventDefault) {
+          e.originalEvent.preventDefault();
+        }
+      }
+
+      state.onDownFill = function (e) {
+        beginDrag(e);
+      };
+      state.onDownLine = function (e) {
+        beginDrag(e);
+      };
+      state.onMove = function (e) {
+        if (!state.dragging || !state.startLngLat || !state.startCenter) return;
+        var draft = self.regionDraft[mapId];
+        if (!draft) return;
+        var dLng = e.lngLat.lng - state.startLngLat.lng;
+        var dLat = e.lngLat.lat - state.startLngLat.lat;
+        draft.lng = state.startCenter.lng + dLng;
+        draft.lat = Math.max(-85, Math.min(85, state.startCenter.lat + dLat));
+        self.renderRegionDraft(mapId);
+      };
+      state.onUp = function () {
+        if (!state.dragging) return;
+        state.dragging = false;
+        state.startLngLat = null;
+        state.startCenter = null;
+        map.dragPan.enable();
+        map.getCanvas().style.cursor = "grab";
+      };
+      state.onEnter = function () {
+        if (!state.dragging) map.getCanvas().style.cursor = "grab";
+      };
+      state.onLeave = function () {
+        if (!state.dragging) map.getCanvas().style.cursor = "";
+      };
+
+      map.on("mousedown", "region-draft-fill", state.onDownFill);
+      map.on("mousedown", "region-draft-line", state.onDownLine);
+      map.on("mousemove", state.onMove);
+      map.on("mouseup", state.onUp);
+      map.on("touchend", state.onUp);
+      map.on("mouseenter", "region-draft-fill", state.onEnter);
+      map.on("mouseenter", "region-draft-line", state.onEnter);
+      map.on("mouseleave", "region-draft-fill", state.onLeave);
+      map.on("mouseleave", "region-draft-line", state.onLeave);
+      this.coverageDrag[mapId] = state;
+      map.__metisDraftBound = true;
+      return true;
+    },
+
+    takeRegionConfirm: function () {
+      var raw = global.__metisRegionConfirm;
+      global.__metisRegionConfirm = null;
+      return raw || "";
+    },
+
+    takeRegionCancel: function () {
+      var raw = global.__metisRegionCancel;
+      global.__metisRegionCancel = null;
+      return raw || "";
+    },
+
+    takeCoverageMove: function () {
+      // Legacy no-op (confirm flow replaced auto-commit on drag).
+      return "";
     },
   };
 

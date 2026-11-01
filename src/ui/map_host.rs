@@ -230,6 +230,95 @@ pub async fn map_take_favorite_toggle() -> Option<String> {
         .await
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegionDraftConfirm {
+    pub shape: String,
+    pub mode: String,
+    pub radius_miles: f64,
+    pub lng: f64,
+    pub lat: f64,
+    pub bbox: [f64; 4],
+}
+
+pub async fn map_place_region_draft(
+    shape: &str,
+    radius_miles: f64,
+    lng: f64,
+    lat: f64,
+    mode: &str,
+) {
+    let js = format!(
+        r#"(() => {{
+  if (!window.MetisMap) return false;
+  return window.MetisMap.placeRegionDraft({id}, {{
+    shape: {shape},
+    radiusMiles: {radius},
+    lng: {lng},
+    lat: {lat},
+    mode: {mode}
+  }});
+}})()"#,
+        id = escape_js_string(MAP_ID),
+        shape = escape_js_string(shape),
+        radius = radius_miles,
+        lng = lng,
+        lat = lat,
+        mode = escape_js_string(mode),
+    );
+    let _ = document::eval(&js).await;
+}
+
+pub async fn map_clear_region_draft() {
+    let js = format!(
+        r#"(() => {{
+  if (!window.MetisMap) return false;
+  return window.MetisMap.clearRegionDraft({id});
+}})()"#,
+        id = escape_js_string(MAP_ID),
+    );
+    let _ = document::eval(&js).await;
+}
+
+pub async fn map_take_region_confirm() -> Option<RegionDraftConfirm> {
+    let raw = eval_string(
+        r#"(() => (window.MetisMap ? window.MetisMap.takeRegionConfirm() : ""))()"#,
+    )
+    .await?;
+    let v: Value = serde_json::from_str(&raw).ok()?;
+    let w = v.get("west")?.as_f64()?;
+    let s = v.get("south")?.as_f64()?;
+    let e = v.get("east")?.as_f64()?;
+    let n = v.get("north")?.as_f64()?;
+    if !(w < e && s < n) {
+        return None;
+    }
+    Some(RegionDraftConfirm {
+        shape: v
+            .get("shape")
+            .and_then(|x| x.as_str())
+            .unwrap_or("rectangle")
+            .to_string(),
+        mode: v
+            .get("mode")
+            .and_then(|x| x.as_str())
+            .unwrap_or("new")
+            .to_string(),
+        radius_miles: v.get("radiusMiles").and_then(|x| x.as_f64()).unwrap_or(50.0),
+        lng: v.get("lng").and_then(|x| x.as_f64()).unwrap_or((w + e) / 2.0),
+        lat: v.get("lat").and_then(|x| x.as_f64()).unwrap_or((s + n) / 2.0),
+        bbox: [w, s, e, n],
+    })
+}
+
+pub async fn map_take_region_cancel() -> bool {
+    matches!(
+        eval_string(r#"(() => (window.MetisMap ? window.MetisMap.takeRegionCancel() : ""))()"#)
+            .await
+            .as_deref(),
+        Some("1")
+    )
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct MapCamera {
     pub lng: f64,
@@ -297,6 +386,129 @@ fn outline_colors(kind: BasemapKind) -> (&'static str, &'static str, &'static st
         BasemapKind::Terrain => ("#0d1510", "#1f3a28", "#86efac"),
         BasemapKind::Topo => ("#12100c", "#2a2418", "#fbbf24"),
     }
+}
+
+fn insert_outline_sources(sources: &mut serde_json::Map<String, Value>) {
+    sources.insert(
+        "world-land".into(),
+        json!({
+            "type": "geojson",
+            "data": outline_geojson_url("world-land"),
+        }),
+    );
+    sources.insert(
+        "admin1-lines".into(),
+        json!({
+            "type": "geojson",
+            "data": outline_geojson_url("admin1-lines"),
+        }),
+    );
+    sources.insert(
+        "admin0-borders".into(),
+        json!({
+            "type": "geojson",
+            "data": outline_geojson_url("admin0-borders"),
+        }),
+    );
+}
+
+/// World land + borders (Natural Earth). Used alone for Outline mode, and under
+/// PMTiles so zooming past a local pack still shows continents instead of a void.
+fn outline_underlay_layers(kind: BasemapKind) -> Vec<Value> {
+    let (_bg, land, border) = outline_colors(kind);
+    vec![
+        json!({
+            "id": "world-land-fill",
+            "type": "fill",
+            "source": "world-land",
+            "paint": {
+                "fill-color": land,
+                "fill-opacity": 1.0
+            }
+        }),
+        json!({
+            "id": "world-land-outline",
+            "type": "line",
+            "source": "world-land",
+            "paint": {
+                "line-color": border,
+                "line-width": 0.7,
+                "line-opacity": 0.55
+            }
+        }),
+        json!({
+            "id": "admin0-borders",
+            "type": "line",
+            "source": "admin0-borders",
+            "paint": {
+                "line-color": border,
+                "line-width": match kind {
+                    BasemapKind::Topo => 1.4,
+                    BasemapKind::Streets => 1.2,
+                    _ => 1.15,
+                },
+                "line-opacity": 0.95
+            }
+        }),
+        json!({
+            "id": "admin1-borders",
+            "type": "line",
+            "source": "admin1-lines",
+            "paint": {
+                "line-color": border,
+                "line-width": match kind {
+                    BasemapKind::Topo => 0.85,
+                    BasemapKind::Streets => 0.7,
+                    _ => 0.6,
+                },
+                "line-opacity": 0.7
+            }
+        }),
+    ]
+}
+
+fn coverage_polygon(bbox: [f64; 4]) -> Value {
+    let [w, s, e, n] = bbox;
+    json!({
+        "type": "Feature",
+        "properties": {},
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[
+                [w, s], [e, s], [e, n], [w, n], [w, s]
+            ]]
+        }
+    })
+}
+
+fn coverage_layers(kind: BasemapKind) -> Vec<Value> {
+    let accent = match kind {
+        BasemapKind::Terrain => "#86efac",
+        BasemapKind::Topo => "#fbbf24",
+        _ => "#34d399",
+    };
+    vec![
+        json!({
+            "id": "tile-coverage-fill",
+            "type": "fill",
+            "source": "tile-coverage",
+            "paint": {
+                "fill-color": accent,
+                "fill-opacity": 0.07
+            }
+        }),
+        json!({
+            "id": "tile-coverage-line",
+            "type": "line",
+            "source": "tile-coverage",
+            "paint": {
+                "line-color": accent,
+                "line-width": 2.0,
+                "line-dasharray": [2, 2],
+                "line-opacity": 0.85
+            }
+        }),
+    ]
 }
 
 fn name_field() -> Value {
@@ -615,14 +827,28 @@ fn vector_basemap_layers(kind: BasemapKind) -> Vec<Value> {
     ]
 }
 
-pub fn dark_basemap_style(pmtiles_url: Option<&str>, kind: BasemapKind) -> Value {
+/// Build the MapLibre style.
+///
+/// `coverage_bbox` is the active offline pack `[west, south, east, north]`. When
+/// Streets/Terrain/Topo use a local PMTiles extract, layers only exist inside that
+/// box — we keep a world outline underlay (and a dashed coverage ring) so zooming
+/// out does not look like a broken, cut-off canvas.
+pub fn dark_basemap_style(
+    pmtiles_url: Option<&str>,
+    kind: BasemapKind,
+    coverage_bbox: Option<[f64; 4]>,
+) -> Value {
     let mut sources = serde_json::Map::new();
-    let (bg, land, border) = outline_colors(kind);
-    let mut layers = vec![serde_json::json!({
+    let (bg, _land, _border) = outline_colors(kind);
+    let mut layers = vec![json!({
         "id": "background",
         "type": "background",
         "paint": { "background-color": bg }
     })];
+
+    // Always load outline GeoJSON so vector styles can fall back outside the pack.
+    insert_outline_sources(&mut sources);
+    layers.extend(outline_underlay_layers(kind));
 
     let use_vector = pmtiles_url.is_some() && kind != BasemapKind::Outline;
     let mut glyphs: Option<Value> = None;
@@ -630,7 +856,7 @@ pub fn dark_basemap_style(pmtiles_url: Option<&str>, kind: BasemapKind) -> Value
     if let (Some(url), true) = (pmtiles_url, use_vector) {
         sources.insert(
             "protomaps".into(),
-            serde_json::json!({
+            json!({
                 "type": "vector",
                 "url": format!("pmtiles://{url}"),
                 "attribution": "© OpenStreetMap © Protomaps"
@@ -648,81 +874,32 @@ pub fn dark_basemap_style(pmtiles_url: Option<&str>, kind: BasemapKind) -> Value
             }
             _ => "https://protomaps.github.io/basemaps-assets/sprites/v4/dark",
         }));
-        layers = vector_basemap_layers(kind);
-    } else {
-        sources.insert(
-            "world-land".into(),
-            serde_json::json!({
-                "type": "geojson",
-                "data": outline_geojson_url("world-land"),
-            }),
-        );
-        sources.insert(
-            "admin1-lines".into(),
-            serde_json::json!({
-                "type": "geojson",
-                "data": outline_geojson_url("admin1-lines"),
-            }),
-        );
-        sources.insert(
-            "admin0-borders".into(),
-            serde_json::json!({
-                "type": "geojson",
-                "data": outline_geojson_url("admin0-borders"),
-            }),
-        );
-        layers.push(serde_json::json!({
-            "id": "world-land-fill",
-            "type": "fill",
-            "source": "world-land",
-            "paint": {
-                "fill-color": land,
-                "fill-opacity": 1.0
+
+        // Skip vector "background" — outline underlay already painted the world.
+        for layer in vector_basemap_layers(kind).into_iter().skip(1) {
+            layers.push(layer);
+        }
+
+        // Pack ring on top so zoomed-out views show where Streets/Terrain/Topo exist.
+        if let Some(bbox) = coverage_bbox {
+            let [w, s, e, n] = bbox;
+            if w < e && s < n {
+                sources.insert(
+                    "tile-coverage".into(),
+                    json!({
+                        "type": "geojson",
+                        "data": {
+                            "type": "FeatureCollection",
+                            "features": [coverage_polygon(bbox)]
+                        }
+                    }),
+                );
+                layers.extend(coverage_layers(kind));
             }
-        }));
-        layers.push(serde_json::json!({
-            "id": "world-land-outline",
-            "type": "line",
-            "source": "world-land",
-            "paint": {
-                "line-color": border,
-                "line-width": 0.7,
-                "line-opacity": 0.55
-            }
-        }));
-        // Country borders (Natural Earth 110m admin 0).
-        layers.push(serde_json::json!({
-            "id": "admin0-borders",
-            "type": "line",
-            "source": "admin0-borders",
-            "paint": {
-                "line-color": border,
-                "line-width": match kind {
-                    BasemapKind::Topo => 1.4,
-                    BasemapKind::Streets => 1.2,
-                    _ => 1.15,
-                },
-                "line-opacity": 0.95
-            }
-        }));
-        // State / province borders (Natural Earth 110m admin 1).
-        layers.push(serde_json::json!({
-            "id": "admin1-borders",
-            "type": "line",
-            "source": "admin1-lines",
-            "paint": {
-                "line-color": border,
-                "line-width": match kind {
-                    BasemapKind::Topo => 0.85,
-                    BasemapKind::Streets => 0.7,
-                    _ => 0.6,
-                },
-                "line-opacity": 0.7
-            }
-        }));
+        }
     }
 
-    let mut style = serde_json::json!({
+    let mut style = json!({
         "version": 8,
         "sources": sources,
         "layers": layers,

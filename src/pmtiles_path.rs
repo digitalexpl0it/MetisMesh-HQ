@@ -39,8 +39,15 @@ pub fn active_region_id() -> Option<String> {
 }
 
 /// URL the MapLibre PMTiles protocol should fetch (custom `metis` scheme).
+/// `v=` is the file mtime so a re-download of the same region id busts the JS cache.
 pub fn basemap_protocol_url() -> Option<String> {
-    current_pmtiles_path()?;
+    let path = current_pmtiles_path()?;
     let id = active_region_id().unwrap_or_else(|| "basemap".into());
-    Some(format!("metis://local/pmtiles/{id}"))
+    let v = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Some(format!("metis://local/pmtiles/{id}?v={v}"))
 }

@@ -13,7 +13,9 @@ use crate::contact_qr::{
     contact_add_uri, enqueue_contact_qr, qr_data_url_from_file, qr_public_url,
 };
 use crate::db::{unix_now, Db, TelemetryPoint};
-use crate::radio::{channel_sender_and_body, BleRadio, RadioHandle, RadioStatus};
+use crate::radio::{
+    channel_sender_and_body, prefix_channel_sender, BleRadio, RadioHandle, RadioStatus,
+};
 use crate::radio_presets::{
     community_presets, loc_policy_label, preset_label_for, queue_path_hash_mode,
     refresh_presets_cache_if_needed, RadioPreset, BW_OPTIONS_KHZ, CR_OPTIONS, SF_OPTIONS,
@@ -27,8 +29,15 @@ use map_page::MapPage;
 use widgets::{
     append_emoji, Badge, BarMix, BarMixRow, BatteryChart, BatteryPill, BatterySample, Button,
     ButtonKind, Card, ChartSeries, Dialog, EmojiPickerButton, LineChart, PageHeading, PinSlideDown,
-    SelectInput, Sparkline, TextInput,
+    SelectInput, Sparkline, TextInput, ToastHost,
 };
+
+/// Show a transient toast (and log it). Prefer this over inline amber labels.
+fn status_note(message: impl Into<String>) {
+    let message = message.into();
+    let kind = crate::toast::infer_kind(&message);
+    crate::toast::push(kind, message);
+}
 
 pub struct AppState {
     pub db: Arc<Db>,
@@ -66,6 +75,7 @@ pub fn App() -> Element {
     let mut pin_error = use_signal(String::new);
     let mut pin_form_key = use_signal(|| 0u64);
     let mut tick = use_signal(|| 0u64);
+    let mut toast_tick = use_signal(|| 0u32);
     let mut started = use_signal(|| false);
     if !started() {
         started.set(true);
@@ -75,8 +85,16 @@ pub fn App() -> Element {
                 tick.set(tick() + 1);
             }
         });
+        spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                crate::toast::prune_expired();
+                toast_tick.with_mut(|n| *n = n.wrapping_add(1));
+            }
+        });
     }
     let _ = tick();
+    let toast_frame = toast_tick();
     let radio = state().radio.snapshot();
     let pending = state().db.pending_nodes().unwrap_or_default().len();
     let expanded = nav_open();
@@ -200,25 +218,14 @@ pub fn App() -> Element {
                             p { class: "text-[0.65rem] uppercase tracking-[0.18em] text-muted-foreground", "Metis Mesh HQ" }
                             h2 { class: "text-lg font-semibold leading-tight", "{page_title}" }
                         }
-                        div { class: "inline-flex items-center gap-3 rounded-md border border-border bg-card px-3 py-1.5 text-xs text-muted-foreground",
-                            span { class: "inline-flex items-center gap-2",
-                                Icon { name: status_icon(&radio.state), size: 14 }
-                                span { class: "text-foreground", "{status_label(&radio.state)}" }
-                                if !radio.connected_name.is_empty() {
-                                    span { class: "max-w-[9rem] truncate text-muted-foreground", "· {radio.connected_name}" }
-                                }
-                            }
-                            if radio.state == "connected" || radio.battery_pct.is_some() {
-                                span { class: "h-4 w-px bg-border" }
-                                BatteryPill {
-                                    pct: radio.battery_pct,
-                                    mv: radio.battery_mv,
-                                    charging: radio.battery_charging,
-                                }
-                            }
-                        }
+                        HeaderRadioControls { radio: radio.clone() }
                     }
-                    main { class: "min-h-0 flex-1 overflow-auto p-5",
+                    main {
+                        class: if page() == Page::Map {
+                            "min-h-0 flex-1 overflow-hidden p-5"
+                        } else {
+                            "min-h-0 flex-1 overflow-auto p-5"
+                        },
                         match page() {
                             Page::Dashboard => rsx! { DashboardPage { radio: radio.clone(), on_navigate: move |next| page.set(next) } },
                             Page::Map => rsx! { MapPage {} },
@@ -247,6 +254,7 @@ pub fn App() -> Element {
                     }
                 }
             }
+            ToastHost { tick: toast_frame }
             footer { class: "flex items-center gap-4 border-t border-border px-4 py-2 text-xs text-muted-foreground",
                 span { class: "inline-flex shrink-0 items-center gap-2",
                     Icon { name: status_icon(&radio.state), size: 14 }
@@ -307,7 +315,7 @@ pub fn App() -> Element {
 fn status_icon(state: &str) -> IconName {
     match state {
         "connected" => IconName::Radio,
-        "connecting" | "reconnecting" | "scanning" | "pairing" => IconName::Scan,
+        "connecting" | "reconnecting" | "scanning" | "pairing" | "disconnecting" => IconName::Scan,
         "error" => IconName::Close,
         _ => IconName::Bluetooth,
     }
@@ -320,6 +328,7 @@ fn status_label(state: &str) -> &'static str {
         "reconnecting" => "Reconnecting",
         "scanning" => "Scanning",
         "pairing" => "Pairing",
+        "disconnecting" => "Disconnecting",
         "error" => "Radio error",
         _ => "Disconnected",
     }
@@ -524,6 +533,145 @@ fn companion_option_label(row: &crate::db::RadioRow, devices: &[BleRadio]) -> St
     companion_display_name(row, devices)
 }
 
+/// Always-visible companion control in the page header.
+/// Disconnected: optional saved-radio picker + Connect.
+/// Connected: status pill + Disconnect.
+#[component]
+fn HeaderRadioControls(radio: RadioStatus) -> Element {
+    let saved_radios = state().db.list_saved_radios().unwrap_or_default();
+    let preferred = state()
+        .db
+        .setting("radio_name")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let default_target = if saved_radios.iter().any(|row| row.address == preferred) {
+        preferred.clone()
+    } else {
+        saved_radios
+            .first()
+            .map(|row| row.address.clone())
+            .unwrap_or_default()
+    };
+    let mut selected = use_signal(|| default_target.clone());
+    // Keep the picker on the preferred radio when settings change.
+    if !default_target.is_empty()
+        && selected().is_empty()
+        && saved_radios.iter().any(|row| row.address == default_target)
+    {
+        selected.set(default_target.clone());
+    }
+    let linked = radio.state == "connected";
+    let busy = matches!(
+        radio.state.as_str(),
+        "connecting" | "reconnecting" | "pairing" | "scanning" | "disconnecting"
+    );
+    let show_live = linked || busy || !radio.connected_name.is_empty();
+
+    if show_live {
+        let label = if !radio.connected_name.is_empty() {
+            radio.connected_name.clone()
+        } else {
+            selected()
+        };
+        return rsx! {
+            div { class: "inline-flex items-center gap-2",
+                div { class: "inline-flex items-center gap-3 rounded-md border border-border bg-card px-3 py-1.5 text-xs text-muted-foreground",
+                    span { class: "inline-flex min-w-0 items-center gap-2",
+                        Icon { name: status_icon(&radio.state), size: 14 }
+                        span { class: "text-foreground", "{status_label(&radio.state)}" }
+                        if !label.is_empty() {
+                            span { class: "max-w-[9rem] truncate text-muted-foreground", "· {label}" }
+                        }
+                    }
+                    if linked || radio.battery_pct.is_some() {
+                        span { class: "h-4 w-px bg-border" }
+                        BatteryPill {
+                            pct: radio.battery_pct,
+                            mv: radio.battery_mv,
+                            charging: radio.battery_charging,
+                        }
+                    }
+                }
+                Button {
+                    kind: ButtonKind::Ghost,
+                    disabled: matches!(radio.state.as_str(), "pairing" | "disconnecting"),
+                    onclick: move |_| state().radio.disconnect(),
+                    Icon { name: IconName::Unlink, size: 14 }
+                    if radio.state == "disconnecting" {
+                        "Disconnecting…"
+                    } else if busy {
+                        "Cancel"
+                    } else {
+                        "Disconnect"
+                    }
+                }
+            }
+        };
+    }
+
+    rsx! {
+        div { class: "inline-flex items-center gap-2",
+            if saved_radios.is_empty() {
+                div { class: "inline-flex items-center gap-2 rounded-md border border-border bg-card px-3 py-1.5 text-xs text-muted-foreground",
+                    Icon { name: IconName::Radio, size: 14 }
+                    span { "No saved radio" }
+                }
+                Button {
+                    kind: ButtonKind::Ghost,
+                    disabled: true,
+                    onclick: move |_| {},
+                    Icon { name: IconName::Bluetooth, size: 14 }
+                    "Connect"
+                }
+            } else {
+                if saved_radios.len() > 1 {
+                    div { class: "w-44 shrink-0",
+                        SelectInput {
+                            id: "header-saved-radio".to_string(),
+                            value: selected(),
+                            onchange: move |event: FormEvent| selected.set(event.value()),
+                            for row in saved_radios.iter().cloned() {
+                                option {
+                                    key: "{row.address}",
+                                    value: "{row.address}",
+                                    style: "background-color: #101418; color: #f4f4f5;",
+                                    "{companion_option_label(&row, &radio.devices)}"
+                                }
+                            }
+                        }
+                    }
+                } else if let Some(row) = saved_radios.first() {
+                    div { class: "inline-flex max-w-[12rem] items-center gap-2 rounded-md border border-border bg-card px-3 py-1.5 text-xs text-muted-foreground",
+                        Icon { name: IconName::Radio, size: 14 }
+                        span { class: "truncate text-foreground",
+                            "{companion_display_name(row, &radio.devices)}"
+                        }
+                    }
+                }
+                Button {
+                    disabled: busy || selected().trim().is_empty(),
+                    onclick: move |_| {
+                        let target = if saved_radios.len() == 1 {
+                            saved_radios
+                                .first()
+                                .map(|row| row.address.clone())
+                                .unwrap_or_else(|| selected())
+                        } else {
+                            selected()
+                        };
+                        if !target.trim().is_empty() {
+                            state().radio.reconnect(target);
+                        }
+                    },
+                    Icon { name: IconName::Bluetooth, size: 14 }
+                    "Connect"
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element {
     let hq_name = state()
@@ -585,7 +733,7 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
     };
     let busy = matches!(
         radio.state.as_str(),
-        "connecting" | "reconnecting" | "pairing" | "scanning"
+        "connecting" | "reconnecting" | "pairing" | "scanning" | "disconnecting"
     );
     let linked = radio.state == "connected";
     let stored_device = if !radio.connected_name.is_empty() {
@@ -1680,14 +1828,18 @@ fn InboxPage() -> Element {
 
 #[component]
 fn MessagesPage() -> Element {
-    let mut selected_slot = use_signal(|| None::<i64>);
+    // Select by name, not slot: radio sync remaps slots and used to make a
+    // click on Public open METIS-INFO when both rows shared slot 1.
+    let mut selected_channel = use_signal(|| None::<String>);
     let mut draft = use_signal(String::new);
     let mut create_name = use_signal(String::new);
     let mut create_visibility = use_signal(|| "private".to_string());
     let mut note = use_signal(String::new);
+    let sending = use_signal(|| false);
     let mut reply_target = use_signal(|| None::<MessageReplyTarget>);
     let mut refresh = use_signal(|| 0u64);
     let mut refresh_started = use_signal(|| false);
+    let mut last_send_seq = use_signal(|| 0u64);
     let mut read_session = use_signal(|| None::<ChannelReadSession>);
     let mut message_keep = use_signal(|| {
         state()
@@ -1713,17 +1865,37 @@ fn MessagesPage() -> Element {
         let _ = state().db.apply_message_keep();
     }
     let radio = state().radio.snapshot();
+    // Channel sends are fire-and-forget; surface the radio task result here.
+    if radio.send_seq != last_send_seq() {
+        last_send_seq.set(radio.send_seq);
+        if radio.send_note.is_empty() {
+            note.set(String::new());
+        } else {
+            note.set(radio.send_note.clone());
+        }
+    }
     let channels = state().db.list_channels().unwrap_or_default();
-    let linked = radio.state == "connected";
+    // Only enable Send once the live session loop is up (sync_phase Ready).
+    // Mid-sync used to report state=connected while the command lock was held,
+    // so Send did nothing.
+    let linked = radio.state == "connected"
+        && matches!(
+            radio.sync_phase,
+            crate::radio::SyncPhase::Ready | crate::radio::SyncPhase::Idle
+        );
 
-    if let Some(slot) = selected_slot() {
-        let channel = channels.iter().find(|row| row.slot == slot).cloned();
+    if let Some(selected_name) = selected_channel() {
+        let channel = channels
+            .iter()
+            .find(|row| row.name == selected_name)
+            .cloned();
         let Some(channel) = channel else {
-            selected_slot.set(None);
+            selected_channel.set(None);
             return rsx! {
                 div { class: "text-sm text-muted-foreground", "Channel not found." }
             };
         };
+        let slot = channel.slot;
         let messages = state()
             .db
             .list_channel_messages(slot, 400)
@@ -1732,7 +1904,7 @@ fn MessagesPage() -> Element {
         let latest_id = messages.last().map(|message| message.id);
         let needs_session = read_session()
             .as_ref()
-            .map(|session| session.slot != slot)
+            .map(|session| session.slot != slot || session.name != selected_name)
             .unwrap_or(true);
         if needs_session {
             let anchor = state()
@@ -1752,6 +1924,7 @@ fn MessagesPage() -> Element {
                 }
             }
             read_session.set(Some(ChannelReadSession {
+                name: selected_name.clone(),
                 slot,
                 anchor_id: anchor,
                 show_banner,
@@ -1792,6 +1965,7 @@ fn MessagesPage() -> Element {
             }
         }
         let session = read_session().unwrap_or(ChannelReadSession {
+            name: selected_name.clone(),
             slot,
             anchor_id: None,
             show_banner: false,
@@ -1813,10 +1987,16 @@ fn MessagesPage() -> Element {
                         Button {
                             kind: ButtonKind::Ghost,
                             onclick: move |_| {
-                                if let Some(slot) = selected_slot() {
-                                    let _ = state().db.mark_channel_caught_up(slot);
+                                if let Some(name) = selected_channel() {
+                                    if let Some(row) =
+                                        state().db.list_channels().ok().and_then(|rows| {
+                                            rows.into_iter().find(|row| row.name == name)
+                                        })
+                                    {
+                                        let _ = state().db.mark_channel_caught_up(row.slot);
+                                    }
                                 }
-                                selected_slot.set(None);
+                                selected_channel.set(None);
                                 reply_target.set(None);
                                 draft.set(String::new());
                                 read_session.set(None);
@@ -1845,10 +2025,10 @@ fn MessagesPage() -> Element {
                                 .message_keep
                                 .clone()
                                 .unwrap_or_else(|| "default".into()),
-                            on_done: move |msg: String| note.set(msg),
-                        }
-                        if !note().is_empty() {
-                            p { class: "text-xs text-amber-200", "{note}" }
+                            on_done: move |msg: String| {
+                                // Keep changes belong in the status bar, not the chat header.
+                                status_note(msg);
+                            },
                         }
                     }
                 }
@@ -1947,17 +2127,36 @@ fn MessagesPage() -> Element {
                                                 outgoing,
                                             }
                                             div { class: "mt-2 flex justify-start",
-                                                span {
-                                                    class: if outgoing {
-                                                        "inline-flex items-center gap-1 rounded-full bg-sky-400/15 px-2 py-0.5 text-[0.65rem] text-sky-100"
-                                                    } else {
-                                                        "inline-flex items-center gap-1 rounded-full bg-background/60 px-2 py-0.5 text-[0.65rem] text-muted-foreground"
-                                                    },
-                                                    Icon { name: IconName::Signal, size: 11 }
-                                                    if let Some(hops) = message.hop_count {
-                                                        "{hops} hops"
-                                                    } else {
-                                                        "hops —"
+                                                if outgoing {
+                                                    {
+                                                        let (label, icon, tone) = match message.delivery.as_str() {
+                                                            "queued" => ("Queued", IconName::Clock, "bg-sky-400/15 text-sky-100"),
+                                                            "sending" => ("Sending…", IconName::Clock, "bg-sky-400/15 text-sky-100"),
+                                                            "failed" => ("Not sent", IconName::Ban, "bg-red-500/20 text-red-200"),
+                                                            _ => ("Sent", IconName::Check, "bg-sky-400/15 text-sky-100"),
+                                                        };
+                                                        rsx! {
+                                                            span {
+                                                                class: "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[0.65rem] {tone}",
+                                                                title: if message.delivery == "failed" {
+                                                                    "The companion did not accept this message. Check the status bar, then send it again."
+                                                                } else {
+                                                                    ""
+                                                                },
+                                                                Icon { name: icon, size: 11 }
+                                                                "{label}"
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    span {
+                                                        class: "inline-flex items-center gap-1 rounded-full bg-background/60 px-2 py-0.5 text-[0.65rem] text-muted-foreground",
+                                                        Icon { name: IconName::Signal, size: 11 }
+                                                        if let Some(hops) = message.hop_count {
+                                                            "{hops} hops"
+                                                        } else {
+                                                            "hops —"
+                                                        }
                                                     }
                                                 }
                                             }
@@ -2078,25 +2277,8 @@ fn MessagesPage() -> Element {
                                 }
                             }
                         }
-                        form {
+                        div {
                             class: "flex gap-2",
-                            onsubmit: move |event: FormEvent| {
-                                event.prevent_default();
-                                match send_channel_draft(
-                                    linked,
-                                    slot,
-                                    draft(),
-                                    reply_target(),
-                                ) {
-                                    Ok(()) => {
-                                        draft.set(String::new());
-                                        reply_target.set(None);
-                                        note.set(String::new());
-                                        bump_refresh();
-                                    }
-                                    Err(err) => note.set(err),
-                                }
-                            },
                             EmojiPickerButton {
                                 disabled: !linked,
                                 on_pick: move |emoji: String| {
@@ -2113,27 +2295,52 @@ fn MessagesPage() -> Element {
                                 },
                                 maxlength: "160",
                                 oninput: move |event: FormEvent| draft.set(event.value()),
+                                onkeydown: move |event: KeyboardEvent| {
+                                    if event.key() == Key::Enter {
+                                        event.prevent_default();
+                                        begin_channel_send(
+                                            linked,
+                                            slot,
+                                            draft(),
+                                            reply_target(),
+                                            draft,
+                                            reply_target,
+                                            note,
+                                            sending,
+                                            bump_refresh,
+                                        );
+                                    }
+                                },
                             }
                             Button {
-                                disabled: !linked || draft().trim().is_empty(),
+                                disabled: !linked || sending() || draft().trim().is_empty(),
                                 onclick: move |_| {
-                                    match send_channel_draft(
+                                    begin_channel_send(
                                         linked,
                                         slot,
                                         draft(),
                                         reply_target(),
-                                    ) {
-                                        Ok(()) => {
-                                            draft.set(String::new());
-                                            reply_target.set(None);
-                                            note.set(String::new());
-                                            bump_refresh();
-                                        }
-                                        Err(err) => note.set(err),
-                                    }
+                                        draft,
+                                        reply_target,
+                                        note,
+                                        sending,
+                                        bump_refresh,
+                                    );
                                 },
                                 Icon { name: IconName::Messages, size: 14 }
-                                "Send"
+                                if sending() { "Sending…" } else { "Send" }
+                            }
+                        }
+                        if !note().is_empty() {
+                            p {
+                                class: if note().starts_with("Send failed") || note().starts_with("Not sent") {
+                                    "mt-2 text-xs text-red-300"
+                                } else if note() == "Sending…" {
+                                    "mt-2 text-xs text-muted-foreground"
+                                } else {
+                                    "mt-2 text-xs text-sky-200"
+                                },
+                                "{note}"
                             }
                         }
                     }
@@ -2221,26 +2428,23 @@ fn MessagesPage() -> Element {
                             match state().db.create_channel(&create_name(), &create_visibility(), &state().secrets) {
                                 Ok(row) => {
                                     create_name.set(String::new());
-                                    note.set(format!("Created {}.", row.name));
+                                    let msg = format!("Created {}.", row.name);
                                     if linked {
-                                        state().radio.push_channel(row.slot as u8, row.name);
+                                        state().radio.push_channel(row.slot as u8, row.name.clone());
                                     }
+                                    status_note(msg);
                                 }
-                                Err(err) => note.set(err.to_string()),
+                                Err(err) => status_note(err.to_string()),
                             }
                         },
                         Icon { name: IconName::Check, size: 14 }
                         "Create"
                     }
                 }
-                if !note().is_empty() {
-                    p { class: "mt-3 text-xs text-muted-foreground", "{note}" }
-                }
             }
             div { class: "grid grid-cols-[repeat(auto-fill,minmax(16rem,1fr))] gap-3",
                 for channel in channels {
                     {
-                        let slot = channel.slot;
                         let name = channel.name.clone();
                         let is_public_default = channel.name.eq_ignore_ascii_case("Public");
                         let is_metis_info =
@@ -2258,7 +2462,10 @@ fn MessagesPage() -> Element {
                                 },
                                 button {
                                     class: "flex flex-1 flex-col items-start gap-3 text-left cursor-pointer",
-                                    onclick: move |_| selected_slot.set(Some(slot)),
+                                    onclick: move |_| {
+                                        note.set(String::new());
+                                        selected_channel.set(Some(name.clone()));
+                                    },
                                     div { class: "flex w-full items-start justify-between gap-2",
                                         div { class: "flex min-w-0 items-center gap-2",
                                             span {
@@ -2271,8 +2478,7 @@ fn MessagesPage() -> Element {
                                             p { class: "truncate font-semibold", "{channel.name}" }
                                             if channel.unread_count > 0 {
                                                 span {
-                                                    class: "inline-flex min-w-5 shrink-0 items-center justify-center rounded-full px-1.5 py-0.5 text-[0.65rem] font-semibold tabular-nums",
-                                                    style: "background-color: rgba(61, 214, 140, 0.18); color: #3dd68c; border: 1px solid rgba(61, 214, 140, 0.4);",
+                                                    class: "channel-unread-badge",
                                                     if channel.unread_count > 99 {
                                                         "99+"
                                                     } else {
@@ -2329,7 +2535,6 @@ fn MessagesPage() -> Element {
                                                     move |_| {
                                                         match state().db.set_channel_visibility(&name, &next) {
                                                             Ok(()) => {
-                                                                note.set(format!("{name} is now {next}."));
                                                                 if linked {
                                                                     if let Some(row) = state()
                                                                         .db
@@ -2345,8 +2550,9 @@ fn MessagesPage() -> Element {
                                                                         );
                                                                     }
                                                                 }
+                                                                status_note(format!("{name} is now {next}."));
                                                             }
-                                                            Err(err) => note.set(err.to_string()),
+                                                            Err(err) => status_note(err.to_string()),
                                                         }
                                                     }
                                                 },
@@ -2361,12 +2567,34 @@ fn MessagesPage() -> Element {
                                                     move |_| {
                                                         match state().db.soft_delete_channel(&name) {
                                                             Ok(slot) => {
-                                                                note.set(format!("Deleted {name}."));
                                                                 if linked {
-                                                                    state().radio.clear_channel(slot as u8);
+                                                                    status_note(format!(
+                                                                        "Deleted {name}. Clearing companion slot {slot}…"
+                                                                    ));
+                                                                    let reply = state()
+                                                                        .radio
+                                                                        .clear_channel(slot as u8);
+                                                                    let label = name.clone();
+                                                                    spawn(async move {
+                                                                        match reply.await {
+                                                                            Ok(Ok(())) => status_note(format!(
+                                                                                "Deleted {label} and cleared companion slot."
+                                                                            )),
+                                                                            Ok(Err(err)) => status_note(format!(
+                                                                                "Deleted {label} locally, but companion clear failed: {err}"
+                                                                            )),
+                                                                            Err(_) => status_note(format!(
+                                                                                "Deleted {label} locally; companion clear did not finish."
+                                                                            )),
+                                                                        }
+                                                                    });
+                                                                } else {
+                                                                    status_note(format!(
+                                                                        "Deleted {name}. Connect the companion to clear it from the radio too."
+                                                                    ));
                                                                 }
                                                             }
-                                                            Err(err) => note.set(err.to_string()),
+                                                            Err(err) => status_note(err.to_string()),
                                                         }
                                                     }
                                                 },
@@ -2396,6 +2624,7 @@ struct MessageReplyTarget {
 
 #[derive(Clone, PartialEq, Eq)]
 struct ChannelReadSession {
+    name: String,
     slot: i64,
     anchor_id: Option<i64>,
     show_banner: bool,
@@ -2481,25 +2710,63 @@ fn compose_channel_reply(target: Option<MessageReplyTarget>, text: &str) -> Stri
     format!("> {mention} {quote}\n{text}")
 }
 
-fn send_channel_draft(
+fn begin_channel_send(
     linked: bool,
     slot: i64,
     raw: String,
     target: Option<MessageReplyTarget>,
-) -> Result<(), String> {
+    mut draft: Signal<String>,
+    mut reply_target: Signal<Option<MessageReplyTarget>>,
+    mut note: Signal<String>,
+    mut sending: Signal<bool>,
+    bump_refresh: impl Fn() + 'static,
+) {
     let text = raw.trim().to_string();
-    if text.is_empty() {
-        return Ok(());
+    if text.is_empty() || sending() {
+        return;
     }
     if !linked {
-        return Err("Connect a companion radio before sending.".into());
+        note.set("Connect a companion radio before sending.".into());
+        return;
     }
     let composed = compose_channel_reply(target, &text);
-    if composed.len() > 160 {
-        return Err("Mesh text is limited to 160 bytes. Shorten the reply or quote.".into());
+    let advert = state()
+        .db
+        .hq_advert_name()
+        .unwrap_or_else(|_| "hq".into());
+    let wire = prefix_channel_sender(&advert, &composed);
+    if wire.len() > 160 {
+        note.set("Mesh text is limited to 160 bytes after adding the device name.".into());
+        return;
     }
-    state().radio.send_channel(slot as u8, composed);
-    Ok(())
+    let slot_u8 = match u8::try_from(slot) {
+        Ok(v) => v,
+        Err(_) => {
+            note.set(format!("Channel slot {slot} is out of range."));
+            return;
+        }
+    };
+    sending.set(true);
+    note.set("Sending…".into());
+    let reply = state().radio.send_channel(slot_u8, composed);
+    spawn(async move {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), reply).await;
+        match outcome {
+            Ok(Ok(Ok(()))) => {
+                draft.set(String::new());
+                reply_target.set(None);
+                note.set(String::new());
+                bump_refresh();
+            }
+            Ok(Ok(Err(err))) => note.set(err),
+            Ok(Err(_)) => note.set("Radio task stopped before the send finished.".into()),
+            Err(_) => note.set(
+                "Send timed out waiting for the radio. Try Disconnect, then Connect, and send again."
+                    .into(),
+            ),
+        }
+        sending.set(false);
+    });
 }
 
 #[component]
@@ -2648,6 +2915,7 @@ fn linkify_text(input: &str) -> Vec<TextPart> {
 enum SettingsTab {
     Hq,
     Device,
+    Diagnostics,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2726,6 +2994,90 @@ fn share_loc_var_key(vars: &std::collections::BTreeMap<String, String>) -> Optio
                 || lower == "advert_loc_policy"
         })
         .cloned()
+}
+
+/// Companion battery tradeoffs we can set over BLE (not repeater `powersaving`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BatteryProfile {
+    High,
+    Balanced,
+    Saver,
+}
+
+impl BatteryProfile {
+    fn from_value(value: &str) -> Option<Self> {
+        match value {
+            "high" => Some(Self::High),
+            "balanced" => Some(Self::Balanced),
+            "saver" => Some(Self::Saver),
+            _ => None,
+        }
+    }
+
+    fn value(self) -> &'static str {
+        match self {
+            Self::High => "high",
+            Self::Balanced => "balanced",
+            Self::Saver => "saver",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::High => "High performance",
+            Self::Balanced => "Balanced",
+            Self::Saver => "Power saver",
+        }
+    }
+
+    fn summary(self) -> &'static str {
+        match self {
+            Self::High => "Full TX, GPS on with short updates, share location in adverts.",
+            Self::Balanced => "Moderate TX, GPS on with 5‑minute updates.",
+            Self::Saver => "Lower TX, GPS off, no location in adverts.",
+        }
+    }
+}
+
+fn apply_battery_profile(profile: BatteryProfile, radio: &crate::radio::RadioStatus) -> String {
+    let max_tx = radio.max_tx_power.unwrap_or(22).max(1);
+    let (tx, gps_en, gps_interval, loc_policy) = match profile {
+        BatteryProfile::High => (max_tx, "1", "30", 2u8),
+        BatteryProfile::Balanced => (max_tx.min(14).max(1), "1", "300", 1u8),
+        BatteryProfile::Saver => (max_tx.min(10).max(1), "0", "600", 0u8),
+    };
+
+    state().radio.set_tx_power(tx);
+    state().radio.set_adv_loc_policy(loc_policy);
+
+    let mut applied = vec![format!("TX {tx} dBm"), format!("advert loc {}", loc_policy_label(loc_policy))];
+    if let Some(key) = gps_enabled_var_key(&radio.custom_vars) {
+        state().radio.set_custom_var(key, gps_en.into());
+        applied.push(if gps_en == "1" {
+            "GPS on".into()
+        } else {
+            "GPS off".into()
+        });
+    }
+    if let Some(key) = gps_interval_var_key(&radio.custom_vars) {
+        state().radio.set_custom_var(key, gps_interval.into());
+        applied.push(format!("GPS interval {gps_interval}s"));
+    }
+    if let Some(key) = share_loc_var_key(&radio.custom_vars) {
+        // Some boards expose advert location as a custom var instead of policy.
+        let value = match loc_policy {
+            0 => "0",
+            2 => "2",
+            _ => "1",
+        };
+        state().radio.set_custom_var(key, value.into());
+    }
+
+    format!(
+        "{} applied ({}). Disconnect when idle — BLE keeps the companion awake.",
+        profile.label(),
+        applied.join(", ")
+    )
 }
 
 fn nearest_bw_option(bw: f64) -> f64 {
@@ -2831,6 +3183,13 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
     let mut var_drafts = use_signal(std::collections::BTreeMap::<String, String>::new);
     let mut reboot_armed = use_signal(|| false);
     let mut gps_interval_draft = use_signal(String::new);
+    let mut battery_profile = use_signal(|| "balanced".to_string());
+    let mut battery_note = use_signal(String::new);
+    let mut log_filter = use_signal(|| "all".to_string());
+    let mut log_query = use_signal(String::new);
+    let mut log_autoscroll = use_signal(|| true);
+    let mut log_tick = use_signal(|| 0u32);
+    let mut log_poll_started = use_signal(|| false);
     let mut presets_tick = use_signal(|| 0u32);
     let time_preview = format_time(Some(unix_now()));
     let linked = radio.state == "connected";
@@ -2868,6 +3227,18 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
         .and_then(|v| is_boolish_var(v))
         .unwrap_or(false);
 
+    // Always refresh the diagnostics ring while Settings is open so connect/sync
+    // lines appear live even if the operator is on another settings tab first.
+    if !log_poll_started() {
+        log_poll_started.set(true);
+        spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+                log_tick.with_mut(|n| *n = n.wrapping_add(1));
+            }
+        });
+    }
+
     use_effect(move || {
         if settings_tab() != SettingsTab::Device {
             return;
@@ -2877,11 +3248,38 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
             match result {
                 Ok(Ok(true)) => presets_tick.with_mut(|n| *n = n.wrapping_add(1)),
                 Ok(Ok(false)) => {}
-                Ok(Err(err)) => eprintln!("meshcore presets refresh: {err}"),
-                Err(err) => eprintln!("meshcore presets refresh join: {err}"),
+                Ok(Err(err)) => hq_log!(warn, "meshcore presets refresh: {err}"),
+                Err(err) => hq_log!(warn, "meshcore presets refresh join: {err}"),
             }
         });
     });
+
+    let _log_refresh = log_tick();
+    let log_rows = if settings_tab() == SettingsTab::Diagnostics {
+        crate::app_log::filtered(
+            crate::app_log::LogFilter::from_value(&log_filter()),
+            &log_query(),
+        )
+    } else {
+        Vec::new()
+    };
+    let log_count = log_rows.len();
+    use_effect(move || {
+        let _ = log_tick();
+        let _ = log_count;
+        if settings_tab() != SettingsTab::Diagnostics || !log_autoscroll() {
+            return;
+        }
+        spawn(async move {
+            // After paint, pin the transcript to the newest lines.
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            let _ = document::eval(
+                r#"const el = document.getElementById('hq-log-transcript');
+                   if (el) { el.scrollTop = el.scrollHeight; }"#,
+            );
+        });
+    });
+
     let query = device_query().to_lowercase();
     let saved_radios = state().db.list_saved_radios().unwrap_or_default();
     let devices: Vec<BleRadio> = radio
@@ -2899,7 +3297,7 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
     let scanning = radio.state == "scanning" || radio.state == "pairing";
     let busy = matches!(
         radio.state.as_str(),
-        "connecting" | "reconnecting" | "pairing" | "scanning"
+        "connecting" | "reconnecting" | "pairing" | "scanning" | "disconnecting"
     );
     let target_saved = state()
         .db
@@ -2931,6 +3329,12 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                     onclick: move |_| settings_tab.set(SettingsTab::Device),
                     Icon { name: IconName::Radio, size: 14 }
                     "Device"
+                }
+                button {
+                    class: if settings_tab() == SettingsTab::Diagnostics { "settings-tab settings-tab-active" } else { "settings-tab" },
+                    onclick: move |_| settings_tab.set(SettingsTab::Diagnostics),
+                    Icon { name: IconName::Messages, size: 14 }
+                    "Diagnostics"
                 }
             }
             if settings_tab() == SettingsTab::Hq {
@@ -3724,7 +4128,59 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                                 "Apply radio params"
                             }
                         }
-                        Card { title: "Power".to_string(), icon: Some(IconName::Ban),
+                        Card { title: "Battery profile".to_string(), icon: Some(IconName::Signal),
+                            p { class: "mb-3 text-sm text-muted-foreground",
+                                "Presets TX power, GPS, and advert location. Does not change mesh frequency. Companion `powersaving` is firmware-default on many nRF52 boards and is not a separate toggle here."
+                            }
+                            div { class: "mb-3 flex flex-col gap-2 sm:flex-row sm:items-end",
+                                div { class: "min-w-0 flex-1",
+                                    label { class: "mb-1 block text-xs text-muted-foreground", "Profile" }
+                                    SelectInput {
+                                        id: "battery-profile".to_string(),
+                                        value: battery_profile(),
+                                        onchange: move |event: FormEvent| {
+                                            battery_profile.set(event.value());
+                                            battery_note.set(String::new());
+                                        },
+                                        for profile in [
+                                            BatteryProfile::High,
+                                            BatteryProfile::Balanced,
+                                            BatteryProfile::Saver,
+                                        ] {
+                                            option {
+                                                key: "{profile.value()}",
+                                                value: "{profile.value()}",
+                                                style: "background-color: #101418; color: #f4f4f5;",
+                                                "{profile.label()}"
+                                            }
+                                        }
+                                    }
+                                }
+                                Button {
+                                    disabled: !linked,
+                                    onclick: move |_| {
+                                        let Some(profile) = BatteryProfile::from_value(&battery_profile()) else {
+                                            return;
+                                        };
+                                        let snap = state().radio.snapshot();
+                                        battery_note.set(apply_battery_profile(profile, &snap));
+                                    },
+                                    Icon { name: IconName::Check, size: 14 }
+                                    "Apply profile"
+                                }
+                            }
+                            p { class: "text-xs text-muted-foreground",
+                                {
+                                    BatteryProfile::from_value(&battery_profile())
+                                        .unwrap_or(BatteryProfile::Balanced)
+                                        .summary()
+                                }
+                            }
+                            if !battery_note().is_empty() {
+                                p { class: "mt-2 text-xs text-sky-200", "{battery_note()}" }
+                            }
+                        }
+                        Card { title: "Reboot companion".to_string(), icon: Some(IconName::Ban),
                             div { class: "flex flex-wrap items-center gap-2",
                                 if reboot_armed() {
                                     Button {
@@ -3976,6 +4432,98 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            if settings_tab() == SettingsTab::Diagnostics {
+                Card { title: "App log".to_string(), icon: Some(IconName::Messages),
+                    p { class: "mb-3 text-sm text-muted-foreground",
+                        "Live diagnostic lines from radio connect, sync, send, and CLI. Separate from the security audit trail. Secrets and PINs are redacted. Keeps the last 1000 lines."
+                    }
+                    div { class: "mb-3 flex flex-wrap items-end gap-2",
+                        div { class: "min-w-[10rem]",
+                            label { class: "mb-1 block text-xs text-muted-foreground", "Level" }
+                            SelectInput {
+                                id: "log-filter".to_string(),
+                                value: log_filter(),
+                                onchange: move |event: FormEvent| log_filter.set(event.value()),
+                                for filter in [
+                                    crate::app_log::LogFilter::All,
+                                    crate::app_log::LogFilter::Error,
+                                    crate::app_log::LogFilter::Warn,
+                                    crate::app_log::LogFilter::Info,
+                                    crate::app_log::LogFilter::Debug,
+                                    crate::app_log::LogFilter::Verbose,
+                                ] {
+                                    option {
+                                        key: "{filter.value()}",
+                                        value: "{filter.value()}",
+                                        style: "background-color:#101418;color:#f4f4f5;",
+                                        "{filter.label()}"
+                                    }
+                                }
+                            }
+                        }
+                        div { class: "min-w-[14rem] flex-1",
+                            label { class: "mb-1 block text-xs text-muted-foreground", "Fuzzy search" }
+                            TextInput {
+                                value: log_query(),
+                                placeholder: "send, sync, BLE…",
+                                oninput: move |event: FormEvent| log_query.set(event.value()),
+                            }
+                        }
+                        label { class: "mb-0.5 flex cursor-pointer items-center gap-2 text-xs text-muted-foreground",
+                            input {
+                                r#type: "checkbox",
+                                checked: log_autoscroll(),
+                                oninput: move |_| log_autoscroll.set(!log_autoscroll()),
+                            }
+                            "Auto-scroll"
+                        }
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| {
+                                crate::app_log::clear();
+                                log_tick.with_mut(|n| *n = n.wrapping_add(1));
+                            },
+                            "Clear"
+                        }
+                    }
+                    pre {
+                        id: "hq-log-transcript",
+                        class: "log-transcript",
+                        if log_rows.is_empty() {
+                            span { class: "text-muted-foreground", "No log lines yet for this filter.\n" }
+                        }
+                        for entry in log_rows.iter() {
+                            {
+                                let tone = match entry.level {
+                                    crate::app_log::LogLevel::Error => "log-line-error",
+                                    crate::app_log::LogLevel::Warn => "log-line-warn",
+                                    crate::app_log::LogLevel::Info => "log-line-info",
+                                    crate::app_log::LogLevel::Debug => "log-line-debug",
+                                    crate::app_log::LogLevel::Verbose => "log-line-verbose",
+                                };
+                                let line = format!(
+                                    "{}  {:<7}  {}\n",
+                                    crate::app_log::format_time(entry.at),
+                                    entry.level.as_str(),
+                                    entry.message
+                                );
+                                rsx! {
+                                    span {
+                                        key: "{entry.id}",
+                                        class: "{tone}",
+                                        "{line}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    p { class: "mt-2 text-xs text-muted-foreground",
+                        "{log_rows.len()} shown · filter {crate::app_log::LogFilter::from_value(&log_filter()).label()}"
+                        if log_autoscroll() { " · auto-scroll on" } else { " · auto-scroll off" }
                     }
                 }
             }

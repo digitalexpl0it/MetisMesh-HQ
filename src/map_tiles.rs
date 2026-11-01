@@ -165,6 +165,18 @@ pub fn active_region_id(db: &Db) -> Option<String> {
     db.setting(ACTIVE_KEY).ok().flatten().filter(|s| !s.is_empty())
 }
 
+/// Active pack bbox `[west, south, east, north]` when a ready region is selected.
+pub fn active_coverage_bbox(db: &Db) -> Option<[f64; 4]> {
+    let id = active_region_id(db)?;
+    let region = list_regions(db).into_iter().find(|r| r.id == id)?;
+    let [w, s, e, n] = region.bbox;
+    if Path::new(&region.path).is_file() && w < e && s < n {
+        Some(region.bbox)
+    } else {
+        None
+    }
+}
+
 pub fn set_active_region(db: &Db, id: &str) -> Result<(), String> {
     db.set_setting(ACTIVE_KEY, id).map_err(|e| e.to_string())?;
     sync_active_path(db);
@@ -252,53 +264,330 @@ fn region_from_center(id: &str, name: &str, lat: f64, lon: f64, radius_miles: f6
 }
 
 pub fn bbox_from_center_radius(lat: f64, lon: f64, radius_miles: f64) -> [f64; 4] {
-    let radius = radius_miles.max(5.0).min(250.0);
+    let radius = radius_miles.max(5.0).min(300.0);
     let d_lat = radius / 69.0;
     let cos_lat = lat.to_radians().cos().abs().max(0.2);
     let d_lon = radius / (69.0 * cos_lat);
     [lon - d_lon, lat - d_lat, lon + d_lon, lat + d_lat]
 }
 
-fn geocode_us_zip(zip: &str) -> Result<(f64, f64, String), String> {
-    let zip = zip.trim();
-    if zip.len() < 5 || !zip.chars().take(5).all(|c| c.is_ascii_digit()) {
-        return Err("Enter a 5-digit US ZIP code.".into());
+fn percent_encode_query(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() * 3);
+    for b in value.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            b' ' => out.push_str("%20"),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
     }
-    let zip5: String = zip.chars().take(5).collect();
-    let url = format!(
-        "https://nominatim.openstreetmap.org/search?postalcode={zip5}&countrycodes=us&format=json&limit=1"
-    );
-    let body = ureq::get(&url)
+    out
+}
+
+fn looks_like_us_zip(query: &str) -> bool {
+    let digits: String = query.chars().filter(|c| c.is_ascii_digit()).collect();
+    let compact: String = query
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    digits.len() == 5
+        && compact.len() == 5
+        && query
+            .chars()
+            .all(|c| c.is_ascii_digit() || c.is_ascii_whitespace() || c == '-')
+}
+
+fn nominatim_first(url: &str, not_found: &str) -> Result<(f64, f64, String), String> {
+    let body = ureq::get(url)
         .set(
             "User-Agent",
             "MetisMeshHQ/0.1 (offline map download; local desktop)",
         )
         .timeout(std::time::Duration::from_secs(20))
         .call()
-        .map_err(|e| format!("ZIP lookup failed: {e}"))?
+        .map_err(|e| format!("Place lookup failed: {e}"))?
         .into_string()
         .map_err(|e| e.to_string())?;
     let rows: Vec<serde_json::Value> =
-        serde_json::from_str(&body).map_err(|e| format!("ZIP lookup parse error: {e}"))?;
-    let row = rows
-        .first()
-        .ok_or_else(|| format!("No location found for ZIP {zip5}."))?;
+        serde_json::from_str(&body).map_err(|e| format!("Place lookup parse error: {e}"))?;
+    let row = rows.first().ok_or_else(|| not_found.to_string())?;
     let lat: f64 = row
         .get("lat")
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse().ok())
-        .ok_or_else(|| "ZIP lookup missing latitude.".to_string())?;
+        .ok_or_else(|| "Place lookup missing latitude.".to_string())?;
     let lon: f64 = row
         .get("lon")
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse().ok())
-        .ok_or_else(|| "ZIP lookup missing longitude.".to_string())?;
+        .ok_or_else(|| "Place lookup missing longitude.".to_string())?;
     let label = row
         .get("display_name")
         .and_then(|v| v.as_str())
-        .unwrap_or("ZIP area")
+        .unwrap_or("Map area")
         .to_string();
     Ok((lat, lon, label))
+}
+
+fn geocode_us_zip(zip: &str) -> Result<(f64, f64, String), String> {
+    let zip5: String = zip.chars().filter(|c| c.is_ascii_digit()).take(5).collect();
+    let url = format!(
+        "https://nominatim.openstreetmap.org/search?postalcode={zip5}&countrycodes=us&format=json&limit=1"
+    );
+    nominatim_first(&url, &format!("No location found for US ZIP {zip5}."))
+}
+
+/// Worldwide place lookup via OpenStreetMap Nominatim.
+/// Accepts city / region / postal code / free text. US 5-digit ZIP uses the
+/// postalcode endpoint for a tighter match.
+fn geocode_place(query: &str) -> Result<(f64, f64, String), String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err("Enter a city, postal code, or place name.".into());
+    }
+    if looks_like_us_zip(query) {
+        return geocode_us_zip(query);
+    }
+    let url = format!(
+        "https://nominatim.openstreetmap.org/search?q={}&format=json&limit=1",
+        percent_encode_query(query)
+    );
+    nominatim_first(
+        &url,
+        &format!("No location found for “{query}”. Try a city and country, e.g. Toronto, Canada."),
+    )
+}
+
+fn slug_id(label: &str) -> String {
+    let mut out = String::new();
+    for ch in label.chars().flat_map(|c| c.to_lowercase()) {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+        } else if (ch == ' ' || ch == '-' || ch == ',') && !out.ends_with('-') {
+            out.push('-');
+        }
+        if out.len() >= 40 {
+            break;
+        }
+    }
+    let out = out.trim_matches('-').to_string();
+    if out.is_empty() {
+        "place".into()
+    } else {
+        out
+    }
+}
+
+/// Download (or replace) a pack for an exact bbox after the operator names it.
+/// `replace_id` updates an existing pack in place; otherwise a new id is created
+/// from the name slug.
+pub fn start_named_bbox_download(
+    db: std::sync::Arc<Db>,
+    name: String,
+    bbox: [f64; 4],
+    replace_id: Option<String>,
+) {
+    let status = download_status();
+    if status.running {
+        return;
+    }
+    let [w, s, e, n] = bbox;
+    if !(w < e && s < n) {
+        set_download(DownloadStatus {
+            region_id: String::new(),
+            phase: "error".into(),
+            detail: "Invalid coverage box.".into(),
+            running: false,
+        });
+        return;
+    }
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        set_download(DownloadStatus {
+            region_id: String::new(),
+            phase: "error".into(),
+            detail: "Enter a name for this offline region.".into(),
+            running: false,
+        });
+        return;
+    }
+    set_download(DownloadStatus {
+        region_id: replace_id.clone().unwrap_or_else(|| "area".into()),
+        phase: "starting".into(),
+        detail: format!("Preparing “{name}”…"),
+        running: true,
+    });
+    std::thread::Builder::new()
+        .name("metis-pmtiles-named".into())
+        .spawn(move || {
+            let result = (|| -> Result<String, String> {
+                let radius = radius_miles_from_bbox(bbox);
+                let id = if let Some(existing) = replace_id.as_ref() {
+                    let mut regions = list_regions(&db);
+                    let Some(region) = regions.iter_mut().find(|r| &r.id == existing) else {
+                        return Err("Pack to update was not found.".into());
+                    };
+                    region.name = name.clone();
+                    region.bbox = bbox;
+                    region.status = "downloading".into();
+                    save_regions(&db, &regions)?;
+                    let _ = set_active_region(&db, existing);
+                    existing.clone()
+                } else {
+                    let base = slug_id(&name);
+                    let mut id = if base.is_empty() {
+                        format!("area-{:.0}", radius)
+                    } else {
+                        base
+                    };
+                    // Avoid clobbering another pack with the same slug.
+                    let existing_ids: std::collections::HashSet<String> =
+                        list_regions(&db).into_iter().map(|r| r.id).collect();
+                    if existing_ids.contains(&id) {
+                        let mut n = 2u32;
+                        while existing_ids.contains(&format!("{id}-{n}")) {
+                            n += 1;
+                        }
+                        id = format!("{id}-{n}");
+                    }
+                    let region = TileRegion {
+                        id: id.clone(),
+                        name: name.clone(),
+                        bbox,
+                        path: region_file_path(&id).display().to_string(),
+                        source_build: String::new(),
+                        updated_at: 0,
+                        bytes: 0,
+                        status: "downloading".into(),
+                    };
+                    upsert_region(&db, region)?;
+                    let _ = set_active_region(&db, &id);
+                    id
+                };
+                let _ = radius; // used for default id only
+                Ok(id)
+            })();
+            match result {
+                Ok(id) => {
+                    set_download(DownloadStatus {
+                        region_id: id.clone(),
+                        phase: "starting".into(),
+                        detail: format!("Downloading tiles for “{name}”…"),
+                        running: true,
+                    });
+                    match run_download(&db, &id) {
+                        Ok(()) => set_download(DownloadStatus {
+                            region_id: id,
+                            phase: "done".into(),
+                            detail: format!(
+                                "“{name}” ready. Streets / Terrain / Topo are available inside the region."
+                            ),
+                            running: false,
+                        }),
+                        Err(err) => set_download(DownloadStatus {
+                            region_id: id,
+                            phase: "error".into(),
+                            detail: err,
+                            running: false,
+                        }),
+                    }
+                    sync_active_path(&db);
+                }
+                Err(err) => set_download(DownloadStatus {
+                    region_id: String::new(),
+                    phase: "error".into(),
+                    detail: err,
+                    running: false,
+                }),
+            }
+        })
+        .ok();
+}
+
+/// Re-extract the active pack for a new bbox (drag-to-move). Replaces the archive
+/// so tiles outside the box are dropped.
+pub fn start_move_active_region(db: std::sync::Arc<Db>, bbox: [f64; 4]) {
+    let status = download_status();
+    if status.running {
+        return;
+    }
+    let [w, s, e, n] = bbox;
+    if !(w < e && s < n) {
+        set_download(DownloadStatus {
+            region_id: String::new(),
+            phase: "error".into(),
+            detail: "Invalid coverage box.".into(),
+            running: false,
+        });
+        return;
+    }
+    let Some(id) = active_region_id(&db) else {
+        set_download(DownloadStatus {
+            region_id: String::new(),
+            phase: "error".into(),
+            detail: "No active offline pack to move.".into(),
+            running: false,
+        });
+        return;
+    };
+    set_download(DownloadStatus {
+        region_id: id.clone(),
+        phase: "move".into(),
+        detail: "Updating pack for new area…".into(),
+        running: true,
+    });
+    std::thread::Builder::new()
+        .name("metis-pmtiles-move".into())
+        .spawn(move || {
+            let result = (|| -> Result<(), String> {
+                let mut regions = list_regions(&db);
+                let Some(region) = regions.iter_mut().find(|r| r.id == id) else {
+                    return Err("Active pack missing.".into());
+                };
+                let lat = (bbox[1] + bbox[3]) / 2.0;
+                let lon = (bbox[0] + bbox[2]) / 2.0;
+                let radius = radius_miles_from_bbox(bbox);
+                region.bbox = bbox;
+                // Keep a readable name; refresh the “· N mi” suffix when present.
+                if let Some((head, _)) = region.name.rsplit_once('·') {
+                    region.name = format!("{}· {radius:.0} mi", head.trim_end());
+                } else {
+                    region.name = format!(
+                        "Map area · {radius:.0} mi ({lat:.2},{lon:.2})"
+                    );
+                }
+                region.status = "downloading".into();
+                save_regions(&db, &regions)?;
+                let _ = set_active_region(&db, &id);
+                run_download(&db, &id)
+            })();
+            match result {
+                Ok(()) => set_download(DownloadStatus {
+                    region_id: id,
+                    phase: "done".into(),
+                    detail: "Pack moved. Streets / Terrain / Topo updated.".into(),
+                    running: false,
+                }),
+                Err(err) => set_download(DownloadStatus {
+                    region_id: id,
+                    phase: "error".into(),
+                    detail: err,
+                    running: false,
+                }),
+            }
+            sync_active_path(&db);
+        })
+        .ok();
+}
+
+fn radius_miles_from_bbox(bbox: [f64; 4]) -> f64 {
+    let [w, s, e, n] = bbox;
+    let lat = (s + n) / 2.0;
+    let half_ns = ((n - s) / 2.0) * 69.0;
+    let cos_lat = lat.to_radians().cos().abs().max(0.2);
+    let half_ew = ((e - w) / 2.0) * 69.0 * cos_lat;
+    half_ns.max(half_ew).max(5.0).min(300.0)
 }
 
 /// Create/update a region from ZIP + radius (or map/HQ center) and start download.
@@ -322,15 +611,22 @@ pub fn start_area_download(
         .name("metis-pmtiles-area".into())
         .spawn(move || {
             let result = (|| -> Result<String, String> {
-                let radius = radius_miles.max(5.0).min(250.0);
+                let radius = radius_miles.max(5.0).min(300.0);
                 let (lat, lon, name, id) = if !zip.trim().is_empty() {
-                    let (lat, lon, _label) = geocode_us_zip(&zip)?;
-                    let zip5: String = zip.trim().chars().take(5).collect();
+                    let (lat, lon, label) = geocode_place(&zip)?;
+                    let short = label.split(',').next().unwrap_or(&label).trim();
+                    let id = if looks_like_us_zip(&zip) {
+                        let zip5: String =
+                            zip.chars().filter(|c| c.is_ascii_digit()).take(5).collect();
+                        format!("zip-{zip5}")
+                    } else {
+                        format!("place-{}", slug_id(short))
+                    };
                     (
                         lat,
                         lon,
-                        format!("ZIP {zip5} · {radius:.0} mi"),
-                        format!("zip-{zip5}"),
+                        format!("{short} · {radius:.0} mi"),
+                        id,
                     )
                 } else if let Some((lat, lon)) = fallback_center {
                     (
@@ -352,7 +648,8 @@ pub fn start_area_download(
                     )
                 } else {
                     return Err(
-                        "Enter a ZIP code, or set HQ coordinates / pan the map first.".into(),
+                        "Enter a city or postal code, or set HQ coordinates / pan the map first."
+                            .into(),
                     );
                 };
                 let region = region_from_center(&id, &name, lat, lon, radius);

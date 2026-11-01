@@ -1,3 +1,5 @@
+#[macro_use]
+mod app_log;
 mod ble_pair;
 mod contact_qr;
 mod db;
@@ -8,6 +10,7 @@ mod radio;
 mod radio_presets;
 mod secrets;
 mod signup;
+mod toast;
 mod ui;
 
 use std::borrow::Cow;
@@ -40,6 +43,7 @@ fn main() {
     contact_qr::spawn_qr_worker(db.clone(), data.clone());
     let radio = spawn_radio(db.clone(), secrets.clone());
     install(AppState { db, secrets, radio });
+    hq_log!(info, "Metis Mesh HQ started · data {}", data.display());
     launch_window();
 }
 
@@ -193,6 +197,8 @@ fn serve_metis_protocol(
     }
     let file_path = region_from_path
         .and_then(|id| {
+            // Strip cache-buster query fragments if the WebView folds them into path.
+            let id = id.split(['?', '#']).next().unwrap_or(id);
             if id == "basemap" {
                 pmtiles_path::current_pmtiles_path()
             } else {
@@ -209,13 +215,22 @@ fn serve_metis_protocol(
                 Response::new(Cow::Borrowed(b"pmtiles not configured" as &[u8]))
             });
     };
-    let Ok(bytes) = std::fs::read(&file_path) else {
+    // Seek+read ranges — never load the full archive per tile request (a 300 mi
+    // pack is tens of MB; full reads stalled Streets after download).
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(&file_path) else {
         return Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(Cow::Borrowed(b"pmtiles missing" as &[u8]))
             .unwrap_or_else(|_| Response::new(Cow::Borrowed(b"pmtiles missing" as &[u8])));
     };
-    let len = bytes.len() as u64;
+    let Ok(meta) = file.metadata() else {
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Cow::Borrowed(b"pmtiles missing" as &[u8]))
+            .unwrap_or_else(|_| Response::new(Cow::Borrowed(b"pmtiles missing" as &[u8])));
+    };
+    let len = meta.len();
     let range = request
         .headers()
         .get(header::RANGE)
@@ -230,7 +245,14 @@ fn serve_metis_protocol(
                 .body(Cow::Borrowed(b"" as &[u8]))
                 .unwrap_or_else(|_| Response::new(Cow::Borrowed(b"" as &[u8])));
         }
-        let slice = bytes[start as usize..=end as usize].to_vec();
+        let want = (end - start + 1) as usize;
+        let mut slice = vec![0u8; want];
+        if file.seek(SeekFrom::Start(start)).is_err() || file.read_exact(&mut slice).is_err() {
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Cow::Borrowed(b"pmtiles read failed" as &[u8]))
+                .unwrap_or_else(|_| Response::new(Cow::Borrowed(b"pmtiles read failed" as &[u8])));
+        }
         return Response::builder()
             .status(StatusCode::PARTIAL_CONTENT)
             .header(header::CONTENT_TYPE, "application/octet-stream")
@@ -244,11 +266,19 @@ fn serve_metis_protocol(
             .body(Cow::Owned(slice))
             .unwrap_or_else(|_| Response::new(Cow::Borrowed(b"" as &[u8])));
     }
+    // Unranged GET (rare for PMTiles) — still stream from disk without a second copy path.
+    let mut bytes = Vec::with_capacity(len.min(64 * 1024 * 1024) as usize);
+    if file.read_to_end(&mut bytes).is_err() {
+        return Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Cow::Borrowed(b"pmtiles read failed" as &[u8]))
+            .unwrap_or_else(|_| Response::new(Cow::Borrowed(b"pmtiles read failed" as &[u8])));
+    }
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(header::ACCEPT_RANGES, "bytes")
-        .header(header::CONTENT_LENGTH, len.to_string())
+        .header(header::CONTENT_LENGTH, bytes.len().to_string())
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .body(Cow::Owned(bytes))
         .unwrap_or_else(|_| Response::new(Cow::Borrowed(b"" as &[u8])))

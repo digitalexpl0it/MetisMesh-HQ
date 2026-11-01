@@ -35,6 +35,50 @@ pub async fn ensure_paired(target: &str, pin: u32) -> Result<(), String> {
     }
 }
 
+/// Drop the GATT link to `target` (address or advertised name).
+///
+/// meshcore-rs `disconnect()` only stops its own tasks; without this the
+/// companion stays connected to the laptop and the phone app cannot take over.
+pub async fn force_disconnect(target: &str) -> Result<(), String> {
+    use btleplug::api::{Central, Manager as _, Peripheral as _};
+    use btleplug::platform::Manager;
+
+    let target = target.trim();
+    if target.is_empty() {
+        return Ok(());
+    }
+    let manager = Manager::new()
+        .await
+        .map_err(|err| format!("Bluetooth manager: {err}"))?;
+    let adapters = manager
+        .adapters()
+        .await
+        .map_err(|err| format!("Bluetooth adapters: {err}"))?;
+    for adapter in adapters {
+        let Ok(peripherals) = adapter.peripherals().await else {
+            continue;
+        };
+        for peripheral in peripherals {
+            let Ok(Some(props)) = peripheral.properties().await else {
+                continue;
+            };
+            let matches = props.address.to_string().eq_ignore_ascii_case(target)
+                || props.local_name.as_deref() == Some(target);
+            if !matches {
+                continue;
+            }
+            if peripheral.is_connected().await.unwrap_or(false) {
+                peripheral
+                    .disconnect()
+                    .await
+                    .map_err(|err| format!("Bluetooth disconnect: {err}"))?;
+            }
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use std::sync::Arc;

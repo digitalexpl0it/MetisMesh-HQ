@@ -13,8 +13,10 @@ use super::icons::{Icon, IconName};
 use super::map_host::{
     dark_basemap_style, load_saved_basemap, load_saved_camera, map_bind_node_clicks, map_destroy,
     map_exists, map_fit_bounds, map_fly_to, map_get_camera, map_init, map_set_geojson,
-    map_set_nodes, map_set_style, map_set_visibility, map_take_favorite_toggle, map_take_selection,
-    save_basemap, save_camera, BasemapKind, MapCamera, MAP_CONTAINER_ID,
+    map_clear_region_draft, map_place_region_draft, map_set_nodes, map_set_style,
+    map_set_visibility, map_take_favorite_toggle, map_take_region_cancel,
+    map_take_region_confirm, map_take_selection, save_basemap, save_camera, BasemapKind,
+    MapCamera, RegionDraftConfirm, MAP_CONTAINER_ID,
 };
 use super::state;
 use super::widgets::{Button, ButtonKind, PageHeading, SelectInput};
@@ -153,6 +155,60 @@ fn save_favorites(favs: &HashSet<String>) {
     let mut list: Vec<_> = favs.iter().cloned().collect();
     list.sort();
     let _ = state().db.set_setting("map_favorites", &list.join(","));
+}
+
+fn commit_named_region(
+    mut pending_region: Signal<Option<RegionDraftConfirm>>,
+    region_name_input: Signal<String>,
+    mut show_download: Signal<bool>,
+    mut dl_note: Signal<String>,
+    mut tick: Signal<u32>,
+    mut preserve_camera: Signal<Option<MapCamera>>,
+    mut basemap: Signal<BasemapKind>,
+    mut style_key: Signal<u32>,
+) {
+    let name = region_name_input().trim().to_string();
+    if name.is_empty() || crate::map_tiles::download_status().running {
+        return;
+    }
+    let Some(confirm) = pending_region() else {
+        return;
+    };
+    let db = state().db.clone();
+    let replace = if confirm.mode == "adjust" {
+        crate::map_tiles::active_region_id(&db)
+    } else {
+        None
+    };
+    pending_region.set(None);
+    show_download.set(true);
+    dl_note.set(format!("Downloading tiles for “{name}”…"));
+    crate::map_tiles::start_named_bbox_download(db, name, confirm.bbox, replace);
+    spawn(async move {
+        for _ in 0..180 {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            tick.with_mut(|n| *n = n.wrapping_add(1));
+            let s = crate::map_tiles::download_status();
+            if !s.running {
+                dl_note.set(s.detail.clone());
+                if s.phase == "done" {
+                    preserve_camera.set(map_get_camera().await);
+                    if *basemap.peek() == BasemapKind::Outline {
+                        basemap.set(BasemapKind::Streets);
+                    }
+                    style_key.with_mut(|n| *n = n.wrapping_add(1));
+                    crate::toast::push(
+                        crate::toast::ToastKind::Success,
+                        "Offline map pack ready.",
+                    );
+                } else if s.phase == "error" {
+                    crate::toast::push(crate::toast::ToastKind::Error, s.detail.clone());
+                }
+                break;
+            }
+            dl_note.set(s.detail.clone());
+        }
+    });
 }
 
 struct MapModel {
@@ -524,6 +580,9 @@ pub fn MapPage() -> Element {
     let mut show_download = use_signal(|| pmtiles_path::current_pmtiles_path().is_none());
     let mut zip_input = use_signal(String::new);
     let mut radius_miles = use_signal(|| 50u32);
+    let mut region_shape = use_signal(|| "rectangle".to_string());
+    let mut pending_region = use_signal(|| None::<RegionDraftConfirm>);
+    let mut region_name_input = use_signal(String::new);
     let mut dl_note = use_signal(String::new);
 
     let _ = tick();
@@ -548,7 +607,8 @@ pub fn MapPage() -> Element {
             // Let flex layout assign map-stage height before MapLibre measures.
             tokio::time::sleep(std::time::Duration::from_millis(180)).await;
             let tiles = pmtiles_path::basemap_protocol_url();
-            let style = dark_basemap_style(tiles.as_deref(), kind);
+            let coverage = crate::map_tiles::active_coverage_bbox(&super::state().db);
+            let style = dark_basemap_style(tiles.as_deref(), kind, coverage);
             let live = map_get_camera().await;
             let (cam, skip_fit) = if let Some(cam) = preserved.or(live) {
                 (cam, true)
@@ -693,6 +753,50 @@ pub fn MapPage() -> Element {
                         }
                     }
                 }
+                if map_take_region_cancel().await {
+                    pending_region.set(None);
+                    dl_note.set("Region placement cancelled.".into());
+                }
+                // ✓ on the draft shape — ask for a name, then download tiles for that bbox.
+                if let Some(confirm) = map_take_region_confirm().await {
+                    if !crate::map_tiles::download_status().running {
+                        let default_name = if confirm.mode == "adjust" {
+                            crate::map_tiles::active_region_id(&state().db)
+                                .and_then(|id| {
+                                    crate::map_tiles::list_regions(&state().db)
+                                        .into_iter()
+                                        .find(|r| r.id == id)
+                                        .map(|r| r.name)
+                                })
+                                .filter(|n| !n.trim().is_empty())
+                                .unwrap_or_else(|| {
+                                    format!(
+                                        "{} · {:.0} mi",
+                                        match confirm.shape.as_str() {
+                                            "circle" => "Circle",
+                                            "triangle" => "Triangle",
+                                            _ => "Rectangle",
+                                        },
+                                        confirm.radius_miles
+                                    )
+                                })
+                        } else {
+                            format!(
+                                "{} · {:.0} mi",
+                                match confirm.shape.as_str() {
+                                    "circle" => "Circle",
+                                    "triangle" => "Triangle",
+                                    _ => "Rectangle",
+                                },
+                                confirm.radius_miles
+                            )
+                        };
+                        region_name_input.set(default_name);
+                        pending_region.set(Some(confirm));
+                        show_download.set(true);
+                        dl_note.set("Name this region, then confirm to download tiles.".into());
+                    }
+                }
                 // Camera persistence: every ~2s, not every poll (was locking the webview).
                 cam_ticks = cam_ticks.wrapping_add(1);
                 if cam_ticks % 14 == 0 {
@@ -732,7 +836,7 @@ pub fn MapPage() -> Element {
         document::Script { src: asset!("/assets/maplibre-gl.js") }
         document::Script { src: asset!("/assets/pmtiles.js") }
         document::Script { src: asset!("/assets/map_bridge.js") }
-        div { class: "flex h-full min-h-0 flex-col gap-3 overflow-hidden",
+        div { class: "map-page flex h-full min-h-0 flex-col gap-3 overflow-hidden",
             PageHeading { icon: IconName::Map, title: "Map".to_string(), "{model.note}" }
             if !map_error().is_empty() {
                 p { class: "text-sm text-destructive", "{map_error}" }
@@ -750,7 +854,7 @@ pub fn MapPage() -> Element {
                 } else if !model.pmtiles_ok {
                     rsx! {
                         p { class: "text-xs text-muted-foreground",
-                            "Outline works offline. Download a local area (ZIP + radius) for Streets / Terrain / Topo."
+                            "Outline works offline. Download a local area (place + radius) for Streets / Terrain / Topo."
                         }
                     }
                 } else {
@@ -853,15 +957,168 @@ pub fn MapPage() -> Element {
                                 }
                             }
                         }
+                        if pending_region().is_some() {
+                            div { class: "map-region-name-panel",
+                                p { class: "map-download-copy",
+                                    "Name this offline region, then confirm to download map tiles for the placed shape."
+                                }
+                                input {
+                                    class: "map-download-input map-download-input-wide map-region-name-input",
+                                    r#type: "text",
+                                    maxlength: "60",
+                                    placeholder: "Region name",
+                                    value: "{region_name_input}",
+                                    oninput: move |event: FormEvent| region_name_input.set(event.value()),
+                                    onkeydown: move |event: KeyboardEvent| {
+                                        if event.key() == Key::Enter {
+                                            commit_named_region(
+                                                pending_region,
+                                                region_name_input,
+                                                show_download,
+                                                dl_note,
+                                                tick,
+                                                preserve_camera,
+                                                basemap,
+                                                style_key,
+                                            );
+                                        }
+                                    },
+                                }
+                                div { class: "map-download-row map-download-place-row",
+                                    button {
+                                        class: "map-download-go",
+                                        disabled: crate::map_tiles::download_status().running
+                                            || region_name_input().trim().is_empty(),
+                                        onclick: move |_| {
+                                            commit_named_region(
+                                                pending_region,
+                                                region_name_input,
+                                                show_download,
+                                                dl_note,
+                                                tick,
+                                                preserve_camera,
+                                                basemap,
+                                                style_key,
+                                            );
+                                        },
+                                        Icon { name: IconName::Check, size: 14 }
+                                        "Download tiles"
+                                    }
+                                    button {
+                                        class: "map-download-go map-download-go-ghost",
+                                        disabled: crate::map_tiles::download_status().running,
+                                        onclick: move |_| {
+                                            pending_region.set(None);
+                                            dl_note.set("Naming cancelled — place a shape again when ready.".into());
+                                        },
+                                        "Cancel"
+                                    }
+                                }
+                            }
+                        } else {
                         p { class: "map-download-copy",
-                            "One pack unlocks Streets, Terrain, and Topo. Enter a US ZIP and radius, or leave ZIP blank to use the map center (or HQ)."
+                            "Pick a shape and size, place it on the map, drag into position, then ✓ and name the region to download tiles (bounding box of the shape). City / postal code download is still available below."
+                        }
+                        div { class: "map-download-shapes",
+                            for (id, label) in [("rectangle", "Rectangle"), ("circle", "Circle"), ("triangle", "Triangle")] {
+                                {
+                                    let selected = region_shape() == id;
+                                    let id_owned = id.to_string();
+                                    rsx! {
+                                        button {
+                                            key: "{id}",
+                                            class: if selected { "map-shape-chip active" } else { "map-shape-chip" },
+                                            title: "{label}",
+                                            onclick: move |_| region_shape.set(id_owned.clone()),
+                                            span { class: format!("map-shape-icon map-shape-{id}") }
+                                            "{label}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        div { class: "map-download-radii",
+                            for miles in [25u32, 50, 75, 100, 150, 200, 250, 300] {
+                                {
+                                    let selected = radius_miles() == miles;
+                                    rsx! {
+                                        button {
+                                            key: "{miles}",
+                                            class: if selected { "map-radius-chip active" } else { "map-radius-chip" },
+                                            onclick: move |_| radius_miles.set(miles),
+                                            "{miles} mi"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        div { class: "map-download-row map-download-place-row",
+                            button {
+                                class: "map-download-go",
+                                disabled: crate::map_tiles::download_status().running,
+                                onclick: move |_| {
+                                    let shape = region_shape();
+                                    let radius = radius_miles() as f64;
+                                    spawn(async move {
+                                        let cam = map_get_camera().await;
+                                        let (lng, lat) = cam
+                                            .map(|c| (c.lng, c.lat))
+                                            .unwrap_or((-118.24, 34.05));
+                                        map_place_region_draft(&shape, radius, lng, lat, "new").await;
+                                        show_download.set(true);
+                                        dl_note.set(
+                                            "Drag the shape, then ✓ to name it and download tiles, or ✕ to remove.".into(),
+                                        );
+                                    });
+                                },
+                                "Place on map"
+                            }
+                            if model.pmtiles_ok {
+                                button {
+                                    class: "map-download-go map-download-go-secondary",
+                                    disabled: crate::map_tiles::download_status().running,
+                                    onclick: move |_| {
+                                        let shape = region_shape();
+                                        let radius = radius_miles() as f64;
+                                        let coverage = crate::map_tiles::active_coverage_bbox(&state().db);
+                                        spawn(async move {
+                                            let (lng, lat) = if let Some([w, s, e, n]) = coverage {
+                                                ((w + e) / 2.0, (s + n) / 2.0)
+                                            } else if let Some(cam) = map_get_camera().await {
+                                                (cam.lng, cam.lat)
+                                            } else {
+                                                (-118.24, 34.05)
+                                            };
+                                            map_place_region_draft(&shape, radius, lng, lat, "adjust")
+                                                .await;
+                                            show_download.set(true);
+                                            dl_note.set(
+                                                "Adjust the shape, then ✓ to rename/update and download, or ✕ to cancel.".into(),
+                                            );
+                                        });
+                                    },
+                                    "Adjust pack"
+                                }
+                            }
+                            button {
+                                class: "map-download-go map-download-go-ghost",
+                                disabled: crate::map_tiles::download_status().running,
+                                onclick: move |_| {
+                                    spawn(async move {
+                                        map_clear_region_draft().await;
+                                        dl_note.set("Cleared map placement.".into());
+                                    });
+                                },
+                                "Clear"
+                            }
+                        }
                         }
                         div { class: "map-download-row",
                             input {
-                                class: "map-download-input",
+                                class: "map-download-input map-download-input-wide",
                                 r#type: "text",
-                                maxlength: "10",
-                                placeholder: "ZIP (optional)",
+                                maxlength: "80",
+                                placeholder: "City or postal code",
                                 value: "{zip_input}",
                                 oninput: move |event: FormEvent| zip_input.set(event.value()),
                             }
@@ -908,24 +1165,104 @@ pub fn MapPage() -> Element {
                                 if crate::map_tiles::download_status().running { "Working…" } else { "Download" }
                             }
                         }
-                        div { class: "map-download-radii",
-                            for miles in [25u32, 50, 75, 100, 150] {
-                                {
-                                    let selected = radius_miles() == miles;
-                                    rsx! {
-                                        button {
-                                            key: "{miles}",
-                                            class: if selected { "map-radius-chip active" } else { "map-radius-chip" },
-                                            onclick: move |_| radius_miles.set(miles),
-                                            "{miles} mi"
-                                        }
-                                    }
-                                }
-                            }
-                        }
                         if crate::map_tiles::download_status().running {
                             p { class: "map-download-status",
                                 "{crate::map_tiles::download_status().detail}"
+                            }
+                        }
+                        {
+                            let packs = crate::map_tiles::list_installed_regions(&state().db);
+                            let active = crate::map_tiles::active_region_id(&state().db)
+                                .unwrap_or_default();
+                            let dl_busy = crate::map_tiles::download_status().running;
+                            rsx! {
+                                div { class: "map-download-packs",
+                                    p { class: "map-download-packs-title", "Installed packs" }
+                                    if packs.is_empty() {
+                                        p { class: "map-download-packs-empty",
+                                            "None yet — download one above."
+                                        }
+                                    } else {
+                                        div { class: "map-download-packs-list",
+                                            for region in packs.into_iter() {
+                                                {
+                                                    let id = region.id.clone();
+                                                    let id_use = id.clone();
+                                                    let id_del = id.clone();
+                                                    let is_active = active == region.id;
+                                                    let name = region.name.clone();
+                                                    let status = region.status.clone();
+                                                    let mb = if region.bytes > 0 {
+                                                        format!(" · {} MB", region.bytes / 1_000_000)
+                                                    } else {
+                                                        String::new()
+                                                    };
+                                                    rsx! {
+                                                        div {
+                                                            key: "{id}",
+                                                            class: if is_active {
+                                                                "map-download-pack-row active"
+                                                            } else {
+                                                                "map-download-pack-row"
+                                                            },
+                                                            button {
+                                                                class: "map-download-pack-main",
+                                                                disabled: dl_busy,
+                                                                title: "Use this pack",
+                                                                onclick: move |_| {
+                                                                    let _ = crate::map_tiles::set_active_region(
+                                                                        &state().db,
+                                                                        &id_use,
+                                                                    );
+                                                                    tick.with_mut(|n| *n = n.wrapping_add(1));
+                                                                    spawn(async move {
+                                                                        preserve_camera.set(map_get_camera().await);
+                                                                        style_key.with_mut(|n| *n = n.wrapping_add(1));
+                                                                    });
+                                                                },
+                                                                span { class: "map-download-pack-name", "{name}" }
+                                                                span { class: "map-download-pack-meta",
+                                                                    if is_active { "Active · " } else { "" }
+                                                                    "{status}{mb}"
+                                                                }
+                                                            }
+                                                            button {
+                                                                class: "map-download-pack-delete",
+                                                                disabled: dl_busy,
+                                                                title: "Delete pack",
+                                                                onclick: {
+                                                                    let active_now = active.clone();
+                                                                    move |_| {
+                                                                        let was_active = active_now == id_del;
+                                                                        let _ = crate::map_tiles::delete_region(
+                                                                            &state().db,
+                                                                            &id_del,
+                                                                        );
+                                                                        tick.with_mut(|n| *n = n.wrapping_add(1));
+                                                                        if was_active {
+                                                                            spawn(async move {
+                                                                                preserve_camera.set(map_get_camera().await);
+                                                                                if crate::pmtiles_path::current_pmtiles_path().is_none() {
+                                                                                    basemap.set(BasemapKind::Outline);
+                                                                                }
+                                                                                style_key.with_mut(|n| *n = n.wrapping_add(1));
+                                                                            });
+                                                                        }
+                                                                        crate::toast::push(
+                                                                            crate::toast::ToastKind::Success,
+                                                                            "Deleted offline map pack.",
+                                                                        );
+                                                                    }
+                                                                },
+                                                                Icon { name: IconName::Trash, size: 12 }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

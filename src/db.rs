@@ -317,29 +317,185 @@ impl Db {
             }
         }
         self.ensure_default_channels()?;
+        self.repair_duplicate_channel_slots()?;
+        // A send still queued when the app closed never reached the radio.
+        self.lock().execute(
+            "UPDATE messages SET delivery = 'failed'
+             WHERE direction = 'tx' AND delivery IN ('queued', 'sending')",
+            [],
+        )?;
+        // Unstick older DBs that never advanced the contact watermark past 0
+        // (full BLE contact dumps then block the radio lock and starve sends).
+        if self
+            .setting("contacts_since")?
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0)
+            == 0
+        {
+            let nodes = self
+                .lock()
+                .query_row("SELECT COUNT(*) FROM nodes", [], |row| row.get::<_, i64>(0))
+                .unwrap_or(0);
+            if nodes > 0 {
+                self.set_setting("contacts_since", "1")?;
+            }
+        }
         Ok(())
     }
 
     fn ensure_default_channels(&self) -> Result<()> {
         let now = unix_now();
+        // Public is always mesh slot 0. Vacate anything else that landed there
+        // during a radio sync, then pin Public.
+        self.vacate_channel_slot(0, "Public")?;
         self.lock().execute(
             "INSERT INTO channels (name, slot, secret_account, visibility, role, active, created_at)
              VALUES ('Public', 0, 'Public', 'public', 'general', 1, ?1)
              ON CONFLICT(name) DO UPDATE SET
+               slot = 0,
                visibility = COALESCE(NULLIF(channels.visibility, ''), 'public'),
                role = COALESCE(NULLIF(channels.role, ''), 'general'),
                active = 1",
             params![now],
         )?;
+        // METIS-INFO: keep its existing slot when free of Public; else next free.
+        let metis_slot = {
+            let conn = self.lock();
+            let existing: Option<i64> = conn
+                .query_row(
+                    "SELECT slot FROM channels WHERE name = ?1 COLLATE NOCASE",
+                    params![CHANNEL_NAME],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match existing {
+                Some(slot) if slot != 0 => slot,
+                _ => {
+                    let taken: Vec<i64> = conn
+                        .prepare("SELECT slot FROM channels WHERE COALESCE(active, 1) = 1")?
+                        .query_map([], |row| row.get(0))?
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    if !taken.contains(&1) {
+                        1
+                    } else {
+                        (0..32)
+                            .find(|slot| *slot != 0 && !taken.contains(slot))
+                            .unwrap_or(1)
+                    }
+                }
+            }
+        };
+        self.vacate_channel_slot(metis_slot, CHANNEL_NAME)?;
         self.lock().execute(
             "INSERT INTO channels (name, slot, secret_account, visibility, role, active, created_at)
-             VALUES (?1, 1, ?1, 'private', 'emergency', 1, ?2)
+             VALUES (?1, ?2, ?1, 'private', 'emergency', 1, ?3)
              ON CONFLICT(name) DO UPDATE SET
+               slot = excluded.slot,
                visibility = 'private',
                role = 'emergency',
                active = 1",
-            params![CHANNEL_NAME, now],
+            params![CHANNEL_NAME, metis_slot, now],
         )?;
+        Ok(())
+    }
+
+    /// Move every active channel except `keep_name` off `slot` onto a free slot.
+    fn vacate_channel_slot(&self, slot: i64, keep_name: &str) -> Result<()> {
+        let conn = self.lock();
+        let others: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT name FROM channels
+                 WHERE slot = ?1
+                   AND COALESCE(active, 1) = 1
+                   AND name != ?2 COLLATE NOCASE",
+            )?;
+            let mapped = stmt.query_map(params![slot, keep_name], |row| row.get(0))?;
+            mapped.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        if others.is_empty() {
+            return Ok(());
+        }
+        let mut used: std::collections::HashSet<i64> = conn
+            .prepare("SELECT slot FROM channels WHERE COALESCE(active, 1) = 1")?
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .collect();
+        // Slot is being claimed; treat it as taken even if only `keep_name` will remain.
+        used.insert(slot);
+        for name in others {
+            let Some(free) = (0..32).find(|candidate| !used.contains(candidate)) else {
+                break;
+            };
+            conn.execute(
+                "UPDATE channels SET slot = ?2 WHERE name = ?1",
+                params![name, free],
+            )?;
+            used.insert(free);
+        }
+        Ok(())
+    }
+
+    /// Public on 0, one name per slot. Radio sync used to leave METIS-INFO and
+    /// Public both on slot 1, which made the UI open the emergency channel when
+    /// the operator thought they clicked Public.
+    fn repair_duplicate_channel_slots(&self) -> Result<()> {
+        // Pin reserved channels first.
+        self.vacate_channel_slot(0, "Public")?;
+        self.lock().execute(
+            "UPDATE channels SET slot = 0 WHERE name = 'Public' COLLATE NOCASE",
+            [],
+        )?;
+        let metis_slot: Option<i64> = self
+            .lock()
+            .query_row(
+                "SELECT slot FROM channels
+                 WHERE name = ?1 COLLATE NOCASE AND COALESCE(active, 1) = 1",
+                params![CHANNEL_NAME],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(current) = metis_slot {
+            let slot = if current == 0 { 1 } else { current };
+            self.vacate_channel_slot(slot, CHANNEL_NAME)?;
+            self.lock().execute(
+                "UPDATE channels SET slot = ?2 WHERE name = ?1 COLLATE NOCASE",
+                params![CHANNEL_NAME, slot],
+            )?;
+        }
+
+        let rows = self.list_channels()?;
+        let mut by_slot: std::collections::BTreeMap<i64, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for row in &rows {
+            by_slot.entry(row.slot).or_default().push(row.name.clone());
+        }
+        let mut used: std::collections::HashSet<i64> = rows.iter().map(|r| r.slot).collect();
+        for (_slot, names) in by_slot {
+            if names.len() < 2 {
+                continue;
+            }
+            let keep = if names.iter().any(|n| n.eq_ignore_ascii_case("Public")) {
+                "Public".to_string()
+            } else if names.iter().any(|n| n.eq_ignore_ascii_case(CHANNEL_NAME)) {
+                CHANNEL_NAME.to_string()
+            } else {
+                names[0].clone()
+            };
+            for name in names {
+                if name.eq_ignore_ascii_case(&keep) {
+                    continue;
+                }
+                let Some(free) = (0..32).find(|candidate| !used.contains(candidate)) else {
+                    break;
+                };
+                self.lock().execute(
+                    "UPDATE channels SET slot = ?2 WHERE name = ?1",
+                    params![name, free],
+                )?;
+                used.insert(free);
+            }
+        }
         Ok(())
     }
 
@@ -610,7 +766,13 @@ impl Db {
                     NULLIF(TRIM(COALESCE(c.message_keep, '')), '')
              FROM channels c
              WHERE COALESCE(c.active, 1) = 1
-             ORDER BY c.slot ASC, c.name COLLATE NOCASE",
+             ORDER BY
+               CASE
+                 WHEN c.name = 'Public' COLLATE NOCASE THEN 0
+                 WHEN c.name = 'METIS-INFO' COLLATE NOCASE THEN 1
+                 ELSE 2
+               END,
+               c.name COLLATE NOCASE",
         )?;
         let rows = stmt
             .query_map([], |row| {
@@ -645,6 +807,15 @@ impl Db {
         visibility: &str,
         role: &str,
     ) -> Result<()> {
+        // Public is immovable from mesh slot 0.
+        let slot = if name.eq_ignore_ascii_case("Public") {
+            0
+        } else if name.eq_ignore_ascii_case(CHANNEL_NAME) && slot == 0 {
+            1
+        } else {
+            slot
+        };
+        self.vacate_channel_slot(slot, name)?;
         let now = unix_now();
         self.lock().execute(
             "INSERT INTO channels (name, slot, secret_account, visibility, role, active, created_at)
@@ -746,21 +917,68 @@ impl Db {
         Ok(slot)
     }
 
+    /// True when the operator deleted this channel in HQ (active=0).
+    pub fn is_channel_soft_deleted(&self, name: &str) -> Result<bool> {
+        let conn = self.lock();
+        let active: Option<i64> = conn
+            .query_row(
+                "SELECT COALESCE(active, 1) FROM channels WHERE name = ?1 COLLATE NOCASE",
+                params![name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(matches!(active, Some(0)))
+    }
+
+    /// Soft-deleted channels and the slots they last occupied — used to wipe
+    /// companion slots so a reconnect sync cannot resurrect them.
+    pub fn list_soft_deleted_channels(&self) -> Result<Vec<(i64, String)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT slot, name FROM channels
+             WHERE COALESCE(active, 1) = 0
+             ORDER BY slot ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Slot currently claimed by an active channel, if any.
+    pub fn active_channel_on_slot(&self, slot: i64) -> Result<Option<String>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT name FROM channels
+             WHERE slot = ?1 AND COALESCE(active, 1) = 1
+             LIMIT 1",
+            params![slot],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Error::from)
+    }
+
     /// Import a channel discovered on the companion radio without clobbering METIS-INFO.
+    /// Returns `Ok(false)` when the operator soft-deleted this name — caller should
+    /// clear the radio slot instead of resurrecting the row.
     pub fn upsert_channel_from_radio(
         &self,
         name: &str,
         slot: i64,
         secret: &[u8; 16],
         secrets: &Secrets,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let name = name.trim();
         if name.is_empty() {
-            return Ok(());
+            return Ok(true);
+        }
+        if self.is_channel_soft_deleted(name)? {
+            return Ok(false);
         }
         if name.eq_ignore_ascii_case(CHANNEL_NAME) {
             self.ensure_channel_row(CHANNEL_NAME, slot, "private", "emergency")?;
-            return Ok(());
+            return Ok(true);
         }
         let visibility = if name.eq_ignore_ascii_case("Public") || secret.iter().all(|b| *b == 0) {
             "public"
@@ -777,7 +995,7 @@ impl Db {
             "general"
         };
         self.ensure_channel_row(name, slot, visibility, role)?;
-        Ok(())
+        Ok(true)
     }
 
     pub fn list_channel_messages(&self, slot: i64, limit: i64) -> Result<Vec<MessageRow>> {
@@ -1274,6 +1492,19 @@ impl Db {
             params![id, error],
         )?;
         Ok(())
+    }
+
+    /// Mark operator sends that never left the laptop so the UI does not lie.
+    pub fn fail_stale_tx_messages(&self, older_than_secs: i64) -> Result<usize> {
+        let cutoff = unix_now().saturating_sub(older_than_secs.max(1));
+        let changed = self.lock().execute(
+            "UPDATE messages SET delivery = 'failed'
+             WHERE direction = 'tx'
+               AND delivery IN ('queued', 'sending')
+               AND received_at < ?1",
+            params![cutoff],
+        )?;
+        Ok(changed)
     }
 
     pub fn mark_ack(&self, ack_hex: &str) -> Result<()> {

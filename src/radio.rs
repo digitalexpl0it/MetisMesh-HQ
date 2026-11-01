@@ -1,6 +1,7 @@
 //! One task owns the companion radio. The window only sends commands.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -9,6 +10,8 @@ use meshcore_rs::events::{ContactMessage, EventPayload, EventType, MeshCoreEvent
 use meshcore_rs::MeshCore;
 use serde_json::json;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::oneshot;
+use tokio::sync::watch;
 
 use crate::contact_qr;
 use crate::db::{contact_snapshot, unix_now, Db};
@@ -124,6 +127,9 @@ pub struct RadioStatus {
     /// Latest local/remote CLI reply for the CLI page transcript.
     pub cli_seq: u64,
     pub cli_line: String,
+    /// Bumped when a channel send finishes; `send_note` is empty on success.
+    pub send_seq: u64,
+    pub send_note: String,
 }
 
 impl Default for RadioStatus {
@@ -165,6 +171,8 @@ impl Default for RadioStatus {
             connected_since: None,
             cli_seq: 0,
             cli_line: String::new(),
+            send_seq: 0,
+            send_note: String::new(),
         }
     }
 }
@@ -180,9 +188,17 @@ pub enum RadioCmd {
     /// Push a channel definition onto the companion radio.
     PushChannel { slot: u8, name: String },
     /// Soft-delete / clear a non-system channel on the radio.
-    ClearChannel { slot: u8 },
-    /// Send text on a channel slot.
-    SendChannel { slot: u8, text: String },
+    ClearChannel {
+        slot: u8,
+        reply: Option<oneshot::Sender<Result<(), String>>>,
+    },
+    /// Send channel text. Prefixes the HQ name, waits for companion OK, then
+    /// inserts the history row. `reply` tells the UI the outcome.
+    SendChannel {
+        slot: u8,
+        text: String,
+        reply: Option<oneshot::Sender<Result<(), String>>>,
+    },
     RefreshDeviceSettings,
     SetCustomVar { key: String, value: String },
     SetCoords { lat: f64, lon: f64 },
@@ -214,6 +230,10 @@ pub enum RadioCmd {
 #[derive(Clone)]
 pub struct RadioHandle {
     cmd: UnboundedSender<RadioCmd>,
+    /// Bumped on Disconnect/Reboot; cancels a live session wherever it is waiting.
+    stop: Arc<watch::Sender<u64>>,
+    /// When stop fires because of Reboot, send CMD_REBOOT before dropping BLE.
+    reboot_pending: Arc<AtomicBool>,
     status: Arc<Mutex<RadioStatus>>,
 }
 
@@ -231,6 +251,11 @@ impl RadioHandle {
     }
 
     pub fn disconnect(&self) {
+        // Show progress right away; the radio task confirms with "Disconnected."
+        self.reboot_pending.store(false, Ordering::SeqCst);
+        write_status(&self.status, "disconnecting", "Disconnecting…");
+        self.stop.send_modify(|generation| *generation = generation.wrapping_add(1));
+        // Also clears a pending reconnect when no session is running.
         let _ = self.cmd.send(RadioCmd::Disconnect);
     }
 
@@ -242,12 +267,37 @@ impl RadioHandle {
         let _ = self.cmd.send(RadioCmd::PushChannel { slot, name });
     }
 
-    pub fn clear_channel(&self, slot: u8) {
-        let _ = self.cmd.send(RadioCmd::ClearChannel { slot });
+    pub fn clear_channel(&self, slot: u8) -> oneshot::Receiver<Result<(), String>> {
+        let (tx, rx) = oneshot::channel();
+        if let Err(err) = self.cmd.send(RadioCmd::ClearChannel {
+            slot,
+            reply: Some(tx),
+        }) {
+            if let RadioCmd::ClearChannel {
+                reply: Some(reply), ..
+            } = err.0
+            {
+                let _ = reply.send(Err("Radio command channel closed.".into()));
+            }
+        }
+        rx
     }
 
-    pub fn send_channel(&self, slot: u8, text: String) {
-        let _ = self.cmd.send(RadioCmd::SendChannel { slot, text });
+    pub fn send_channel(&self, slot: u8, text: String) -> oneshot::Receiver<Result<(), String>> {
+        let (tx, rx) = oneshot::channel();
+        if let Err(err) = self.cmd.send(RadioCmd::SendChannel {
+            slot,
+            text,
+            reply: Some(tx),
+        }) {
+            if let RadioCmd::SendChannel {
+                reply: Some(reply), ..
+            } = err.0
+            {
+                let _ = reply.send(Err("Radio task is not running.".into()));
+            }
+        }
+        rx
     }
 
     pub fn refresh_device_settings(&self) {
@@ -293,6 +343,11 @@ impl RadioHandle {
     }
 
     pub fn reboot(&self) {
+        // Cancel whatever the session is doing, send CMD_REBOOT on the live
+        // link, then force-drop Bluetooth so we do not sit "Connected".
+        self.reboot_pending.store(true, Ordering::SeqCst);
+        write_status(&self.status, "reconnecting", "Rebooting companion…");
+        self.stop.send_modify(|generation| *generation = generation.wrapping_add(1));
         let _ = self.cmd.send(RadioCmd::Reboot);
     }
 
@@ -314,8 +369,11 @@ impl RadioHandle {
 
 pub fn spawn_radio(db: Arc<Db>, secrets: Arc<Secrets>) -> RadioHandle {
     let (cmd, rx) = unbounded_channel();
+    let (stop, stop_rx) = watch::channel(0u64);
+    let reboot_pending = Arc::new(AtomicBool::new(false));
     let status = Arc::new(Mutex::new(RadioStatus::default()));
     let status_thread = status.clone();
+    let reboot_thread = reboot_pending.clone();
     std::thread::Builder::new()
         .name("metis-radio".into())
         .spawn(move || {
@@ -323,16 +381,45 @@ pub fn spawn_radio(db: Arc<Db>, secrets: Arc<Secrets>) -> RadioHandle {
                 .enable_all()
                 .build()
                 .expect("radio runtime");
-            runtime.block_on(radio_loop(db, secrets, status_thread, rx));
+            runtime.block_on(radio_loop(
+                db,
+                secrets,
+                status_thread,
+                rx,
+                stop_rx,
+                reboot_thread,
+            ));
         })
         .expect("radio thread");
-    RadioHandle { cmd, status }
+    RadioHandle {
+        cmd,
+        stop: Arc::new(stop),
+        reboot_pending,
+        status,
+    }
 }
 
 fn write_status(status: &Mutex<RadioStatus>, state: &str, detail: impl Into<String>) {
-    let mut guard = status.lock().unwrap_or_else(|err| err.into_inner());
-    guard.state = state.to_string();
-    guard.detail = detail.into();
+    let detail = detail.into();
+    {
+        let mut guard = status.lock().unwrap_or_else(|err| err.into_inner());
+        let state_changed = guard.state != state;
+        // Skip routine connected heartbeats (battery % refreshes) — still log
+        // connect/disconnect/errors and one-shot operator messages.
+        let heartbeat = state == "connected"
+            && !state_changed
+            && (detail.contains("Battery ") || detail.ends_with('.'))
+            && detail.starts_with("Connected to ");
+        if !heartbeat {
+            if state == "error" {
+                hq_log!(error, "radio [{state}] {detail}");
+            } else {
+                hq_log!(info, "radio [{state}] {detail}");
+            }
+        }
+        guard.state = state.to_string();
+        guard.detail = detail;
+    }
 }
 
 fn write_sync(
@@ -341,9 +428,45 @@ fn write_sync(
     label: impl Into<String>,
     progress: Option<(u32, u32)>,
 ) {
+    let label = label.into();
+    let phase_name = match phase {
+        SyncPhase::Idle => "idle",
+        SyncPhase::Connecting => "connecting",
+        SyncPhase::AppStart => "app_start",
+        SyncPhase::Contacts => "contacts",
+        SyncPhase::Channels => "channels",
+        SyncPhase::Messages => "messages",
+        SyncPhase::Ready => "ready",
+    };
+    let phase_changed = {
+        let guard = status.lock().unwrap_or_else(|err| err.into_inner());
+        guard.sync_phase != phase
+    };
+    // Log phase changes and milestones; keep per-message drain ticks at verbose.
+    let milestone = match progress {
+        None => true,
+        Some((0, _)) => true,
+        Some((done, total)) if total > 0 && done == total => true,
+        Some((done, _)) if done > 0 && done % 25 == 0 => true,
+        _ => {
+            label.contains("paused")
+                || label.contains("ready")
+                || label.contains("Synced")
+                || label.contains("retry")
+        }
+    };
+    if phase_changed || milestone {
+        if let Some((done, total)) = progress {
+            hq_log!(info, "sync [{phase_name}] {label} ({done}/{total})");
+        } else {
+            hq_log!(info, "sync [{phase_name}] {label}");
+        }
+    } else {
+        hq_log!(verbose, "sync [{phase_name}] {label}");
+    }
     let mut guard = status.lock().unwrap_or_else(|err| err.into_inner());
     guard.sync_phase = phase;
-    guard.sync_label = label.into();
+    guard.sync_label = label;
     guard.sync_progress = progress;
 }
 
@@ -476,7 +599,7 @@ async fn refresh_custom_vars(
             let mut guard = status.lock().unwrap_or_else(|err| err.into_inner());
             guard.custom_vars = vars;
         }
-        Err(err) => eprintln!("custom vars: {err}"),
+        Err(err) => hq_log!(debug, "custom vars: {err}"),
     }
 }
 
@@ -601,6 +724,8 @@ async fn radio_loop(
     secrets: Arc<Secrets>,
     status: Arc<Mutex<RadioStatus>>,
     mut rx: UnboundedReceiver<RadioCmd>,
+    stop_rx: watch::Receiver<u64>,
+    reboot_pending: Arc<AtomicBool>,
 ) {
     let mut desired: Option<String> = None;
     let mut backoff = Duration::from_secs(2);
@@ -614,12 +739,52 @@ async fn radio_loop(
                 None,
             );
             clear_session_telemetry(&status);
-            match run_session(&db, &secrets, &status, &mut rx, &name).await {
+            // Ignore Disconnect presses from before this session started.
+            let mut stop = stop_rx.clone();
+            stop.borrow_and_update();
+            let live: Mutex<Option<Arc<MeshCore>>> = Mutex::new(None);
+            let end = tokio::select! {
+                end = run_session(&db, &secrets, &status, &mut rx, &name, &live) => end,
+                _ = stop.changed() => SessionEnd::Stopped,
+            };
+            let want_reboot = reboot_pending.swap(false, Ordering::SeqCst);
+            // Always release the companion: stop meshcore-rs tasks and drop the
+            // OS-level Bluetooth link. meshcore-rs disconnect() alone leaves the
+            // GATT session up, so Settings reboot looked like a no-op.
+            let session = live.lock().unwrap_or_else(|err| err.into_inner()).take();
+            if let Some(meshcore) = session {
+                if want_reboot {
+                    let _ = send_companion_reboot(&meshcore).await;
+                }
+                let _ = meshcore.disconnect().await;
+            }
+            match tokio::time::timeout(
+                Duration::from_secs(8),
+                crate::ble_pair::force_disconnect(&name),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => hq_log!(warn, "bluetooth disconnect: {err}"),
+                Err(_) => hq_log!(warn, "bluetooth disconnect: timed out"),
+            }
+            match end {
+                SessionEnd::Stopped if want_reboot => {
+                    // Operator reboot: come back after the companion restarts.
+                    desired = Some(name);
+                    backoff = Duration::from_secs(5);
+                    clear_session_telemetry(&status);
+                    write_status(
+                        &status,
+                        "reconnecting",
+                        "Companion reboot sent. Reconnecting…",
+                    );
+                }
                 SessionEnd::Stopped => {
                     desired = None;
                     backoff = Duration::from_secs(2);
-                    write_status(&status, "disconnected", "Disconnected.");
                     clear_session_telemetry(&status);
+                    write_status(&status, "disconnected", "Disconnected.");
                 }
                 SessionEnd::Switch(next) => {
                     desired = Some(next);
@@ -803,14 +968,29 @@ async fn apply_idle_cmd(
             write_status(status, "disconnected", "Connect the radio before applying the advert name.");
             true
         }
-        Some(RadioCmd::PushChannel { .. })
-        | Some(RadioCmd::ClearChannel { .. })
-        | Some(RadioCmd::SendChannel { .. }) => {
+        Some(RadioCmd::SendChannel { reply, .. }) => {
+            let msg = "Connect the radio before sending. The message was not transmitted.";
+            push_send_note(status, msg);
+            if let Some(reply) = reply {
+                let _ = reply.send(Err(msg.into()));
+            }
+            write_status(status, "disconnected", msg);
+            true
+        }
+        Some(RadioCmd::PushChannel { .. }) => {
             write_status(
                 status,
                 "disconnected",
                 "Connect the radio before changing channels or sending.",
             );
+            true
+        }
+        Some(RadioCmd::ClearChannel { reply, .. }) => {
+            let msg = "Connect the radio before clearing a channel slot.";
+            if let Some(reply) = reply {
+                let _ = reply.send(Err(msg.into()));
+            }
+            write_status(status, "disconnected", msg);
             true
         }
         Some(RadioCmd::RunCli { .. }) => {
@@ -898,11 +1078,210 @@ fn parse_cli_reply_bytes(bytes: &[u8], tag: &str) -> Option<String> {
     Some(body.to_string())
 }
 
+/// Write a frame and wait for one of `expected`, listening *before* the write.
+///
+/// meshcore-rs `send` / `send_multi` subscribe only after writing, so a fast
+/// companion reply is lost and the call sits until its timeout while holding
+/// the command lock. The caller must already hold `commands`, so replies to
+/// other callers' frames cannot match here.
+async fn request_listening_first(
+    commands: &meshcore_rs::commands::CommandHandler,
+    dispatcher: &meshcore_rs::events::EventDispatcher,
+    data: &[u8],
+    expected: &[EventType],
+    timeout: Duration,
+) -> Result<MeshCoreEvent, String> {
+    let mut early_rx = dispatcher.receiver();
+    tokio::select! {
+        result = commands.send_multi(data, expected, timeout) => {
+            result.map_err(|err| err.to_string())
+        }
+        event = async {
+            loop {
+                match early_rx.recv().await {
+                    Ok(event) if expected.contains(&event.event_type) => return Ok(event),
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(_) => return Err("Companion event stream closed.".to_string()),
+                }
+            }
+        } => event,
+    }
+}
+
+/// Auto-fetch, battery polls, and contact sync share the command lock; give up
+/// instead of leaving an operator send hanging forever.
+const SEND_LOCK_WAIT: Duration = Duration::from_secs(20);
+/// Background work (battery, channel push, contact retry) must not park the
+/// session loop; otherwise operator CLI/sends never get a turn.
+const BRIEF_LOCK_WAIT: Duration = Duration::from_millis(750);
+
+async fn lock_commands_brief(
+    meshcore: &MeshCore,
+) -> Option<tokio::sync::MutexGuard<'_, meshcore_rs::commands::CommandHandler>> {
+    tokio::time::timeout(BRIEF_LOCK_WAIT, meshcore.commands().lock())
+        .await
+        .ok()
+}
+
+async fn lock_commands_for_operator(
+    meshcore: &MeshCore,
+) -> Result<tokio::sync::MutexGuard<'_, meshcore_rs::commands::CommandHandler>, String> {
+    tokio::time::timeout(SEND_LOCK_WAIT, meshcore.commands().lock())
+        .await
+        .map_err(|_| "Radio is busy (sync in progress). Try again in a moment.".to_string())
+}
+
+async fn send_companion_reboot(meshcore: &MeshCore) -> Result<(), String> {
+    let commands = lock_commands_for_operator(meshcore).await?;
+    let result = commands.reboot().await.map_err(|err| err.to_string());
+    if result.is_ok() {
+        // Give the write task a beat to flush before we tear the link down.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    result
+}
+
+fn push_send_note(status: &Mutex<RadioStatus>, note: impl Into<String>) {
+    let mut guard = status.lock().unwrap_or_else(|err| err.into_inner());
+    guard.send_seq = guard.send_seq.wrapping_add(1);
+    guard.send_note = note.into();
+}
+
+/// Pull queued frames off the companion. Each message is also broadcast to our
+/// ChannelMsgRecv / ContactMsgRecv subscriptions, which handle DB insert — so
+/// this only drives `CMD_SYNC_NEXT_MESSAGE` and must not insert again.
+async fn drain_pending_messages(meshcore: &MeshCore) {
+    let Ok(commands) =
+        tokio::time::timeout(BRIEF_LOCK_WAIT, meshcore.commands().lock()).await
+    else {
+        return;
+    };
+    for _ in 0..8 {
+        match tokio::time::timeout(Duration::from_millis(900), commands.get_msg()).await {
+            Ok(Ok(Some(_event))) => {}
+            Ok(Ok(None)) => break,
+            Ok(Err(err)) => {
+                hq_log!(warn, "get_msg: {err}");
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+/// MeshCore `CMD_SEND_CHANNEL_TXT_MSG` (0x03). Firmware replies `RESP_CODE_OK` /
+/// `RESP_CODE_ERR` — subscribe before write so a fast OK is not missed.
+async fn send_channel_text(
+    meshcore: &MeshCore,
+    slot: u8,
+    wire: &str,
+    timestamp: u32,
+) -> Result<(), String> {
+    let mut data = vec![0x03u8, 0x00, slot];
+    data.extend_from_slice(&timestamp.to_le_bytes());
+    data.extend_from_slice(wire.as_bytes());
+
+    hq_log!(debug, "channel send: waiting for command lock (slot {slot}, {} bytes)", wire.len());
+    let commands = lock_commands_for_operator(meshcore).await?;
+    hq_log!(debug, "channel send: lock acquired, writing frame");
+    let result = request_listening_first(
+        &commands,
+        meshcore.dispatcher(),
+        &data,
+        &[EventType::Ok, EventType::Error],
+        Duration::from_secs(5),
+    )
+    .await;
+    drop(commands);
+
+    match result? {
+        event if event.event_type == EventType::Error => match event.payload {
+            EventPayload::String(s) => Err(s),
+            _ => Err("Companion rejected the channel send (bad slot or radio busy).".into()),
+        },
+        _ => Ok(()),
+    }
+}
+
+async fn transmit_channel_message(
+    db: &Db,
+    meshcore: &MeshCore,
+    status: &Mutex<RadioStatus>,
+    connected_name: &str,
+    radio_id: i64,
+    slot: u8,
+    text: &str,
+) -> Result<(), String> {
+    let text = text.trim();
+    if text.is_empty() {
+        let msg = "Message is empty.";
+        push_send_note(status, msg);
+        return Err(msg.into());
+    }
+    let advert_name = db.hq_advert_name().unwrap_or_else(|_| "hq".into());
+    let wire = prefix_channel_sender(&advert_name, text);
+    if wire.len() > 160 {
+        let msg = "Mesh text is limited to 160 bytes after adding the device name.";
+        push_send_note(status, msg);
+        write_status(status, "connected", msg);
+        return Err(msg.into());
+    }
+    let timestamp = unix_now() as u32;
+    match send_channel_text(meshcore, slot, &wire, timestamp).await {
+        Ok(()) => {
+            let raw = json!({
+                "channel": slot,
+                "text": wire,
+                "direction": "tx",
+            });
+            match db.insert_message(
+                "channel",
+                "tx",
+                None,
+                &advert_name,
+                Some(slot as i64),
+                Some(0),
+                timestamp,
+                &wire,
+                &wire,
+                None,
+                None,
+                &raw,
+                "sent",
+                Some(radio_id),
+            ) {
+                Ok(None) => {
+                    // Dedupe hit — still treat as sent so the UI refreshes.
+                    let _ = db.audit("channel_send", "", &format!("slot {slot} (deduped)"));
+                    push_send_note(status, String::new());
+                    write_status(status, "connected", connected_detail(status, connected_name));
+                    Ok(())
+                }
+                Ok(Some(_)) => {
+                    let _ = db.audit("channel_send", "", &format!("slot {slot}"));
+                    push_send_note(status, String::new());
+                    write_status(status, "connected", connected_detail(status, connected_name));
+                    Ok(())
+                }
+                Err(err) => {
+                    let msg = format!("Sent on air, but could not save history: {err}");
+                    push_send_note(status, &msg);
+                    Err(msg)
+                }
+            }
+        }
+        Err(err) => {
+            let msg = format!("Send failed: {err}");
+            push_send_note(status, &msg);
+            write_status(status, "connected", &msg);
+            Err(msg)
+        }
+    }
+}
+
 /// Companion `CMD_RUN_CLI_COMMAND` (66). Reply is code 29 → EventType::Unknown + Bytes.
 /// Wire body is `xx|command` (protocol v14+), matching mesh-client / firmware.
-///
-/// Subscribes to the dispatcher *before* send so a fast reply is not missed
-/// (meshcore-rs `send_multi` subscribes after writing the frame).
 async fn apply_local_cli(
     meshcore: &MeshCore,
     text: &str,
@@ -925,39 +1304,20 @@ async fn apply_local_cli(
     let mut data = vec![66u8];
     data.extend_from_slice(framed.as_bytes());
 
-    let mut early_rx = meshcore.dispatcher().receiver();
-    let commands = meshcore.commands().lock().await;
+    let commands = lock_commands_for_operator(meshcore).await?;
+    let event = request_listening_first(
+        &commands,
+        meshcore.dispatcher(),
+        &data,
+        &[EventType::Unknown, EventType::Error, EventType::Ok],
+        Duration::from_secs(12),
+    )
+    .await;
+    drop(commands);
 
-    let event = tokio::select! {
-        result = commands.send_multi(
-            &data,
-            &[EventType::Unknown, EventType::Error, EventType::Ok],
-            Duration::from_secs(12),
-        ) => {
-            result.map_err(|err| {
-                format!(
-                    "{err} — no CLI reply. Needs protocol v14+, and the radio must not be mid-sync."
-                )
-            })?
-        }
-        event = async {
-            loop {
-                match early_rx.recv().await {
-                    Ok(event)
-                        if matches!(
-                            event.event_type,
-                            EventType::Unknown | EventType::Error | EventType::Ok
-                        ) =>
-                    {
-                        return Ok(event);
-                    }
-                    Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(_) => return Err("CLI event stream closed.".to_string()),
-                }
-            }
-        } => event?,
-    };
+    let event = event.map_err(|err| {
+        format!("{err} — no CLI reply. Needs protocol v14+, and the radio must not be mid-sync.")
+    })?;
 
     match event.event_type {
         EventType::Error => match event.payload {
@@ -1013,11 +1373,15 @@ async fn run_session(
     status: &Mutex<RadioStatus>,
     rx: &mut UnboundedReceiver<RadioCmd>,
     name: &str,
+    live: &Mutex<Option<Arc<MeshCore>>>,
 ) -> SessionEnd {
     let meshcore = match MeshCore::ble_connect(name).await {
-        Ok(meshcore) => meshcore,
+        Ok(meshcore) => Arc::new(meshcore),
         Err(err) => return SessionEnd::Lost(err.to_string()),
     };
+    // Shared so an operator Disconnect can tear the link down even while this
+    // session is stuck mid-sync or waiting on the command lock.
+    *live.lock().unwrap_or_else(|err| err.into_inner()) = Some(meshcore.clone());
     let radio = match db.upsert_radio("ble", name, "Companion") {
         Ok(id) => id,
         Err(err) => return SessionEnd::Lost(err.to_string()),
@@ -1114,10 +1478,15 @@ async fn run_session(
         }
         if let Ok(battery) = commands.get_bat().await {
             apply_battery(db, status, &battery);
-            write_status(status, "connected", connected_detail(status, name));
-        } else {
-            write_status(status, "connected", format!("Connected to {name}."));
         }
+        // Stay on "connecting" until sync finishes. Marking connected here used
+        // to enable Send while this lock was still held for minutes — and a
+        // nested lock below deadlocked the session before the live loop.
+        write_status(
+            status,
+            "connecting",
+            format!("Linked to {name}. Syncing companion…"),
+        );
         write_sync(
             status,
             SyncPhase::Contacts,
@@ -1126,13 +1495,8 @@ async fn run_session(
         );
         // Contact lists over BLE can outlast the default 5s command timeout.
         // Keep the session if sync is slow or empty; retry from the live loop.
-        if let Err(err) = sync_contacts(db, &commands, Some(status)).await {
-            eprintln!("contact sync: {err}");
-            write_status(
-                status,
-                "connected",
-                format!("Connected to {name}. Contact sync will retry ({err})."),
-            );
+        if let Err(err) = sync_contacts(db, &commands, meshcore.dispatcher(), Some(status)).await {
+            hq_log!(warn, "contact sync: {err}");
         }
         write_sync(
             status,
@@ -1143,17 +1507,19 @@ async fn run_session(
         match sync_channels(db, secrets, &commands, max_channels, status).await {
             Ok(()) => {}
             Err(err) if is_ble_link_error(&err) => {
-                eprintln!("channel sync: {err}");
+                hq_log!(warn, "channel sync: {err}");
                 return SessionEnd::Lost(err);
             }
-            Err(err) => eprintln!("channel sync: {err}"),
+            Err(err) => hq_log!(warn, "channel sync: {err}"),
         }
         if let Err(err) = push_channel(db, secrets, &commands, max_channels).await {
-            eprintln!("channel setup: {err}");
+            hq_log!(warn, "channel setup: {err}");
             if is_ble_link_error(&err) {
                 return SessionEnd::Lost(err);
             }
         }
+        // Soft-delete is local; companion still holds the slot until we blank it.
+        clear_soft_deleted_radio_slots(db, &commands).await;
         // Cap the initial queue drain. On a busy Public channel, new RF traffic
         // can refill the companion queue forever — holding this lock for hours
         // blocks Ready / CLI / settings while the UI says "Draining…".
@@ -1188,7 +1554,7 @@ async fn run_session(
                         Some((drained, (drained + 8).max(1))),
                     );
                     if let Err(err) = handle_event(db, &meshcore, event, radio).await {
-                        eprintln!("message: {err}");
+                        hq_log!(warn, "message: {err}");
                     }
                 }
                 Ok(Ok(None)) => break,
@@ -1206,10 +1572,9 @@ async fn run_session(
                 guard.connected_since = Some(unix_now());
             }
         }
-        {
-            let commands = meshcore.commands().lock().await;
-            refresh_custom_vars(&commands, status).await;
-        }
+        // Use the lock we already hold — a second commands().lock() here
+        // deadlocked the session forever (tokio Mutex is not reentrant).
+        refresh_custom_vars(&commands, status).await;
         write_status(status, "connected", connected_detail(status, name));
     }
 
@@ -1233,14 +1598,31 @@ async fn run_session(
         subscriptions.push(subscription);
     }
     drop(event_tx);
-    meshcore.start_auto_message_fetching().await;
+    // Do NOT use meshcore-rs start_auto_message_fetching(): it spawns tasks that
+    // hold the command mutex across get_msg and starve channel sends / CLI.
+    // MessagesWaiting is drained in the session loop instead.
     let _keep = subscriptions;
 
     let mut replies: HashMap<String, Instant> = HashMap::new();
     let mut pushed_generation = 0i64;
     let mut last_battery = Instant::now();
-    let mut last_advert_sync = Instant::now() - Duration::from_secs(120);
+    // Contacts were just synced during connect.
+    let mut last_advert_sync = Instant::now();
     let mut contact_retry_at = Instant::now() + Duration::from_secs(15);
+    // Older builds could finish a dump and still leave contacts_since at 0,
+    // which re-triggers a multi-minute BLE sync on every connect and blocks sends.
+    if db
+        .setting("contacts_since")
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0)
+        == 0
+    {
+        if db.list_nodes().map(|n| n.len()).unwrap_or(0) > 0 {
+            let _ = db.set_setting("contacts_since", "1");
+        }
+    }
     let mut need_contact_retry = db
         .setting("contacts_since")
         .ok()
@@ -1314,63 +1696,34 @@ async fn run_session(
                             );
                         }
                     }
-                    Some(RadioCmd::ClearChannel { slot }) => {
+                    Some(RadioCmd::ClearChannel { slot, reply }) => {
                         let commands = meshcore.commands().lock().await;
-                        let blank = [0u8; 16];
-                        if let Err(err) = commands.set_channel(slot, "", &blank).await {
-                            write_status(status, "connected", err.to_string());
-                        } else {
-                            write_status(
+                        let result = clear_radio_channel_slot(&commands, slot).await;
+                        match &result {
+                            Ok(()) => write_status(
                                 status,
                                 "connected",
                                 format!("Cleared radio channel slot {slot}."),
-                            );
+                            ),
+                            Err(err) => write_status(status, "connected", err.clone()),
+                        }
+                        if let Some(reply) = reply {
+                            let _ = reply.send(result);
                         }
                     }
-                    Some(RadioCmd::SendChannel { slot, text }) => {
-                        let text = text.trim().to_string();
-                        if text.is_empty() {
-                            continue;
+                    Some(RadioCmd::SendChannel { slot, text, reply }) => {
+                        hq_log!(debug, "channel send: handling slot {slot}");
+                        let result = transmit_channel_message(
+                            db, &meshcore, status, name, radio, slot, &text,
+                        )
+                        .await;
+                        if let Err(err) = &result {
+                            hq_log!(error, "channel send (slot {slot}): {err}");
+                        } else {
+                            hq_log!(info, "channel send: ok slot {slot}");
                         }
-                        let advert_name = db.hq_advert_name().unwrap_or_else(|_| "hq".into());
-                        let wire = prefix_channel_sender(&advert_name, &text);
-                        if wire.len() > 160 {
-                            write_status(
-                                status,
-                                "connected",
-                                "Mesh text is limited to 160 bytes after adding the device name.",
-                            );
-                            continue;
-                        }
-                        let commands = meshcore.commands().lock().await;
-                        match commands
-                            .send_channel_msg(slot, &wire, Some(unix_now() as u32))
-                            .await
-                        {
-                            Ok(()) => {
-                                let raw = json!({
-                                    "channel": slot,
-                                    "text": wire,
-                                    "direction": "tx",
-                                });
-                                let _ = db.insert_message(
-                                    "channel",
-                                    "tx",
-                                    None,
-                                    &advert_name,
-                                    Some(slot as i64),
-                                    Some(0),
-                                    unix_now() as u32,
-                                    &wire,
-                                    &wire,
-                                    None,
-                                    None,
-                                    &raw,
-                                    "sent",
-                                    Some(radio),
-                                );
-                            }
-                            Err(err) => write_status(status, "connected", err.to_string()),
+                        if let Some(reply) = reply {
+                            let _ = reply.send(result);
                         }
                     }
                     Some(RadioCmd::RefreshDeviceSettings) => {
@@ -1576,9 +1929,15 @@ async fn run_session(
                         let result = if contact_hex.trim().is_empty() {
                             apply_local_cli(&meshcore, &text, protocol_ver).await
                         } else {
-                            let commands = meshcore.commands().lock().await;
                             match parse_pubkey_prefix(&contact_hex) {
-                                Ok(prefix) => apply_remote_cli(&commands, prefix, &text).await,
+                                Ok(prefix) => {
+                                    match lock_commands_for_operator(&meshcore).await {
+                                        Ok(commands) => {
+                                            apply_remote_cli(&commands, prefix, &text).await
+                                        }
+                                        Err(err) => Err(err),
+                                    }
+                                }
                                 Err(err) => Err(err),
                             }
                         };
@@ -1632,7 +1991,7 @@ async fn run_session(
                                     ok += 1;
                                 }
                                 Err(err) => {
-                                    eprintln!("noise probe {}: {err}", node.name);
+                                    hq_log!(warn, "noise probe {}: {err}", node.name);
                                 }
                             }
                         }
@@ -1643,18 +2002,15 @@ async fn run_session(
                         );
                     }
                     Some(RadioCmd::Reboot) => {
-                        let commands = meshcore.commands().lock().await;
-                        match commands.reboot().await {
+                        // Prefer the out-of-band reboot path (stop + reboot_pending).
+                        // If we get here instead, still send the frame and leave.
+                        write_status(status, "reconnecting", "Rebooting companion…");
+                        match send_companion_reboot(&meshcore).await {
                             Ok(()) => {
-                                write_status(
-                                    status,
-                                    "reconnecting",
-                                    "Companion reboot requested…",
-                                );
                                 let _ = meshcore.disconnect().await;
                                 return SessionEnd::Lost("Companion rebooting.".into());
                             }
-                            Err(err) => write_status(status, "connected", err.to_string()),
+                            Err(err) => write_status(status, "connected", err),
                         }
                     }
                     Some(RadioCmd::Scan)
@@ -1668,72 +2024,77 @@ async fn run_session(
                     Some(event) if event.event_type == EventType::Disconnected => {
                         return SessionEnd::Lost("Bluetooth link closed.".into());
                     }
+                    Some(event) if event.event_type == EventType::MessagesWaiting => {
+                        // Spawn so a slow get_msg drain cannot block SendChannel
+                        // in the select loop (that was leaving sends with no UI feedback).
+                        let meshcore = meshcore.clone();
+                        tokio::spawn(async move {
+                            drain_pending_messages(&meshcore).await;
+                        });
+                    }
                     Some(event) => {
-                        // Do NOT contact-sync on MessagesWaiting — auto-fetch already
-                        // drains messages, and a 30s get_contacts held the command lock
-                        // so CLI/settings never ran on a busy mesh.
                         if event.event_type == EventType::Advertisement
-                            && last_advert_sync.elapsed() >= Duration::from_secs(60)
+                            && last_advert_sync.elapsed() >= Duration::from_secs(300)
                         {
                             last_advert_sync = Instant::now();
-                            let commands = meshcore.commands().lock().await;
-                            if let Err(err) = sync_contacts(db, &commands, None).await {
-                                eprintln!("contact sync: {err}");
-                            }
+                            need_contact_retry = true;
+                            contact_retry_at = Instant::now();
                         }
                         if let Err(err) = handle_event(db, &meshcore, event, radio).await {
-                            eprintln!("event: {err}");
+                            hq_log!(warn, "event: {err}");
                         }
                     }
                 }
             }
             _ = tick.tick() => {
+                let _ = db.fail_stale_tx_messages(90);
                 if let Err(err) = flush_one_outbound(db, &meshcore, &mut replies).await {
-                    eprintln!("send: {err}");
+                    hq_log!(warn, "send: {err}");
                 }
                 let generation = db.channel_generation().unwrap_or(0);
                 if generation != pushed_generation {
-                    let commands = meshcore.commands().lock().await;
-                    match push_channel(db, secrets, &commands, max_channels).await {
-                        Ok(true) => pushed_generation = generation,
-                        Ok(false) => {}
-                        Err(err) => eprintln!("channel: {err}"),
+                    if let Some(commands) = lock_commands_brief(&meshcore).await {
+                        match push_channel(db, secrets, &commands, max_channels).await {
+                            Ok(true) => pushed_generation = generation,
+                            Ok(false) => {}
+                            Err(err) => hq_log!(warn, "channel: {err}"),
+                        }
                     }
                 }
                 if last_battery.elapsed() >= Duration::from_secs(15) {
-                    let commands = meshcore.commands().lock().await;
-                    match commands.get_bat().await {
-                        Ok(battery) => apply_battery(db, status, &battery),
-                        Err(err) => eprintln!("battery poll: {err}"),
+                    if let Some(commands) = lock_commands_brief(&meshcore).await {
+                        match commands.get_bat().await {
+                            Ok(battery) => apply_battery(db, status, &battery),
+                            Err(err) => hq_log!(debug, "battery poll: {err}"),
+                        }
+                        last_battery = Instant::now();
                     }
-                    last_battery = Instant::now();
                 }
-                // If initial contact dump never finished (contacts_since still 0),
-                // retry once the live loop is up so we don't block connect forever.
+                // Never run a multi-minute contact dump on the live loop — that
+                // held the select arm and made SendChannel look dead.
                 if need_contact_retry && Instant::now() >= contact_retry_at {
                     contact_retry_at = Instant::now() + Duration::from_secs(120);
-                    let since_now = db
-                        .setting("contacts_since")
-                        .ok()
-                        .flatten()
-                        .and_then(|v| v.parse::<u32>().ok())
-                        .unwrap_or(0);
-                    if since_now == 0 {
+                    if let Some(commands) = lock_commands_brief(&meshcore).await {
                         write_sync(
                             status,
                             SyncPhase::Contacts,
                             "Retrying contact sync…",
                             None,
                         );
-                        let commands = meshcore.commands().lock().await;
-                        match sync_contacts(db, &commands, Some(status)).await {
-                            Ok(()) => {
+                        let sync = tokio::time::timeout(
+                            Duration::from_secs(8),
+                            sync_contacts(db, &commands, meshcore.dispatcher(), Some(status)),
+                        )
+                        .await;
+                        match sync {
+                            Ok(Ok(())) => {
                                 need_contact_retry = false;
+                                last_advert_sync = Instant::now();
                                 write_sync(status, SyncPhase::Ready, "Companion ready", None);
                                 write_status(status, "connected", connected_detail(status, name));
                             }
-                            Err(err) => {
-                                eprintln!("contact sync retry: {err}");
+                            Ok(Err(err)) => {
+                                hq_log!(warn, "contact sync retry: {err}");
                                 write_sync(status, SyncPhase::Ready, "Companion ready", None);
                                 write_status(
                                     status,
@@ -1743,6 +2104,11 @@ async fn run_session(
                                         connected_detail(status, name)
                                     ),
                                 );
+                            }
+                            Err(_) => {
+                                hq_log!(debug, "contact sync retry: timed out");
+                                write_sync(status, SyncPhase::Ready, "Companion ready", None);
+                                write_status(status, "connected", connected_detail(status, name));
                             }
                         }
                     }
@@ -1755,18 +2121,40 @@ async fn run_session(
 async fn sync_contacts(
     db: &Db,
     commands: &meshcore_rs::commands::CommandHandler,
+    dispatcher: &meshcore_rs::events::EventDispatcher,
     status: Option<&Mutex<RadioStatus>>,
 ) -> Result<(), String> {
-    let since = db
+    let since: u32 = db
         .setting("contacts_since")
         .map_err(|err| err.to_string())?
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
-    // Full dumps of hundreds of contacts over BLE routinely exceed 30s.
-    let contacts = commands
-        .get_contacts_with_timeout(since, Duration::from_secs(180))
-        .await
-        .map_err(|err| err.to_string())?;
+    // Full dumps of hundreds of contacts over BLE can take a minute or two;
+    // incremental replies are small and arrive almost immediately.
+    let timeout = if since == 0 {
+        Duration::from_secs(120)
+    } else {
+        Duration::from_secs(30)
+    };
+    // CMD_GET_CONTACTS = 4, followed by the lastmod watermark.
+    let mut data = vec![4u8];
+    data.extend_from_slice(&since.to_le_bytes());
+    let event = request_listening_first(
+        commands,
+        dispatcher,
+        &data,
+        &[EventType::Contacts, EventType::Error],
+        timeout,
+    )
+    .await?;
+    let contacts = match event.payload {
+        EventPayload::Contacts(contacts) => contacts,
+        EventPayload::String(err) => return Err(err),
+        _ if event.event_type == EventType::Error => {
+            return Err("Companion rejected the contact request.".into())
+        }
+        _ => return Err("Unexpected reply to the contact request.".into()),
+    };
     let total = contacts.len() as u32;
     if let Some(status) = status {
         write_sync(
@@ -1840,7 +2228,12 @@ async fn sync_contacts(
             Some((total.max(1), total.max(1))),
         );
     }
-    db.set_setting("contacts_since", &newest.to_string())
+    // A finished sync that leaves the watermark at 0 (empty dump, or every
+    // contact still at timestamp 0) would retry the full BLE dump forever and
+    // hold the command lock for minutes — channel sends sit in the queue and
+    // look dead in the UI. Advance at least to 1 so the next pass is incremental.
+    let marker = newest.max(since).max(1);
+    db.set_setting("contacts_since", &marker.to_string())
         .map_err(|err| err.to_string())?;
     Ok(())
 }
@@ -1855,6 +2248,47 @@ fn is_ble_link_error(err: &str) -> bool {
 
 fn is_channel_query_timeout(err: &str) -> bool {
     err.to_ascii_lowercase().contains("timeout")
+}
+
+/// Blank a companion channel slot (`set_channel` with empty name + zero secret).
+async fn clear_radio_channel_slot(
+    commands: &meshcore_rs::commands::CommandHandler,
+    slot: u8,
+) -> Result<(), String> {
+    let blank = [0u8; 16];
+    commands
+        .set_channel(slot, "", &blank)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Wipe companion slots that still hold channels the operator soft-deleted in HQ,
+/// unless another active HQ channel now owns that slot.
+async fn clear_soft_deleted_radio_slots(
+    db: &Db,
+    commands: &meshcore_rs::commands::CommandHandler,
+) {
+    let Ok(deleted) = db.list_soft_deleted_channels() else {
+        return;
+    };
+    for (slot, name) in deleted {
+        if slot < 0 || slot > u8::MAX as i64 {
+            continue;
+        }
+        if matches!(db.active_channel_on_slot(slot), Ok(Some(_))) {
+            continue;
+        }
+        let idx = slot as u8;
+        match commands.get_channel(idx).await {
+            Ok(info) if info.name.trim().eq_ignore_ascii_case(&name) => {
+                if let Err(err) = clear_radio_channel_slot(commands, idx).await {
+                    hq_log!(warn, "clear soft-deleted `{name}` slot {idx}: {err}");
+                }
+            }
+            Ok(_) => {}
+            Err(err) => hq_log!(debug, "get_channel({idx}) while clearing soft-deleted: {err}"),
+        }
+    }
 }
 
 async fn sync_channels(
@@ -1900,7 +2334,17 @@ async fn sync_channels(
                 completed = step as u32 + 1;
                 let name = info.name.trim();
                 if !name.is_empty() {
-                    let _ = db.upsert_channel_from_radio(name, idx as i64, &info.secret, secrets);
+                    match db.upsert_channel_from_radio(name, idx as i64, &info.secret, secrets) {
+                        Ok(false) => {
+                            // Operator deleted this channel in HQ — wipe the companion
+                            // slot so the next open does not resurrect it.
+                            if let Err(err) = clear_radio_channel_slot(commands, idx).await {
+                                hq_log!(warn, "clear soft-deleted channel slot {idx}: {err}");
+                            }
+                        }
+                        Ok(true) => {}
+                        Err(err) => hq_log!(warn, "upsert channel slot {idx}: {err}"),
+                    }
                 }
                 write_sync(
                     status,
@@ -1911,7 +2355,7 @@ async fn sync_channels(
             }
             Err(err) => {
                 let msg = err.to_string();
-                eprintln!("get_channel({idx}): {msg}");
+                hq_log!(debug, "get_channel({idx}): {msg}");
                 if is_ble_link_error(&msg) {
                     return Err(format!("Channel sync stopped at slot {idx}: {msg}"));
                 }
@@ -1946,7 +2390,24 @@ async fn push_channel(
     let Some(secret) = secrets.load(CHANNEL_NAME).map_err(|err| err)? else {
         return Ok(false);
     };
-    let slot = if max_channels > 1 { 1 } else { 0 };
+    // Prefer the existing METIS-INFO slot. Never stomp another channel's slot
+    // (that used to leave two DB rows on slot 1 and break private sends).
+    let slot = db
+        .list_channels()
+        .ok()
+        .and_then(|rows| {
+            rows.into_iter()
+                .find(|row| row.name.eq_ignore_ascii_case(CHANNEL_NAME))
+                .map(|row| row.slot as u8)
+        })
+        .or_else(|| {
+            db.next_channel_slot()
+                .ok()
+                .map(|slot| slot as u8)
+                .filter(|slot| (*slot as u8) < max_channels)
+        })
+        .unwrap_or(if max_channels > 1 { 1 } else { 0 });
+    let slot = slot.min(max_channels.saturating_sub(1));
     commands
         .set_channel(slot, CHANNEL_NAME, &secret)
         .await
@@ -2125,7 +2586,9 @@ async fn remember_route(db: &Db, meshcore: &MeshCore, pubkey_hex: &str, message_
     frame.push(0x2A);
     frame.push(0x00);
     frame.extend_from_slice(&bytes);
-    let commands = meshcore.commands().lock().await;
+    let Some(commands) = lock_commands_brief(meshcore).await else {
+        return;
+    };
     if let Ok(event) = commands
         .send_multi(
             &frame,
@@ -2164,6 +2627,36 @@ async fn remember_route(db: &Db, meshcore: &MeshCore, pubkey_hex: &str, message_
     }
 }
 
+/// `CMD_SEND_TXT_MSG` (2) to a contact, listening for `MsgSent` before the write.
+async fn send_direct_text(
+    commands: &meshcore_rs::commands::CommandHandler,
+    dispatcher: &meshcore_rs::events::EventDispatcher,
+    pubkey_hex: &str,
+    body: &str,
+) -> Result<meshcore_rs::events::MsgSentInfo, String> {
+    let prefix = Destination::Hex(pubkey_hex.to_string())
+        .prefix()
+        .map_err(|err| err.to_string())?;
+    // TXT_TYPE_PLAIN = 0, attempt = 0
+    let mut data = vec![0x02u8, 0x00, 0x00];
+    data.extend_from_slice(&(unix_now() as u32).to_le_bytes());
+    data.extend_from_slice(&prefix);
+    data.extend_from_slice(body.as_bytes());
+    let event = request_listening_first(
+        commands,
+        dispatcher,
+        &data,
+        &[EventType::MsgSent, EventType::Error],
+        Duration::from_secs(10),
+    )
+    .await?;
+    match event.payload {
+        EventPayload::MsgSent(info) => Ok(info),
+        EventPayload::String(err) => Err(err),
+        _ => Err("Companion rejected the direct message.".into()),
+    }
+}
+
 async fn flush_one_outbound(
     db: &Arc<Db>,
     meshcore: &MeshCore,
@@ -2180,10 +2673,13 @@ async fn flush_one_outbound(
             }
         }
     }
-    let commands = meshcore.commands().lock().await;
-    match commands
-        .send_msg(Destination::Hex(outbound.pubkey.clone()), &outbound.body, None)
+    let Some(commands) = tokio::time::timeout(SEND_LOCK_WAIT, meshcore.commands().lock())
         .await
+        .ok()
+    else {
+        return Err("Radio is busy (sync in progress). Try again in a moment.".into());
+    };
+    match send_direct_text(&commands, meshcore.dispatcher(), &outbound.pubkey, &outbound.body).await
     {
         Ok(info) => {
             let ack = hex::encode(info.expected_ack);
@@ -2255,7 +2751,7 @@ pub fn channel_sender_and_body(text: &str) -> (Option<String>, String) {
 }
 
 /// Ensure outbound channel text carries our advert name like other MeshCore clients.
-fn prefix_channel_sender(name: &str, text: &str) -> String {
+pub fn prefix_channel_sender(name: &str, text: &str) -> String {
     let name = name.trim();
     let text = text.trim();
     if name.is_empty() {

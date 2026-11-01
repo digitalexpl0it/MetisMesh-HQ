@@ -592,6 +592,28 @@
       return raw;
     },
 
+    /** True only when the map is mounted in the container currently in the page. */
+    isLive: function (mapId, containerId) {
+      var map = this.maps[mapId];
+      if (!map) return false;
+      var container = map.getContainer && map.getContainer();
+      if (!container || !container.isConnected) return false;
+      return !containerId || document.getElementById(containerId) === container;
+    },
+
+    /** Page-leave cleanup. Skips a map that a remount already attached to the page. */
+    destroyIfDetached: function (mapId) {
+      var self = this;
+      setTimeout(function () {
+        var map = self.maps[mapId];
+        if (!map) return;
+        var container = map.getContainer && map.getContainer();
+        if (container && container.isConnected) return;
+        self.destroy(mapId);
+      }, 50);
+      return true;
+    },
+
     destroy: function (mapId) {
       this.teardownCoverageDrag(mapId);
       this.clearRegionDraft(mapId);
@@ -1585,9 +1607,54 @@
       return { mapId: keys[0], draft: this.regionDraft[keys[0]] };
     },
 
+    /** Recover draft memory from the GeoJSON source if regionDraft was dropped. */
+    recoverDraftFromSource: function (mapId) {
+      var map = this.maps[mapId];
+      if (!map) {
+        var ids = Object.keys(this.maps || {});
+        if (!ids.length) return null;
+        mapId = ids[0];
+        map = this.maps[mapId];
+      }
+      if (!map) return null;
+      var source = map.getSource("region-draft");
+      if (!source) return null;
+      var data = null;
+      try {
+        data = source._data || (source.serialize && source.serialize().data) || null;
+      } catch (_) {
+        data = null;
+      }
+      var ring =
+        data &&
+        data.features &&
+        data.features[0] &&
+        data.features[0].geometry &&
+        data.features[0].geometry.coordinates &&
+        data.features[0].geometry.coordinates[0];
+      if (!ring || ring.length < 4) return null;
+      var props =
+        (data.features[0] && data.features[0].properties) || {};
+      var draft = {
+        shape: props.shape || "rectangle",
+        radiusMiles: 50,
+        lng: 0,
+        lat: 0,
+        mode: props.mode === "adjust" ? "adjust" : "new",
+      };
+      this.applyDraftRingMeta(draft, ring);
+      // Approximate radius from north-south span.
+      draft.radiusMiles = Math.max(
+        5,
+        Math.min(300, ((draft.north - draft.south) / 2) * 69)
+      );
+      this.regionDraft[mapId] = draft;
+      return { mapId: mapId, draft: draft };
+    },
+
     /** Live draft as JSON string (does not clear). Refreshes from painted ring. */
     snapshotRegionDraft: function (mapId) {
-      var active = this.activeRegionDraft(mapId);
+      var active = this.activeRegionDraft(mapId) || this.recoverDraftFromSource(mapId);
       if (!active) {
         return global.__metisRegionDraftLive || "";
       }
@@ -1605,6 +1672,37 @@
         this.applyDraftRingMeta(draft, ring);
       }
       return this.publishLiveDraft(active.mapId);
+    },
+
+    /**
+     * One-shot wire for Rust: refresh draft + return a short pipe string.
+     * Desktop eval handles short strings (same as getCamera); objects/long JSON fail.
+     * Format: west|south|east|north|lng|lat|radiusMiles|mode|shape
+     */
+    snapshotRegionDraftWire: function (mapId) {
+      this.snapshotRegionDraft(mapId);
+      var w = global.__metisDraftW,
+        s = global.__metisDraftS,
+        e = global.__metisDraftE,
+        n = global.__metisDraftN;
+      if (
+        ![w, s, e, n].every(function (x) {
+          return typeof x === "number" && isFinite(x);
+        })
+      ) {
+        return "";
+      }
+      return [
+        w,
+        s,
+        e,
+        n,
+        global.__metisDraftLng,
+        global.__metisDraftLat,
+        global.__metisDraftR || 50,
+        global.__metisDraftMode || "new",
+        global.__metisDraftShape || "rectangle",
+      ].join("|");
     },
 
     teardownDraftDrag: function (mapId) {

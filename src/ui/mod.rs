@@ -2633,8 +2633,9 @@ struct ChannelReadSession {
 }
 
 async fn channel_unread_is_caught_up() -> bool {
-    let mut eval = document::eval(
-        r#"(() => {
+    // Eval code runs as an async function body; the value must be returned.
+    let result = document::eval(
+        r#"return (() => {
           const scroller = document.getElementById('channel-scroller');
           if (!scroller) return false;
           const remaining =
@@ -2646,9 +2647,10 @@ async fn channel_unread_is_caught_up() -> bool {
           const m = marker.getBoundingClientRect();
           // Cleared once the divider has moved into / past the upper third.
           return m.bottom < s.top + s.height * 0.35;
-        })()"#,
-    );
-    eval.recv::<bool>().await.ok() == Some(true)
+        })();"#,
+    )
+    .await;
+    result.ok().and_then(|value| value.as_bool()) == Some(true)
 }
 
 fn dismiss_channel_new_banner(mut read_session: Signal<Option<ChannelReadSession>>) {

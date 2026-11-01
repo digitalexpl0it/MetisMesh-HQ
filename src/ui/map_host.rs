@@ -52,6 +52,16 @@ fn escape_js_string(value: &str) -> String {
     out
 }
 
+/// Evaluate a JS expression and return its value.
+///
+/// Dioxus desktop runs eval code as the body of an `AsyncFunction`, so a bare
+/// `(() => x)()` statement yields `undefined`. The expression must be returned.
+async fn eval_value(expr: &str) -> Result<Value, String> {
+    document::eval(&format!("return {expr};"))
+        .await
+        .map_err(|err| format!("{err:?}"))
+}
+
 pub async fn map_init(style: &Value, lng: f64, lat: f64, zoom: f64) -> Result<(), String> {
     let style_json = style.to_string();
     let js = format!(
@@ -67,16 +77,14 @@ pub async fn map_init(style: &Value, lng: f64, lat: f64, zoom: f64) -> Result<()
         lat = lat,
         zoom = zoom,
     );
-    document::eval(&js)
-        .await
-        .map_err(|err| format!("{err:?}"))?;
+    eval_value(&js).await?;
     Ok(())
 }
 
 pub async fn map_destroy() {
     let js = format!(
         r#"(() => {{
-  if (window.MetisMap) window.MetisMap.destroy({id});
+  if (window.MetisMap) window.MetisMap.destroyIfDetached({id});
   return true;
 }})()"#,
         id = escape_js_string(MAP_ID)
@@ -129,21 +137,23 @@ pub async fn map_set_style(style: &Value, camera: Option<MapCamera>) -> Result<(
         style = style.to_string(),
         cam = cam_json,
     );
-    document::eval(&js)
-        .await
-        .map_err(|err| format!("{err:?}"))?;
+    eval_value(&js).await?;
     Ok(())
 }
 
+/// A map left behind by a previous visit to the page is not live: its
+/// container was removed, so it must be re-initialised rather than restyled.
 pub async fn map_exists() -> bool {
     let js = format!(
-        r#"(() => !!(window.MetisMap && window.MetisMap.maps[{id}]))()"#,
+        r#"(() => !!(window.MetisMap && window.MetisMap.isLive({id}, {container})))()"#,
         id = escape_js_string(MAP_ID),
+        container = escape_js_string(MAP_CONTAINER_ID),
     );
-    match document::eval(&js).await {
-        Ok(value) => value.as_bool().unwrap_or(false),
-        Err(_) => false,
-    }
+    eval_value(&js)
+        .await
+        .ok()
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
 }
 
 pub async fn map_set_visibility(layer_id: &str, visible: bool) {
@@ -205,7 +215,7 @@ pub async fn map_bind_node_clicks(layer_id: &str) {
 }
 
 async fn eval_string(js: &str) -> Option<String> {
-    match document::eval(js).await {
+    match eval_value(js).await {
         Ok(value) => {
             let s = value
                 .as_str()
@@ -285,37 +295,38 @@ pub async fn map_clear_region_draft() {
     let _ = document::eval(&js).await;
 }
 
-fn parse_region_confirm_value(v: &Value) -> Option<RegionDraftConfirm> {
-    let w = v.get("west")?.as_f64()?;
-    let s = v.get("south")?.as_f64()?;
-    let e = v.get("east")?.as_f64()?;
-    let n = v.get("north")?.as_f64()?;
+/// Parse `west|south|east|north|lng|lat|radius|mode|shape` from the bridge wire.
+fn parse_region_confirm_wire(raw: &str) -> Option<RegionDraftConfirm> {
+    let parts: Vec<&str> = raw.trim().split('|').collect();
+    if parts.len() < 7 {
+        return None;
+    }
+    let w: f64 = parts[0].parse().ok()?;
+    let s: f64 = parts[1].parse().ok()?;
+    let e: f64 = parts[2].parse().ok()?;
+    let n: f64 = parts[3].parse().ok()?;
     if !(w < e && s < n) {
         return None;
     }
+    let lng: f64 = parts[4].parse().unwrap_or((w + e) / 2.0);
+    let lat: f64 = parts[5].parse().unwrap_or((s + n) / 2.0);
+    let radius_miles: f64 = parts[6].parse().unwrap_or(50.0);
+    let mode = parts
+        .get(7)
+        .map(|m| m.to_string())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| "new".into());
+    let shape = parts
+        .get(8)
+        .map(|m| m.to_string())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| "rectangle".into());
     Some(RegionDraftConfirm {
-        shape: v
-            .get("shape")
-            .and_then(|x| x.as_str())
-            .unwrap_or("rectangle")
-            .to_string(),
-        mode: v
-            .get("mode")
-            .and_then(|x| x.as_str())
-            .unwrap_or("new")
-            .to_string(),
-        radius_miles: v
-            .get("radiusMiles")
-            .and_then(|x| x.as_f64())
-            .unwrap_or(50.0),
-        lng: v
-            .get("lng")
-            .and_then(|x| x.as_f64())
-            .unwrap_or((w + e) / 2.0),
-        lat: v
-            .get("lat")
-            .and_then(|x| x.as_f64())
-            .unwrap_or((s + n) / 2.0),
+        shape,
+        mode,
+        radius_miles: radius_miles.max(5.0).min(300.0),
+        lng,
+        lat,
         bbox: [w, s, e, n],
     })
 }
@@ -340,47 +351,32 @@ pub fn region_draft_from_placement(
     }
 }
 
-/// Snapshot the painted draft via numeric window globals (reliable on desktop).
+/// Snapshot the painted draft. Uses a short pipe-delimited string — the same
+/// eval path as getCamera. Object / long-JSON returns were returning null on desktop.
 pub async fn map_snapshot_region_draft() -> Option<RegionDraftConfirm> {
-    // Refresh globals from the painted ring (ignore return — long JSON is flaky).
-    let _ = document::eval(&format!(
+    let raw = eval_string(&format!(
         r#"(() => {{
   try {{
-    if (window.MetisMap && window.MetisMap.snapshotRegionDraft) {{
-      window.MetisMap.snapshotRegionDraft({id});
+    if (!window.MetisMap) return "";
+    if (window.MetisMap.snapshotRegionDraftWire) {{
+      return window.MetisMap.snapshotRegionDraftWire({id}) || "";
     }}
-    return true;
-  }} catch (e) {{ return false; }}
+    // Older bridge fallback.
+    if (window.MetisMap.snapshotRegionDraft) window.MetisMap.snapshotRegionDraft({id});
+    var w = window.__metisDraftW, s = window.__metisDraftS,
+        e = window.__metisDraftE, n = window.__metisDraftN;
+    if (![w,s,e,n].every(function (x) {{ return typeof x === "number" && isFinite(x); }})) {{
+      return "";
+    }}
+    return [w,s,e,n,window.__metisDraftLng,window.__metisDraftLat,window.__metisDraftR||50,window.__metisDraftMode||"new",window.__metisDraftShape||"rectangle"].join("|");
+  }} catch (err) {{
+    return "";
+  }}
 }})()"#,
         id = escape_js_string(MAP_ID),
     ))
-    .await;
-
-    // Read plain numbers — avoids JSON-string eval issues that caused Confirm
-    // to fall back to the Place/camera center instead of the dragged square.
-    let value = document::eval(
-        r#"(() => {
-  var w = window.__metisDraftW, s = window.__metisDraftS,
-      e = window.__metisDraftE, n = window.__metisDraftN;
-  if (![w,s,e,n].every(function (x) { return typeof x === 'number' && isFinite(x); })) {
-    return null;
-  }
-  return {
-    west: w, south: s, east: e, north: n,
-    lng: Number(window.__metisDraftLng),
-    lat: Number(window.__metisDraftLat),
-    radiusMiles: Number(window.__metisDraftR) || 50,
-    mode: String(window.__metisDraftMode || 'new'),
-    shape: String(window.__metisDraftShape || 'rectangle')
-  };
-})()"#,
-    )
-    .await
-    .ok()?;
-    if value.is_null() {
-        return None;
-    }
-    parse_region_confirm_value(&value)
+    .await?;
+    parse_region_confirm_wire(&raw)
 }
 
 

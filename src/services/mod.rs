@@ -8,10 +8,13 @@ mod poller;
 mod quake;
 mod weather;
 
-pub use nws::{fetch_active_alerts, format_nws_alert, shorten_url};
+pub use nws::{
+    fetch_active_alerts, fetch_emergency_alerts, format_nws_alert, format_nws_detail,
+    is_amber_event, shorten_url, AMBER_CODES, EMERG_CODES,
+};
 pub use poller::spawn_poller;
 pub use quake::{fetch_quakes, format_quake};
-pub use weather::{fetch_weather_line, WeatherQuery};
+pub use weather::{fetch_weather_detail, fetch_weather_line, short_wx_label, WeatherQuery};
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -43,13 +46,25 @@ fn last_bot() -> &'static Mutex<HashMap<String, Instant>> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BotCommand {
     /// Optional ZIP / city after the command (`#weather 92345`).
-    Wx { place: Option<String> },
+    /// `detail` is `#weather+` / `#wx more` — multi-frame reply.
+    Wx {
+        place: Option<String>,
+        detail: bool,
+    },
     Quake,
+    Amber {
+        detail: bool,
+    },
+    /// Broader civil / Amber / evacuation-style emergencies.
+    Alert {
+        detail: bool,
+    },
     Help,
 }
 
-/// Channel commands on METIS-INFO: `#weather [zip]`, `#quake`, `#help`.
+/// Channel commands on METIS-INFO.
 /// Leading `#` preferred; bare keywords still parse for stubborn clients.
+/// Trailing `+` or a first arg of `more`/`ext`/`detail`/`full` requests extended frames.
 pub fn parse_bot_command(text: &str) -> Option<BotCommand> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -57,8 +72,22 @@ pub fn parse_bot_command(text: &str) -> Option<BotCommand> {
     }
     let bare = trimmed.strip_prefix('#').unwrap_or(trimmed).trim();
     let mut parts = bare.split_whitespace();
-    let head = parts.next()?.to_ascii_lowercase();
-    let rest = parts.collect::<Vec<_>>().join(" ");
+    let raw_head = parts.next()?.to_ascii_lowercase();
+    let (head, plus) = if let Some(h) = raw_head.strip_suffix('+') {
+        (h.to_string(), true)
+    } else {
+        (raw_head, false)
+    };
+    let mut rest_parts: Vec<&str> = parts.collect();
+    let mut detail = plus;
+    if let Some(first) = rest_parts.first().copied() {
+        let f = first.to_ascii_lowercase();
+        if matches!(f.as_str(), "more" | "ext" | "detail" | "full" | "+") {
+            detail = true;
+            rest_parts.remove(0);
+        }
+    }
+    let rest = rest_parts.join(" ");
     let place = {
         let t = rest.trim();
         if t.is_empty() {
@@ -68,15 +97,29 @@ pub fn parse_bot_command(text: &str) -> Option<BotCommand> {
         }
     };
     match head.as_str() {
-        "wx" | "weather" => Some(BotCommand::Wx { place }),
+        "wx" | "weather" => Some(BotCommand::Wx { place, detail }),
         "quake" | "earthquake" | "eq" => Some(BotCommand::Quake),
+        "amber" | "amberalert" => Some(BotCommand::Amber { detail }),
+        "alert" | "alerts" | "emerg" | "emergency" => Some(BotCommand::Alert { detail }),
         "help" | "cmds" | "commands" => Some(BotCommand::Help),
         _ => None,
     }
 }
 
 pub fn help_line() -> String {
-    fit_mesh("METIS-INFO cmds: #weather [zip] #quake #help · enrolled · Open-Meteo/USGS")
+    fit_mesh(
+        "cmds: #weather[+] [zip] #quake #amber[+] #alert[+] #help · + = more detail",
+    )
+}
+
+/// Two-letter state for Amber/emergency CAP queries.
+pub fn emerg_state(db: &Db) -> String {
+    db.setting("svc_emerg_state")
+        .ok()
+        .flatten()
+        .map(|s| s.trim().to_ascii_uppercase())
+        .filter(|s| s.len() == 2 && s.chars().all(|c| c.is_ascii_alphabetic()))
+        .unwrap_or_else(|| "CA".into())
 }
 
 /// Slot for METIS-INFO, or None if the channel row is missing.
@@ -211,6 +254,59 @@ pub fn quake_min_magnitude(db: &Db) -> f64 {
     setting_f64(db, "svc_quake_min_mag", 3.0)
 }
 
+/// ZIP / postal list from Settings (`svc_weather_zips`), comma or newline separated.
+pub fn weather_zip_list(db: &Db) -> Vec<String> {
+    let raw = db
+        .setting("svc_weather_zips")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for part in raw.split(|c: char| c == ',' || c == ';' || c == '\n' || c == ' ') {
+        let zip: String = part.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+        if zip.len() >= 3 && zip.len() <= 10 && !out.iter().any(|z: &String| z == &zip) {
+            out.push(zip);
+        }
+    }
+    out
+}
+
+pub fn weather_interval_secs(db: &Db) -> i64 {
+    let mins = setting_i64(db, "svc_weather_interval_mins", 60).clamp(15, 24 * 60);
+    mins * 60
+}
+
+/// Cache geocoded ZIP centers so hourly posts do not hammer Nominatim.
+pub fn cached_zip_coords(db: &Db, zip: &str) -> Option<(f64, f64, String)> {
+    let raw = db.setting("svc_weather_zip_coords").ok().flatten()?;
+    let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&raw).ok()?;
+    let entry = map.get(zip)?;
+    let lat = entry.get("lat")?.as_f64()?;
+    let lon = entry.get("lon")?.as_f64()?;
+    let label = entry
+        .get("label")
+        .and_then(|v| v.as_str())
+        .unwrap_or(zip)
+        .to_string();
+    Some((lat, lon, label))
+}
+
+pub fn remember_zip_coords(db: &Db, zip: &str, lat: f64, lon: f64, label: &str) {
+    let mut map: serde_json::Map<String, serde_json::Value> = db
+        .setting("svc_weather_zip_coords")
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    map.insert(
+        zip.to_string(),
+        serde_json::json!({ "lat": lat, "lon": lon, "label": label }),
+    );
+    if let Ok(raw) = serde_json::to_string(&map) {
+        let _ = db.set_setting("svc_weather_zip_coords", &raw);
+    }
+}
+
 pub fn is_enrolled(enrollment: Enrollment) -> bool {
     matches!(enrollment, Enrollment::Enrolled | Enrollment::Hq)
 }
@@ -223,21 +319,52 @@ mod tests {
     fn parses_bot_commands() {
         assert_eq!(
             parse_bot_command("#wx"),
-            Some(BotCommand::Wx { place: None })
+            Some(BotCommand::Wx {
+                place: None,
+                detail: false
+            })
         );
         assert_eq!(
             parse_bot_command("#weather 92345"),
             Some(BotCommand::Wx {
-                place: Some("92345".into())
+                place: Some("92345".into()),
+                detail: false
+            })
+        );
+        assert_eq!(
+            parse_bot_command("#weather+ 92345"),
+            Some(BotCommand::Wx {
+                place: Some("92345".into()),
+                detail: true
+            })
+        );
+        assert_eq!(
+            parse_bot_command("#wx more Hesperia"),
+            Some(BotCommand::Wx {
+                place: Some("Hesperia".into()),
+                detail: true
             })
         );
         assert_eq!(
             parse_bot_command("weather Hesperia, CA"),
             Some(BotCommand::Wx {
-                place: Some("Hesperia, CA".into())
+                place: Some("Hesperia, CA".into()),
+                detail: false
             })
         );
         assert_eq!(parse_bot_command("#quake"), Some(BotCommand::Quake));
+        assert_eq!(
+            parse_bot_command("#amber"),
+            Some(BotCommand::Amber { detail: false })
+        );
+        assert_eq!(
+            parse_bot_command("#amber+"),
+            Some(BotCommand::Amber { detail: true })
+        );
+        assert_eq!(
+            parse_bot_command("#alert more"),
+            Some(BotCommand::Alert { detail: true })
+        );
         assert_eq!(parse_bot_command("help"), Some(BotCommand::Help));
         assert_eq!(parse_bot_command("signup"), None);
         assert_eq!(parse_bot_command("hello"), None);

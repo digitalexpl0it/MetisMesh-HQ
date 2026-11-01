@@ -148,6 +148,63 @@ pub fn fit_mesh(text: &str) -> String {
     text[..end].to_string()
 }
 
+/// Split long plain text into ≤160-byte mesh frames.
+///
+/// When more than one frame is needed, each line is prefixed `tag i/n: `.
+/// Prefer breaking on whitespace so vehicle/person lines stay readable.
+pub fn mesh_frames(tag: &str, body: &str, max_frames: usize) -> Vec<String> {
+    let body = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if body.is_empty() {
+        return Vec::new();
+    }
+    let max_frames = max_frames.max(1).min(6);
+    // Reserve room for "TAG 9/9: " (worst case ~12 bytes + tag).
+    let overhead = tag.len() + 8;
+    let chunk_budget = 160usize.saturating_sub(overhead).max(40);
+
+    let mut pieces: Vec<String> = Vec::new();
+    let mut rest = body.as_str();
+    while !rest.is_empty() && pieces.len() < max_frames {
+        if rest.len() <= chunk_budget {
+            pieces.push(rest.to_string());
+            rest = "";
+            break;
+        }
+        let mut cut = chunk_budget.min(rest.len());
+        while cut > 0 && !rest.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        // Prefer last space in the window.
+        if let Some(rel) = rest[..cut].rfind(' ') {
+            if rel >= chunk_budget / 3 {
+                cut = rel;
+            }
+        }
+        let (take, leave) = rest.split_at(cut);
+        pieces.push(take.trim().to_string());
+        rest = leave.trim_start();
+    }
+    if pieces.is_empty() {
+        return Vec::new();
+    }
+    if !rest.is_empty() {
+        // Last frame was truncated — mark it.
+        if let Some(last) = pieces.last_mut() {
+            *last = fit_mesh(&format!("{last}…"));
+        }
+    }
+    if pieces.len() == 1 {
+        let line = fit_mesh(&format!("{tag}: {}", pieces[0]));
+        return vec![line];
+    }
+    let n = pieces.len();
+    pieces
+        .into_iter()
+        .enumerate()
+        .map(|(i, part)| fit_mesh(&format!("{tag} {}/{n}: {part}", i + 1)))
+        .collect()
+}
+
 pub fn approval_message(channel: &str, secret_hex: &str) -> String {
     fit_mesh(&format!(
         "Approved. Add private channel {channel}, secret {secret_hex}."
@@ -157,6 +214,18 @@ pub fn approval_message(channel: &str, secret_hex: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mesh_frames_split_long_body() {
+        let body = "Suspect vehicle: blue 2018 Honda Civic CA plate 7ABC123. \
+            Missing child: Jane Doe, age 7, brown hair, red jacket. \
+            Last seen near I-15 and Main St Hesperia around 10:15 AM. \
+            Suspect: adult male, approx 35, dark hoodie. Call 911.";
+        let frames = mesh_frames("AMBER+", body, 4);
+        assert!(frames.len() >= 2, "{frames:?}");
+        assert!(frames.iter().all(|f| f.len() <= 160));
+        assert!(frames[0].contains("1/") || frames[0].starts_with("AMBER+:"));
+    }
 
     #[test]
     fn parses_signup_forms() {

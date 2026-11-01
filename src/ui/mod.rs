@@ -3507,6 +3507,45 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
             .flatten()
             .unwrap_or_else(|| "METIS-INFO".into())
     });
+    let mut svc_weather_hourly = use_signal(|| {
+        crate::services::setting_bool(&state().db, "svc_weather_hourly", false)
+    });
+    let mut svc_weather_zips = use_signal(|| {
+        state()
+            .db
+            .setting("svc_weather_zips")
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    });
+    let mut svc_weather_interval = use_signal(|| {
+        state()
+            .db
+            .setting("svc_weather_interval_mins")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "60".into())
+    });
+    let mut svc_amber = use_signal(|| {
+        crate::services::setting_bool(&state().db, "svc_amber_enabled", false)
+    });
+    let mut svc_amber_auto = use_signal(|| {
+        crate::services::setting_bool(&state().db, "svc_amber_auto_relay", false)
+    });
+    let mut svc_emerg = use_signal(|| {
+        crate::services::setting_bool(&state().db, "svc_emerg_enabled", false)
+    });
+    let mut svc_emerg_auto = use_signal(|| {
+        crate::services::setting_bool(&state().db, "svc_emerg_auto_relay", false)
+    });
+    let mut svc_emerg_state = use_signal(|| {
+        state()
+            .db
+            .setting("svc_emerg_state")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "CA".into())
+    });
     let mut log_tick = use_signal(|| 0u32);
     let mut log_poll_started = use_signal(|| false);
     let mut presets_tick = use_signal(|| 0u32);
@@ -3869,7 +3908,7 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
             }
             Card { title: "Info services", icon: Some(IconName::Radio),
                 p { class: "mb-3 text-sm text-muted-foreground",
-                    "Bot home is the private METIS-INFO channel (enrolled secret only). Send #weather [zip], #quake, or #help there. NWS/USGS polls use the site pin. Alerts are labeled with source and time — not an official agency feed."
+                    "Bot home is the private METIS-INFO channel (enrolled secret only). Send #weather [zip], #quake, #amber, or #help there. Add + for detail (#weather+ / #amber+) — multi-frame replies. Quake/NWS polls stay silent when nothing new is found. Alerts are labeled with source and time — not an official agency feed."
                 }
                 div { class: "mb-3 grid gap-3 sm:grid-cols-2",
                     div {
@@ -3935,7 +3974,7 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                                 crate::services::set_setting_bool(&state().db, "svc_weather_enabled", next);
                             }
                         }
-                        "Weather on METIS-INFO (#weather) via Open-Meteo"
+                        "Weather on METIS-INFO (#weather / #weather+)"
                     }
                     div { class: "ml-6 w-40",
                         SelectInput {
@@ -3950,6 +3989,55 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                             option { value: "C", style: "background-color: #151a20; color: #f4f4f5;", "Celsius" }
                         }
                     }
+                    label { class: "ml-6 flex items-center gap-2 text-sm text-muted-foreground",
+                        input {
+                            r#type: "checkbox",
+                            checked: svc_weather_hourly(),
+                            disabled: !svc_weather(),
+                            oninput: move |_| {
+                                let next = !svc_weather_hourly();
+                                svc_weather_hourly.set(next);
+                                crate::services::set_setting_bool(&state().db, "svc_weather_hourly", next);
+                            }
+                        }
+                        "Auto-post weather for ZIP list (below)"
+                    }
+                    div { class: "ml-6 flex flex-col gap-2",
+                        label { class: "block text-xs uppercase tracking-[0.16em] text-muted-foreground",
+                            "Area ZIP codes (comma or space separated)"
+                        }
+                        TextInput {
+                            value: svc_weather_zips(),
+                            placeholder: "92345 92344 91709",
+                            oninput: move |event: FormEvent| {
+                                let value = event.value();
+                                svc_weather_zips.set(value.clone());
+                                let _ = state().db.set_setting("svc_weather_zips", value.trim());
+                            },
+                        }
+                        div { class: "flex items-center gap-2",
+                            label { class: "text-xs text-muted-foreground shrink-0", "Every" }
+                            div { class: "w-24",
+                                TextInput {
+                                    value: svc_weather_interval(),
+                                    placeholder: "60",
+                                    oninput: move |event: FormEvent| {
+                                        let value = event.value();
+                                        svc_weather_interval.set(value.clone());
+                                        if let Ok(mins) = value.parse::<i64>() {
+                                            if (15..=24 * 60).contains(&mins) {
+                                                let _ = state().db.set_setting(
+                                                    "svc_weather_interval_mins",
+                                                    &mins.to_string(),
+                                                );
+                                            }
+                                        }
+                                    },
+                                }
+                            }
+                            span { class: "text-xs text-muted-foreground", "minutes (one ZIP per minute when due)" }
+                        }
+                    }
                     label { class: "flex items-center gap-2 text-sm",
                         input {
                             r#type: "checkbox",
@@ -3960,7 +4048,7 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                                 crate::services::set_setting_bool(&state().db, "svc_nws_enabled", next);
                             }
                         }
-                        "Poll NWS alerts near site pin (US)"
+                        "Poll NWS alerts near site pin (US) — silent if none new"
                     }
                     label { class: "ml-6 flex items-center gap-2 text-sm text-muted-foreground",
                         input {
@@ -3985,7 +4073,60 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                                 crate::services::set_setting_bool(&state().db, "svc_quake_enabled", next);
                             }
                         }
-                        "Poll USGS earthquakes in HQ box (default CA) and relay"
+                        "Poll USGS quakes in HQ box — post only when a new one is found"
+                    }
+                    label { class: "flex items-center gap-2 text-sm",
+                        input {
+                            r#type: "checkbox",
+                            checked: svc_amber(),
+                            oninput: move |_| {
+                                let next = !svc_amber();
+                                svc_amber.set(next);
+                                crate::services::set_setting_bool(&state().db, "svc_amber_enabled", next);
+                            }
+                        }
+                        "Amber alerts (NWS CAP CAE) for state — #amber"
+                    }
+                    label { class: "ml-6 flex items-center gap-2 text-sm text-muted-foreground",
+                        input {
+                            r#type: "checkbox",
+                            checked: svc_amber_auto(),
+                            disabled: !svc_amber(),
+                            oninput: move |_| {
+                                let next = !svc_amber_auto();
+                                svc_amber_auto.set(next);
+                                crate::services::set_setting_bool(&state().db, "svc_amber_auto_relay", next);
+                            }
+                        }
+                        "Auto-relay Amber to channel (otherwise Inbox)"
+                    }
+                    label { class: "flex items-center gap-2 text-sm",
+                        input {
+                            r#type: "checkbox",
+                            checked: svc_emerg(),
+                            oninput: move |_| {
+                                let next = !svc_emerg();
+                                svc_emerg.set(next);
+                                crate::services::set_setting_bool(&state().db, "svc_emerg_enabled", next);
+                            }
+                        }
+                        "Civil emergencies (evac, hazmat, LE, blue…) — #alert"
+                    }
+                    label { class: "ml-6 flex items-center gap-2 text-sm text-muted-foreground",
+                        input {
+                            r#type: "checkbox",
+                            checked: svc_emerg_auto(),
+                            disabled: !svc_emerg(),
+                            oninput: move |_| {
+                                let next = !svc_emerg_auto();
+                                svc_emerg_auto.set(next);
+                                crate::services::set_setting_bool(&state().db, "svc_emerg_auto_relay", next);
+                            }
+                        }
+                        "Auto-relay civil emergencies to channel (otherwise Inbox)"
+                    }
+                    p { class: "ml-6 text-xs text-muted-foreground",
+                        "Sourced from NWS CAP / IPAWS-style codes — labeled ALERT/AMBER with time. Not a law-enforcement feed."
                     }
                 }
                 div { class: "grid gap-3 sm:grid-cols-2",
@@ -4012,6 +4153,20 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                                 let value = event.value();
                                 svc_alerts_channel.set(value.clone());
                                 let _ = state().db.set_setting("svc_alerts_channel", value.trim());
+                            },
+                        }
+                    }
+                    div {
+                        label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "Alert state (US)" }
+                        TextInput {
+                            value: svc_emerg_state(),
+                            placeholder: "CA",
+                            oninput: move |event: FormEvent| {
+                                let value = event.value().trim().to_ascii_uppercase();
+                                svc_emerg_state.set(value.clone());
+                                if value.len() == 2 && value.chars().all(|c| c.is_ascii_alphabetic()) {
+                                    let _ = state().db.set_setting("svc_emerg_state", &value);
+                                }
                             },
                         }
                     }

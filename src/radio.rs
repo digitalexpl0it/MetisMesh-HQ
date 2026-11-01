@@ -36,6 +36,14 @@ fn enqueue_channel_text(slot: u8, text: String) {
     }
 }
 
+fn enqueue_channel_frames(slot: u8, frames: impl IntoIterator<Item = String>) {
+    for text in frames {
+        if !text.trim().is_empty() {
+            enqueue_channel_text(slot, text);
+        }
+    }
+}
+
 /// One Bluetooth advertisement the scan was able to identify.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BleRadio {
@@ -598,7 +606,7 @@ fn parse_custom_vars_blob(text: &str) -> BTreeMap<String, String> {
 async fn refresh_custom_vars(
     commands: &meshcore_rs::commands::CommandHandler,
     status: &Mutex<RadioStatus>,
-) {
+) -> Result<(), String> {
     match commands.get_custom_vars().await {
         Ok(map) => {
             let mut vars: BTreeMap<String, String> = map.into_iter().collect();
@@ -614,8 +622,9 @@ async fn refresh_custom_vars(
             }
             let mut guard = status.lock().unwrap_or_else(|err| err.into_inner());
             guard.custom_vars = vars;
+            Ok(())
         }
-        Err(err) => hq_log!(debug, "custom vars: {err}"),
+        Err(err) => Err(err.to_string()),
     }
 }
 
@@ -1385,7 +1394,7 @@ async fn send_channel_text(
 }
 
 async fn transmit_channel_message(
-    db: &Db,
+    db: &Arc<Db>,
     meshcore: &MeshCore,
     status: &Mutex<RadioStatus>,
     connected_name: &str,
@@ -1436,20 +1445,22 @@ async fn transmit_channel_message(
                     let _ = db.audit("channel_send", "", &format!("slot {slot} (deduped)"));
                     push_send_note(status, String::new());
                     write_status(status, "connected", connected_detail(status, connected_name));
-                    Ok(())
                 }
                 Ok(Some(_)) => {
                     let _ = db.audit("channel_send", "", &format!("slot {slot}"));
                     push_send_note(status, String::new());
                     write_status(status, "connected", connected_detail(status, connected_name));
-                    Ok(())
                 }
                 Err(err) => {
                     let msg = format!("Sent on air, but could not save history: {err}");
                     push_send_note(status, &msg);
-                    Err(msg)
+                    return Err(msg);
                 }
             }
+            // Companion does not echo our own TX back as ChannelMsgRecv — run
+            // METIS-INFO bot commands locally so the operator can test from HQ.
+            maybe_handle_local_metis_command(db, slot, text);
+            Ok(())
         }
         Err(err) => {
             let msg = format!("Send failed: {err}");
@@ -1458,6 +1469,34 @@ async fn transmit_channel_message(
             Err(msg)
         }
     }
+}
+
+fn maybe_handle_local_metis_command(db: &Arc<Db>, slot: u8, text: &str) {
+    if !crate::services::is_metis_info_slot(db, slot) {
+        return;
+    }
+    let (_, body) = channel_sender_and_body(text);
+    let Some(cmd) = crate::services::parse_bot_command(&body) else {
+        return;
+    };
+    // Operator sends use wall-clock seconds so a deliberate second #weather works,
+    // but an identical retry in the same second is ignored.
+    let claim = bot_command_claim_id(slot, unix_now() as u32, &body);
+    match db.claim_bot_command(&claim) {
+        Ok(true) => {
+            let hq = db.hq_node().ok().flatten();
+            handle_bot_channel(db, slot, hq.as_ref(), cmd, true);
+        }
+        Ok(false) => hq_log!(debug, "local METIS-INFO cmd already handled ({claim})"),
+        Err(err) => hq_log!(warn, "bot claim: {err}"),
+    }
+}
+
+fn bot_command_claim_id(slot: u8, sender_timestamp: u32, body: &str) -> String {
+    format!(
+        "ch:{slot}:{sender_timestamp}:{}",
+        body.trim().to_ascii_lowercase()
+    )
 }
 
 /// Companion `CMD_RUN_CLI_COMMAND` (66). Reply is code 29 → EventType::Unknown + Bytes.
@@ -1678,9 +1717,12 @@ async fn run_session(
             None,
         );
         // Contact lists over BLE can outlast the default 5s command timeout.
-        // Keep the session if sync is slow or empty; retry from the live loop.
+        // Slow/empty dumps can retry from the live loop; a dead link must not.
         if let Err(err) = sync_contacts(db, &commands, meshcore.dispatcher(), Some(status)).await {
             hq_log!(warn, "contact sync: {err}");
+            if is_ble_link_error(&err) {
+                return SessionEnd::Lost(err);
+            }
         }
         write_sync(
             status,
@@ -1688,13 +1730,11 @@ async fn run_session(
             "Syncing channels…",
             Some((0, max_channels as u32)),
         );
-        match sync_channels(db, secrets, &commands, max_channels, status).await {
-            Ok(()) => {}
-            Err(err) if is_ble_link_error(&err) => {
-                hq_log!(warn, "channel sync: {err}");
-                return SessionEnd::Lost(err);
-            }
-            Err(err) => hq_log!(warn, "channel sync: {err}"),
+        // Channel sync failure (including first-slot timeout on a dead link)
+        // must not fall through to "Companion ready".
+        if let Err(err) = sync_channels(db, secrets, &commands, max_channels, status).await {
+            hq_log!(warn, "channel sync: {err}");
+            return SessionEnd::Lost(err);
         }
         if let Err(err) = push_channel(db, secrets, &commands, max_channels).await {
             hq_log!(warn, "channel setup: {err}");
@@ -1703,7 +1743,12 @@ async fn run_session(
             }
         }
         // Soft-delete is local; companion still holds the slot until we blank it.
-        clear_soft_deleted_radio_slots(db, &commands).await;
+        if let Err(err) = clear_soft_deleted_radio_slots(db, &commands).await {
+            hq_log!(warn, "clear soft-deleted channels: {err}");
+            if is_ble_link_error(&err) {
+                return SessionEnd::Lost(err);
+            }
+        }
         // Cap the initial queue drain. On a busy Public channel, new RF traffic
         // can refill the companion queue forever — holding this lock for hours
         // blocks Ready / CLI / settings while the UI says "Draining…".
@@ -1737,7 +1782,8 @@ async fn run_session(
                         format!("Draining queued messages… ({drained})"),
                         Some((drained, (drained + 8).max(1))),
                     );
-                    if let Err(err) = handle_event(db, &meshcore, event, radio).await {
+                    // History/drain only — do not re-run METIS-INFO bot commands.
+                    if let Err(err) = handle_event(db, &meshcore, event, radio, false).await {
                         hq_log!(warn, "message: {err}");
                     }
                 }
@@ -1758,7 +1804,12 @@ async fn run_session(
         }
         // Use the lock we already hold — a second commands().lock() here
         // deadlocked the session forever (tokio Mutex is not reentrant).
-        refresh_custom_vars(&commands, status).await;
+        if let Err(err) = refresh_custom_vars(&commands, status).await {
+            hq_log!(debug, "custom vars: {err}");
+            if is_ble_link_error(&err) {
+                return SessionEnd::Lost(err);
+            }
+        }
         write_status(status, "connected", connected_detail(status, name));
     }
 
@@ -1912,12 +1963,21 @@ async fn run_session(
                     }
                     Some(RadioCmd::RefreshDeviceSettings) => {
                         let commands = meshcore.commands().lock().await;
-                        refresh_custom_vars(&commands, status).await;
-                        write_status(
-                            status,
-                            "connected",
-                            "Device settings refreshed from the companion.",
-                        );
+                        match refresh_custom_vars(&commands, status).await {
+                            Ok(()) => write_status(
+                                status,
+                                "connected",
+                                "Device settings refreshed from the companion.",
+                            ),
+                            Err(err) => {
+                                hq_log!(warn, "custom vars refresh: {err}");
+                                write_status(
+                                    status,
+                                    "connected",
+                                    format!("Could not refresh device settings: {err}"),
+                                );
+                            }
+                        }
                     }
                     Some(RadioCmd::SetCustomVar { key, value }) => {
                         let key = key.trim().to_string();
@@ -2189,7 +2249,7 @@ async fn run_session(
                             need_contact_retry = true;
                             contact_retry_at = Instant::now();
                         }
-                        if let Err(err) = handle_event(db, &meshcore, event, radio).await {
+                        if let Err(err) = handle_event(db, &meshcore, event, radio, true).await {
                             hq_log!(warn, "event: {err}");
                         }
                     }
@@ -2404,6 +2464,8 @@ fn is_ble_link_error(err: &str) -> bool {
         || lower.contains("disconnected")
         || lower.contains("ble tx")
         || lower.contains("link closed")
+        || lower.contains("unresponsive")
+        || lower.contains("link lost")
 }
 
 fn is_channel_query_timeout(err: &str) -> bool {
@@ -2427,9 +2489,9 @@ async fn clear_radio_channel_slot(
 async fn clear_soft_deleted_radio_slots(
     db: &Db,
     commands: &meshcore_rs::commands::CommandHandler,
-) {
+) -> Result<(), String> {
     let Ok(deleted) = db.list_soft_deleted_channels() else {
-        return;
+        return Ok(());
     };
     for (slot, name) in deleted {
         if slot < 0 || slot > u8::MAX as i64 {
@@ -2442,13 +2504,24 @@ async fn clear_soft_deleted_radio_slots(
         match commands.get_channel(idx).await {
             Ok(info) if info.name.trim().eq_ignore_ascii_case(&name) => {
                 if let Err(err) = clear_radio_channel_slot(commands, idx).await {
-                    hq_log!(warn, "clear soft-deleted `{name}` slot {idx}: {err}");
+                    let msg = err.to_string();
+                    hq_log!(warn, "clear soft-deleted `{name}` slot {idx}: {msg}");
+                    if is_ble_link_error(&msg) {
+                        return Err(msg);
+                    }
                 }
             }
             Ok(_) => {}
-            Err(err) => hq_log!(debug, "get_channel({idx}) while clearing soft-deleted: {err}"),
+            Err(err) => {
+                let msg = err.to_string();
+                hq_log!(debug, "get_channel({idx}) while clearing soft-deleted: {msg}");
+                if is_ble_link_error(&msg) {
+                    return Err(msg);
+                }
+            }
         }
     }
+    Ok(())
 }
 
 async fn sync_channels(
@@ -2519,9 +2592,18 @@ async fn sync_channels(
                 if is_ble_link_error(&msg) {
                     return Err(format!("Channel sync stopped at slot {idx}: {msg}"));
                 }
-                // Timeout on a later slot usually means the table ended or the
-                // radio stalled — keep what we have instead of hammering BLE.
+                // meshcore-rs often surfaces a dead GATT link as a plain timeout
+                // ("Timeout waiting for Some(ChannelInfo)") while logging
+                // "BLE TX error: Not connected" separately. A timeout before any
+                // channel is read means the link is dead — do not pretend sync OK.
                 if is_channel_query_timeout(&msg) {
+                    if completed == 0 {
+                        return Err(format!(
+                            "Bluetooth link unresponsive during channel sync (slot {idx}): {msg}"
+                        ));
+                    }
+                    // Timeout on a later slot usually means the table ended or the
+                    // radio stalled — keep what we have instead of hammering BLE.
                     break;
                 }
                 return Err(format!("Channel sync stopped at slot {idx}: {msg}"));
@@ -2606,11 +2688,13 @@ async fn push_named_channel(
     Ok(())
 }
 
+/// `live_bot` false during connect queue drain — ingest history but do not re-run bots.
 async fn handle_event(
     db: &Arc<Db>,
     meshcore: &MeshCore,
     event: MeshCoreEvent,
     radio_id: i64,
+    live_bot: bool,
 ) -> Result<(), String> {
     match event.payload {
         EventPayload::ContactMessage(message) => {
@@ -2667,11 +2751,38 @@ async fn handle_event(
                 remember_route(db, meshcore, pubkey, message_id).await;
             }
             // Bot commands live on METIS-INFO (private, enrolled secret), not DMs.
-            if inserted.is_some()
+            // Skip during connect drain, skip our own advert name (local TX path
+            // already answered), and claim so reconnect/redelivery cannot loop.
+            if live_bot
+                && inserted.is_some()
                 && crate::services::is_metis_info_slot(db, message.channel_idx)
             {
-                if let Some(cmd) = crate::services::parse_bot_command(&body) {
-                    handle_bot_channel(db, message.channel_idx, resolved.as_ref(), cmd);
+                let hq_name = db.hq_advert_name().unwrap_or_default();
+                let from_self = sender_name
+                    .as_ref()
+                    .is_some_and(|n| !hq_name.is_empty() && n.eq_ignore_ascii_case(&hq_name));
+                if !from_self {
+                    if let Some(cmd) = crate::services::parse_bot_command(&body) {
+                        let claim = bot_command_claim_id(
+                            message.channel_idx,
+                            message.sender_timestamp,
+                            &body,
+                        );
+                        match db.claim_bot_command(&claim) {
+                            Ok(true) => handle_bot_channel(
+                                db,
+                                message.channel_idx,
+                                resolved.as_ref(),
+                                cmd,
+                                false,
+                            ),
+                            Ok(false) => hq_log!(
+                                debug,
+                                "METIS-INFO cmd already handled ({claim})"
+                            ),
+                            Err(err) => hq_log!(warn, "bot claim: {err}"),
+                        }
+                    }
                 }
             }
         }
@@ -2758,37 +2869,59 @@ async fn on_direct(
 }
 
 /// METIS-INFO channel bot. Replies go back on the same channel slot.
+///
+/// `local_operator` is true when HQ typed the command in the Messages UI — the
+/// companion never echoes our own TX as ChannelMsgRecv.
 fn handle_bot_channel(
     db: &Arc<Db>,
     slot: u8,
     sender: Option<&crate::db::NodeRow>,
     command: crate::services::BotCommand,
+    local_operator: bool,
 ) {
-    let Some(node) = sender else {
-        // Ambiguous / unknown advert name — do not guess; stay quiet on the mesh.
+    let (rate_key, node_lat, node_lon, node_label) = if let Some(node) = sender {
+        if !local_operator && !crate::services::is_enrolled(node.enrollment) {
+            enqueue_channel_text(
+                slot,
+                crate::signup::fit_mesh("Not enrolled. DM signup to this HQ first."),
+            );
+            return;
+        }
+        let label = if node.name.trim().is_empty() {
+            node.prefix.clone()
+        } else {
+            node.name.clone()
+        };
+        (node.pubkey.clone(), node.lat, node.lon, label)
+    } else if local_operator {
+        (
+            "local-hq".to_string(),
+            None,
+            None,
+            db.setting("hq_name")
+                .ok()
+                .flatten()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "HQ".into()),
+        )
+    } else {
         hq_log!(debug, "METIS-INFO cmd ignored — sender name not unique on roster");
         return;
     };
-    if !crate::services::is_enrolled(node.enrollment) {
-        enqueue_channel_text(
-            slot,
-            crate::signup::fit_mesh("Not enrolled. DM signup to this HQ first."),
-        );
-        return;
-    }
-    if !crate::services::bot_rate_ok(&node.pubkey) {
+
+    // Rate-limit remote enrolled radios only — HQ Messages UI must not fight itself.
+    if !local_operator && !crate::services::bot_rate_ok(&rate_key) {
         enqueue_channel_text(slot, crate::services::bot_rate_wait_line());
         return;
     }
 
-    let rate_key = node.pubkey.clone();
     match command {
         crate::services::BotCommand::Help => {
             let reply = crate::services::help_line();
             let _ = db.audit("svc_help", &rate_key, "channel");
             enqueue_channel_text(slot, reply);
         }
-        crate::services::BotCommand::Wx { place } => {
+        crate::services::BotCommand::Wx { place, detail } => {
             if !crate::services::setting_bool(db, "svc_weather_enabled", true) {
                 enqueue_channel_text(
                     slot,
@@ -2800,13 +2933,6 @@ fn handle_bot_channel(
             let hq_lon = crate::services::setting_f64(db, "hq_lon", f64::NAN);
             let hq_lat = hq_lat.is_finite().then_some(hq_lat);
             let hq_lon = hq_lon.is_finite().then_some(hq_lon);
-            let node_lat = node.lat;
-            let node_lon = node.lon;
-            let node_label = if node.name.trim().is_empty() {
-                node.prefix.clone()
-            } else {
-                node.name.clone()
-            };
             let hq_label = db
                 .setting("hq_name")
                 .ok()
@@ -2815,10 +2941,18 @@ fn handle_bot_channel(
                 .unwrap_or_else(|| "HQ".into());
             let fahrenheit = crate::services::weather_unit_f(db);
             let db = db.clone();
+            let zip_hint = place.as_ref().and_then(|p| {
+                let digits: String = p.chars().filter(|c| c.is_ascii_digit()).collect();
+                (digits.len() == 5).then_some(digits)
+            });
             tokio::task::spawn_blocking(move || {
                 let resolved = if let Some(place) = place.as_deref() {
                     match crate::map_tiles::geocode_place(place) {
-                        Ok((lat, lon, label)) => Some((lat, lon, label)),
+                        Ok((lat, lon, label)) => {
+                            let label =
+                                crate::services::short_wx_label(&label, zip_hint.as_deref());
+                            Some((lat, lon, label))
+                        }
                         Err(err) => {
                             enqueue_channel_text(
                                 slot,
@@ -2833,9 +2967,9 @@ fn handle_bot_channel(
                     )
                     .map(|(lat, lon, src)| {
                         let label = if src == "node" {
-                            node_label
+                            crate::services::short_wx_label(&node_label, None)
                         } else {
-                            hq_label
+                            crate::services::short_wx_label(&hq_label, None)
                         };
                         (lat, lon, label)
                     })
@@ -2855,15 +2989,26 @@ fn handle_bot_channel(
                     label,
                     fahrenheit,
                 };
-                let reply = match crate::services::fetch_weather_line(&query) {
-                    Ok(line) => line,
-                    Err(err) => {
-                        hq_log!(warn, "wx: {err}");
-                        crate::signup::fit_mesh("Weather unavailable right now.")
+                let frames = if detail {
+                    match crate::services::fetch_weather_detail(&query) {
+                        Ok(frames) => frames,
+                        Err(err) => {
+                            hq_log!(warn, "wx+: {err}");
+                            vec![crate::signup::fit_mesh("Weather unavailable right now.")]
+                        }
+                    }
+                } else {
+                    match crate::services::fetch_weather_line(&query) {
+                        Ok(line) => vec![line],
+                        Err(err) => {
+                            hq_log!(warn, "wx: {err}");
+                            vec![crate::signup::fit_mesh("Weather unavailable right now.")]
+                        }
                     }
                 };
-                let _ = db.audit("svc_wx", &rate_key, &reply);
-                enqueue_channel_text(slot, reply);
+                let audit = frames.first().cloned().unwrap_or_default();
+                let _ = db.audit(if detail { "svc_wx+" } else { "svc_wx" }, &rate_key, &audit);
+                enqueue_channel_frames(slot, frames);
             });
         }
         crate::services::BotCommand::Quake => {
@@ -2897,6 +3042,96 @@ fn handle_bot_channel(
                 };
                 let _ = db.audit("svc_quake", &rate_key, &reply);
                 enqueue_channel_text(slot, reply);
+            });
+        }
+        crate::services::BotCommand::Amber { detail } => {
+            if !crate::services::setting_bool(db, "svc_amber_enabled", false) {
+                enqueue_channel_text(
+                    slot,
+                    crate::signup::fit_mesh("Amber watch is off at this HQ."),
+                );
+                return;
+            }
+            let state = crate::services::emerg_state(db);
+            let db = db.clone();
+            tokio::task::spawn_blocking(move || {
+                let frames = match crate::services::fetch_emergency_alerts(
+                    &state,
+                    crate::services::AMBER_CODES,
+                ) {
+                    Ok(alerts) => {
+                        if let Some(alert) = alerts.first() {
+                            let short = crate::services::shorten_url(&alert.url);
+                            if detail {
+                                crate::services::format_nws_detail(alert, short.as_deref())
+                            } else {
+                                vec![crate::services::format_nws_alert(alert, short.as_deref())]
+                            }
+                        } else {
+                            vec![crate::signup::fit_mesh(&format!(
+                                "AMBER: none active in {state}"
+                            ))]
+                        }
+                    }
+                    Err(err) => {
+                        hq_log!(warn, "amber: {err}");
+                        vec![crate::signup::fit_mesh("Amber feed unavailable right now.")]
+                    }
+                };
+                let audit = frames.first().cloned().unwrap_or_default();
+                let _ = db.audit(
+                    if detail { "svc_amber+" } else { "svc_amber" },
+                    &rate_key,
+                    &audit,
+                );
+                enqueue_channel_frames(slot, frames);
+            });
+        }
+        crate::services::BotCommand::Alert { detail } => {
+            if !crate::services::setting_bool(db, "svc_emerg_enabled", false)
+                && !crate::services::setting_bool(db, "svc_amber_enabled", false)
+            {
+                enqueue_channel_text(
+                    slot,
+                    crate::signup::fit_mesh("Emergency alert watch is off at this HQ."),
+                );
+                return;
+            }
+            let state = crate::services::emerg_state(db);
+            let codes = if crate::services::setting_bool(db, "svc_emerg_enabled", false) {
+                crate::services::EMERG_CODES
+            } else {
+                crate::services::AMBER_CODES
+            };
+            let db = db.clone();
+            tokio::task::spawn_blocking(move || {
+                let frames = match crate::services::fetch_emergency_alerts(&state, codes) {
+                    Ok(alerts) => {
+                        if let Some(alert) = alerts.first() {
+                            let short = crate::services::shorten_url(&alert.url);
+                            if detail {
+                                crate::services::format_nws_detail(alert, short.as_deref())
+                            } else {
+                                vec![crate::services::format_nws_alert(alert, short.as_deref())]
+                            }
+                        } else {
+                            vec![crate::signup::fit_mesh(&format!(
+                                "ALERT: none active in {state}"
+                            ))]
+                        }
+                    }
+                    Err(err) => {
+                        hq_log!(warn, "alert: {err}");
+                        vec![crate::signup::fit_mesh("Alert feed unavailable right now.")]
+                    }
+                };
+                let audit = frames.first().cloned().unwrap_or_default();
+                let _ = db.audit(
+                    if detail { "svc_alert+" } else { "svc_alert" },
+                    &rate_key,
+                    &audit,
+                );
+                enqueue_channel_frames(slot, frames);
             });
         }
     }

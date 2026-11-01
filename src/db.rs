@@ -245,6 +245,12 @@ impl Db {
             );
             CREATE INDEX IF NOT EXISTS service_events_status ON service_events(status, created_at);",
         );
+        let _ = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS bot_handled (
+                id TEXT PRIMARY KEY,
+                at INTEGER NOT NULL
+            );",
+        );
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -366,6 +372,30 @@ impl Db {
         }
         if self.setting("svc_alerts_channel")?.is_none() {
             self.set_setting("svc_alerts_channel", "METIS-INFO")?;
+        }
+        if self.setting("svc_weather_hourly")?.is_none() {
+            self.set_setting("svc_weather_hourly", "0")?;
+        }
+        if self.setting("svc_weather_zips")?.is_none() {
+            self.set_setting("svc_weather_zips", "")?;
+        }
+        if self.setting("svc_weather_interval_mins")?.is_none() {
+            self.set_setting("svc_weather_interval_mins", "60")?;
+        }
+        if self.setting("svc_amber_enabled")?.is_none() {
+            self.set_setting("svc_amber_enabled", "0")?;
+        }
+        if self.setting("svc_amber_auto_relay")?.is_none() {
+            self.set_setting("svc_amber_auto_relay", "0")?;
+        }
+        if self.setting("svc_emerg_enabled")?.is_none() {
+            self.set_setting("svc_emerg_enabled", "0")?;
+        }
+        if self.setting("svc_emerg_auto_relay")?.is_none() {
+            self.set_setting("svc_emerg_auto_relay", "0")?;
+        }
+        if self.setting("svc_emerg_state")?.is_none() {
+            self.set_setting("svc_emerg_state", "CA")?;
         }
         if let Some(name) = self.setting("radio_name")? {
             if !name.trim().is_empty() && !self.is_saved_radio(&name)? {
@@ -1212,6 +1242,16 @@ impl Db {
         rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Error::from)
     }
 
+    pub fn hq_node(&self) -> Result<Option<NodeRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT pubkey, name, requested_name, contact_type, enrollment, last_heard,
+                    last_advert, lat, lon, prefix, hop_bytes, path_len, qr_file, qr_uri
+             FROM nodes WHERE enrollment = 'hq' LIMIT 1",
+        )?;
+        Ok(stmt.query_row([], map_node).optional()?)
+    }
+
     pub fn get_node(&self, pubkey: &str) -> Result<Option<NodeRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
@@ -1909,6 +1949,16 @@ impl Db {
         Ok(rows)
     }
 
+    /// Claim a METIS-INFO bot command so reconnect/drain cannot re-answer it.
+    /// Returns true if this is the first time we have seen `id`.
+    pub fn claim_bot_command(&self, id: &str) -> Result<bool> {
+        let changed = self.lock().execute(
+            "INSERT OR IGNORE INTO bot_handled (id, at) VALUES (?1, ?2)",
+            params![id, unix_now()],
+        )?;
+        Ok(changed > 0)
+    }
+
     pub fn decide_service_event(&self, id: &str, status: &str) -> Result<Option<ServiceEventRow>> {
         let conn = self.lock();
         let updated = conn.execute(
@@ -2521,6 +2571,10 @@ CREATE TABLE IF NOT EXISTS service_events (
     decided_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS service_events_status ON service_events(status, created_at);
+CREATE TABLE IF NOT EXISTS bot_handled (
+    id TEXT PRIMARY KEY,
+    at INTEGER NOT NULL
+);
 "#;
 
 #[cfg(test)]

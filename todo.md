@@ -44,9 +44,11 @@ Cookbook: [agessaman/meshcore-bot](https://github.com/agessaman/meshcore-bot/) �
 [Weather](https://agessaman.github.io/meshcore-bot/weather-service/) ·
 [Earthquake](https://agessaman.github.io/meshcore-bot/earthquake-service/)
 
-- [x] **D1** Weather: Open-Meteo on **METIS-INFO** (`#weather [zip]`); enrolled-only; 45s rate-limit; ≤160 bytes
-- [x] **D2** NWS alerts: poll near HQ site pin; severity + is.gd short URL; Inbox confirm unless auto-relay → METIS-INFO
-- [x] **D3** Earthquakes: USGS bbox (default CA) + magnitude + dedupe; `#quake` + poll posts on METIS-INFO
+- [x] **D1** Weather: Open-Meteo on **METIS-INFO** (`#weather [zip]`); clean `WX City ZIP:` lines; humidity; ≤160 bytes; `#weather+` multi-frame detail (no source stamp on air)
+- [x] **D1b** Scheduled ZIP weather: Settings ZIP list + interval (default 60m); one ZIP/min when due; silent otherwise
+- [x] **D2** NWS weather alerts: poll near HQ site pin; Inbox confirm unless auto-relay → METIS-INFO
+- [x] **D2b** Amber (CAE) + civil emergencies (CAP codes): `#amber` / `#alert`; `#amber+` / `#alert+` multi-frame CAP description; poll + auto toggles; state setting
+- [x] **D3** Earthquakes: USGS bbox + magnitude + dedupe; post **only when new**; `#quake` on demand
 - [x] HQ-owned `services` module + poller (not a second companion). DMs stay signup/status only.
 - [ ] **D4** Separate private peer channel (e.g. METIS-NET) for human emergency traffic (METIS-INFO = bot/info)
 

@@ -27,16 +27,6 @@ impl LogLevel {
             Self::Verbose => "verbose",
         }
     }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Error => "Error",
-            Self::Warn => "Warn",
-            Self::Info => "Info",
-            Self::Debug => "Debug",
-            Self::Verbose => "Verbose",
-        }
-    }
 }
 
 /// Filter for the log viewer dropdown.

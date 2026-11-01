@@ -243,26 +243,32 @@ pub struct RegionDraftConfirm {
 pub async fn map_place_region_draft(
     shape: &str,
     radius_miles: f64,
-    lng: f64,
-    lat: f64,
+    lng: Option<f64>,
+    lat: Option<f64>,
     mode: &str,
 ) {
+    // Only pin explicit coords when both are finite; otherwise the bridge uses
+    // the live MapLibre center (avoids the old hardcoded LA fallback).
+    let coords = match (lng, lat) {
+        (Some(lng), Some(lat)) if lng.is_finite() && lat.is_finite() => format!(
+            "useCoords: true, lng: {lng}, lat: {lat},"
+        ),
+        _ => "useCoords: false,".to_string(),
+    };
     let js = format!(
         r#"(() => {{
   if (!window.MetisMap) return false;
   return window.MetisMap.placeRegionDraft({id}, {{
     shape: {shape},
     radiusMiles: {radius},
-    lng: {lng},
-    lat: {lat},
+    {coords}
     mode: {mode}
   }});
 }})()"#,
         id = escape_js_string(MAP_ID),
         shape = escape_js_string(shape),
         radius = radius_miles,
-        lng = lng,
-        lat = lat,
+        coords = coords,
         mode = escape_js_string(mode),
     );
     let _ = document::eval(&js).await;
@@ -279,12 +285,7 @@ pub async fn map_clear_region_draft() {
     let _ = document::eval(&js).await;
 }
 
-pub async fn map_take_region_confirm() -> Option<RegionDraftConfirm> {
-    let raw = eval_string(
-        r#"(() => (window.MetisMap ? window.MetisMap.takeRegionConfirm() : ""))()"#,
-    )
-    .await?;
-    let v: Value = serde_json::from_str(&raw).ok()?;
+fn parse_region_confirm_value(v: &Value) -> Option<RegionDraftConfirm> {
     let w = v.get("west")?.as_f64()?;
     let s = v.get("south")?.as_f64()?;
     let e = v.get("east")?.as_f64()?;
@@ -303,21 +304,85 @@ pub async fn map_take_region_confirm() -> Option<RegionDraftConfirm> {
             .and_then(|x| x.as_str())
             .unwrap_or("new")
             .to_string(),
-        radius_miles: v.get("radiusMiles").and_then(|x| x.as_f64()).unwrap_or(50.0),
-        lng: v.get("lng").and_then(|x| x.as_f64()).unwrap_or((w + e) / 2.0),
-        lat: v.get("lat").and_then(|x| x.as_f64()).unwrap_or((s + n) / 2.0),
+        radius_miles: v
+            .get("radiusMiles")
+            .and_then(|x| x.as_f64())
+            .unwrap_or(50.0),
+        lng: v
+            .get("lng")
+            .and_then(|x| x.as_f64())
+            .unwrap_or((w + e) / 2.0),
+        lat: v
+            .get("lat")
+            .and_then(|x| x.as_f64())
+            .unwrap_or((s + n) / 2.0),
         bbox: [w, s, e, n],
     })
 }
 
-pub async fn map_take_region_cancel() -> bool {
-    matches!(
-        eval_string(r#"(() => (window.MetisMap ? window.MetisMap.takeRegionCancel() : ""))()"#)
-            .await
-            .as_deref(),
-        Some("1")
-    )
+/// Build a draft payload in Rust (used when JS snapshot is unavailable).
+pub fn region_draft_from_placement(
+    shape: &str,
+    radius_miles: f64,
+    lng: f64,
+    lat: f64,
+    mode: &str,
+) -> RegionDraftConfirm {
+    let radius = radius_miles.max(5.0).min(300.0);
+    let bbox = crate::map_tiles::bbox_from_center_radius(lat, lng, radius);
+    RegionDraftConfirm {
+        shape: shape.to_string(),
+        mode: mode.to_string(),
+        radius_miles: radius,
+        lng,
+        lat,
+        bbox,
+    }
 }
+
+/// Snapshot the painted draft via numeric window globals (reliable on desktop).
+pub async fn map_snapshot_region_draft() -> Option<RegionDraftConfirm> {
+    // Refresh globals from the painted ring (ignore return — long JSON is flaky).
+    let _ = document::eval(&format!(
+        r#"(() => {{
+  try {{
+    if (window.MetisMap && window.MetisMap.snapshotRegionDraft) {{
+      window.MetisMap.snapshotRegionDraft({id});
+    }}
+    return true;
+  }} catch (e) {{ return false; }}
+}})()"#,
+        id = escape_js_string(MAP_ID),
+    ))
+    .await;
+
+    // Read plain numbers — avoids JSON-string eval issues that caused Confirm
+    // to fall back to the Place/camera center instead of the dragged square.
+    let value = document::eval(
+        r#"(() => {
+  var w = window.__metisDraftW, s = window.__metisDraftS,
+      e = window.__metisDraftE, n = window.__metisDraftN;
+  if (![w,s,e,n].every(function (x) { return typeof x === 'number' && isFinite(x); })) {
+    return null;
+  }
+  return {
+    west: w, south: s, east: e, north: n,
+    lng: Number(window.__metisDraftLng),
+    lat: Number(window.__metisDraftLat),
+    radiusMiles: Number(window.__metisDraftR) || 50,
+    mode: String(window.__metisDraftMode || 'new'),
+    shape: String(window.__metisDraftShape || 'rectangle')
+  };
+})()"#,
+    )
+    .await
+    .ok()?;
+    if value.is_null() {
+        return None;
+    }
+    parse_region_confirm_value(&value)
+}
+
 
 #[derive(Clone, Copy, Debug)]
 pub struct MapCamera {
@@ -467,16 +532,14 @@ fn outline_underlay_layers(kind: BasemapKind) -> Vec<Value> {
     ]
 }
 
-fn coverage_polygon(bbox: [f64; 4]) -> Value {
-    let [w, s, e, n] = bbox;
+fn coverage_feature(coverage: &crate::map_tiles::ActiveCoverage) -> Value {
+    let [w, s, e, n] = coverage.bbox;
     json!({
         "type": "Feature",
-        "properties": {},
+        "properties": { "shape": "rectangle" },
         "geometry": {
             "type": "Polygon",
-            "coordinates": [[
-                [w, s], [e, s], [e, n], [w, n], [w, s]
-            ]]
+            "coordinates": [[[w, s], [e, s], [e, n], [w, n], [w, s]]]
         }
     })
 }
@@ -829,14 +892,13 @@ fn vector_basemap_layers(kind: BasemapKind) -> Vec<Value> {
 
 /// Build the MapLibre style.
 ///
-/// `coverage_bbox` is the active offline pack `[west, south, east, north]`. When
-/// Streets/Terrain/Topo use a local PMTiles extract, layers only exist inside that
-/// box — we keep a world outline underlay (and a dashed coverage ring) so zooming
-/// out does not look like a broken, cut-off canvas.
+/// `coverage` is the active offline pack. Streets tiles fill the pack square;
+/// a dashed ring marks that area. Outline underlay remains so zooming out past
+/// the pack is not a void.
 pub fn dark_basemap_style(
     pmtiles_url: Option<&str>,
     kind: BasemapKind,
-    coverage_bbox: Option<[f64; 4]>,
+    coverage: Option<&crate::map_tiles::ActiveCoverage>,
 ) -> Value {
     let mut sources = serde_json::Map::new();
     let (bg, _land, _border) = outline_colors(kind);
@@ -854,14 +916,26 @@ pub fn dark_basemap_style(
     let mut glyphs: Option<Value> = None;
     let mut sprite: Option<Value> = None;
     if let (Some(url), true) = (pmtiles_url, use_vector) {
-        sources.insert(
-            "protomaps".into(),
-            json!({
-                "type": "vector",
-                "url": format!("pmtiles://{url}"),
-                "attribution": "© OpenStreetMap © Protomaps"
-            }),
-        );
+        let mut protomaps = json!({
+            "type": "vector",
+            "url": format!("pmtiles://{url}"),
+            "attribution": "© OpenStreetMap © Protomaps"
+        });
+        // Limit tile requests to the placed pack. Skip world-scale overview
+        // zooms even if an older extract still contains them — those tiles
+        // spill far past the dashed square when zoomed out.
+        if let Some(cov) = coverage {
+            let [w, s, e, n] = cov.bbox;
+            if w < e && s < n {
+                let minzoom = crate::map_tiles::min_zoom_for_bbox(cov.bbox);
+                if let Some(obj) = protomaps.as_object_mut() {
+                    obj.insert("bounds".into(), json!([w, s, e, n]));
+                    obj.insert("minzoom".into(), json!(minzoom));
+                    obj.insert("maxzoom".into(), json!(12));
+                }
+            }
+        }
+        sources.insert("protomaps".into(), protomaps);
         glyphs = Some(json!(
             "https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf"
         ));
@@ -880,9 +954,9 @@ pub fn dark_basemap_style(
             layers.push(layer);
         }
 
-        // Pack ring on top so zoomed-out views show where Streets/Terrain/Topo exist.
-        if let Some(bbox) = coverage_bbox {
-            let [w, s, e, n] = bbox;
+        // Dashed pack ring — matches the operator-placed square.
+        if let Some(cov) = coverage {
+            let [w, s, e, n] = cov.bbox;
             if w < e && s < n {
                 sources.insert(
                     "tile-coverage".into(),
@@ -890,7 +964,7 @@ pub fn dark_basemap_style(
                         "type": "geojson",
                         "data": {
                             "type": "FeatureCollection",
-                            "features": [coverage_polygon(bbox)]
+                            "features": [coverage_feature(cov)]
                         }
                     }),
                 );

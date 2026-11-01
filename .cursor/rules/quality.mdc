@@ -1,0 +1,12 @@
+---
+description: Zero-warning Rust builds and cleanup discipline
+alwaysApply: true
+---
+
+# Quality
+
+- Treat compiler warnings as errors in practice. Do not leave `dead_code`, `unused`, or similar warnings.
+- After substantive edits, run `cargo test` (or at least `cargo check`) and clear every warning before finishing.
+- Prefer deleting unused code over `#[allow(...)]`. Allow only when the unused item is required by an external API or a near-term intentional stub, and keep the allow narrowly scoped with a one-line reason.
+- Do not introduce unused imports, functions, methods, or variables “for later.”
+---

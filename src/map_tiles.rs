@@ -14,14 +14,36 @@ use crate::pmtiles_path;
 const REGIONS_KEY: &str = "map_regions";
 const ACTIVE_KEY: &str = "map_active_region";
 const MAX_ZOOM: u8 = 12;
+/// Avoid z0–zN world tiles in extracts: a single low zoom tile spans far past
+/// the placed square and makes Streets look “shifted” when zoomed out.
+const MIN_ZOOM_FLOOR: u8 = 4;
+const MIN_ZOOM_CEIL: u8 = 9;
+
+/// Pick extract/source minzoom so tiles are about the pack size (or smaller).
+pub fn min_zoom_for_bbox(bbox: [f64; 4]) -> u8 {
+    let [w, s, e, n] = bbox;
+    let span = (e - w).abs().max((n - s).abs()).max(0.25);
+    // Tile width at zoom z ≈ 360 / 2^z degrees. Want ~2 tiles across the pack.
+    let z = (360.0 / (span / 2.0)).log2().floor() as i32;
+    z.clamp(MIN_ZOOM_FLOOR as i32, MIN_ZOOM_CEIL as i32) as u8
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TileRegion {
     pub id: String,
     pub name: String,
-    /// west, south, east, north
+    /// west, south, east, north — tile extract always uses this axis-aligned box
     pub bbox: [f64; 4],
     pub path: String,
+    /// Placement shape used for the on-map outline (`rectangle` / `circle` / `triangle`).
+    #[serde(default = "default_region_shape")]
+    pub shape: String,
+    #[serde(default)]
+    pub center_lng: f64,
+    #[serde(default)]
+    pub center_lat: f64,
+    #[serde(default)]
+    pub radius_miles: f64,
     #[serde(default)]
     pub source_build: String,
     #[serde(default)]
@@ -30,6 +52,16 @@ pub struct TileRegion {
     pub bytes: u64,
     #[serde(default)]
     pub status: String,
+}
+
+fn default_region_shape() -> String {
+    "rectangle".into()
+}
+
+/// Active pack display (axis-aligned square tile extract).
+#[derive(Debug, Clone)]
+pub struct ActiveCoverage {
+    pub bbox: [f64; 4],
 }
 
 #[derive(Debug, Clone, Default)]
@@ -167,14 +199,19 @@ pub fn active_region_id(db: &Db) -> Option<String> {
 
 /// Active pack bbox `[west, south, east, north]` when a ready region is selected.
 pub fn active_coverage_bbox(db: &Db) -> Option<[f64; 4]> {
+    active_coverage(db).map(|c| c.bbox)
+}
+
+pub fn active_coverage(db: &Db) -> Option<ActiveCoverage> {
     let id = active_region_id(db)?;
     let region = list_regions(db).into_iter().find(|r| r.id == id)?;
     let [w, s, e, n] = region.bbox;
-    if Path::new(&region.path).is_file() && w < e && s < n {
-        Some(region.bbox)
-    } else {
-        None
+    if !(Path::new(&region.path).is_file() && w < e && s < n) {
+        return None;
     }
+    Some(ActiveCoverage {
+        bbox: region.bbox,
+    })
 }
 
 pub fn set_active_region(db: &Db, id: &str) -> Result<(), String> {
@@ -256,6 +293,10 @@ fn region_from_center(id: &str, name: &str, lat: f64, lon: f64, radius_miles: f6
         name: name.into(),
         bbox,
         path: region_file_path(id).display().to_string(),
+        shape: "rectangle".into(),
+        center_lng: lon,
+        center_lat: lat,
+        radius_miles,
         source_build: String::new(),
         updated_at: 0,
         bytes: 0,
@@ -387,6 +428,10 @@ pub fn start_named_bbox_download(
     name: String,
     bbox: [f64; 4],
     replace_id: Option<String>,
+    shape_param: String,
+    center_lng: f64,
+    center_lat: f64,
+    radius_miles: f64,
 ) {
     let status = download_status();
     if status.running {
@@ -422,7 +467,13 @@ pub fn start_named_bbox_download(
         .name("metis-pmtiles-named".into())
         .spawn(move || {
             let result = (|| -> Result<String, String> {
-                let radius = radius_miles_from_bbox(bbox);
+                let radius = if radius_miles > 0.0 {
+                    radius_miles.max(5.0).min(300.0)
+                } else {
+                    radius_miles_from_bbox(bbox)
+                };
+                let shape = "rectangle".to_string();
+                let _ = shape_param; // packs are always a square extract
                 let id = if let Some(existing) = replace_id.as_ref() {
                     let mut regions = list_regions(&db);
                     let Some(region) = regions.iter_mut().find(|r| &r.id == existing) else {
@@ -430,6 +481,10 @@ pub fn start_named_bbox_download(
                     };
                     region.name = name.clone();
                     region.bbox = bbox;
+                    region.shape = shape;
+                    region.center_lng = center_lng;
+                    region.center_lat = center_lat;
+                    region.radius_miles = radius;
                     region.status = "downloading".into();
                     save_regions(&db, &regions)?;
                     let _ = set_active_region(&db, existing);
@@ -456,6 +511,10 @@ pub fn start_named_bbox_download(
                         name: name.clone(),
                         bbox,
                         path: region_file_path(&id).display().to_string(),
+                        shape,
+                        center_lng,
+                        center_lat,
+                        radius_miles: radius,
                         source_build: String::new(),
                         updated_at: 0,
                         bytes: 0,
@@ -465,7 +524,6 @@ pub fn start_named_bbox_download(
                     let _ = set_active_region(&db, &id);
                     id
                 };
-                let _ = radius; // used for default id only
                 Ok(id)
             })();
             match result {
@@ -501,82 +559,6 @@ pub fn start_named_bbox_download(
                     running: false,
                 }),
             }
-        })
-        .ok();
-}
-
-/// Re-extract the active pack for a new bbox (drag-to-move). Replaces the archive
-/// so tiles outside the box are dropped.
-pub fn start_move_active_region(db: std::sync::Arc<Db>, bbox: [f64; 4]) {
-    let status = download_status();
-    if status.running {
-        return;
-    }
-    let [w, s, e, n] = bbox;
-    if !(w < e && s < n) {
-        set_download(DownloadStatus {
-            region_id: String::new(),
-            phase: "error".into(),
-            detail: "Invalid coverage box.".into(),
-            running: false,
-        });
-        return;
-    }
-    let Some(id) = active_region_id(&db) else {
-        set_download(DownloadStatus {
-            region_id: String::new(),
-            phase: "error".into(),
-            detail: "No active offline pack to move.".into(),
-            running: false,
-        });
-        return;
-    };
-    set_download(DownloadStatus {
-        region_id: id.clone(),
-        phase: "move".into(),
-        detail: "Updating pack for new area…".into(),
-        running: true,
-    });
-    std::thread::Builder::new()
-        .name("metis-pmtiles-move".into())
-        .spawn(move || {
-            let result = (|| -> Result<(), String> {
-                let mut regions = list_regions(&db);
-                let Some(region) = regions.iter_mut().find(|r| r.id == id) else {
-                    return Err("Active pack missing.".into());
-                };
-                let lat = (bbox[1] + bbox[3]) / 2.0;
-                let lon = (bbox[0] + bbox[2]) / 2.0;
-                let radius = radius_miles_from_bbox(bbox);
-                region.bbox = bbox;
-                // Keep a readable name; refresh the “· N mi” suffix when present.
-                if let Some((head, _)) = region.name.rsplit_once('·') {
-                    region.name = format!("{}· {radius:.0} mi", head.trim_end());
-                } else {
-                    region.name = format!(
-                        "Map area · {radius:.0} mi ({lat:.2},{lon:.2})"
-                    );
-                }
-                region.status = "downloading".into();
-                save_regions(&db, &regions)?;
-                let _ = set_active_region(&db, &id);
-                run_download(&db, &id)
-            })();
-            match result {
-                Ok(()) => set_download(DownloadStatus {
-                    region_id: id,
-                    phase: "done".into(),
-                    detail: "Pack moved. Streets / Terrain / Topo updated.".into(),
-                    running: false,
-                }),
-                Err(err) => set_download(DownloadStatus {
-                    region_id: id,
-                    phase: "error".into(),
-                    detail: err,
-                    running: false,
-                }),
-            }
-            sync_active_path(&db);
         })
         .ok();
 }
@@ -994,6 +976,8 @@ fn run_download(db: &Db, region_id: &str) -> Result<(), String> {
         "--bbox={},{},{},{}",
         bbox[0], bbox[1], bbox[2], bbox[3]
     );
+    let min_zoom = min_zoom_for_bbox(bbox);
+    let minzoom_flag = format!("--minzoom={min_zoom}");
     let maxzoom_flag = format!("--maxzoom={MAX_ZOOM}");
     let output = Command::new(&cli)
         .args([
@@ -1001,6 +985,7 @@ fn run_download(db: &Db, region_id: &str) -> Result<(), String> {
             &source,
             tmp.to_str().unwrap_or(""),
             &bbox_flag,
+            &minzoom_flag,
             &maxzoom_flag,
         ])
         .output()

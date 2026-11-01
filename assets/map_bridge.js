@@ -396,9 +396,8 @@
     _pmtilesProtocol: null,
     coverageDrag: {},
     coverageBbox: {},
-    /** Pending place/adjust shape before confirm: { shape, radiusMiles, lng, lat, mode } */
+    /** Pending place/adjust square before confirm: { shape, radiusMiles, lng, lat, mode } */
     regionDraft: {},
-    regionDraftMarkers: {},
 
     ensureProtocol: function () {
       if (this.protocolReady || !global.maplibregl || !global.pmtiles) return;
@@ -1315,26 +1314,9 @@
       return [lng + eastMiles / (69.0 * cos), lat + northMiles / 69.0];
     },
 
-    shapeRing: function (shape, lng, lat, radiusMiles) {
+    shapeRing: function (_shape, lng, lat, radiusMiles) {
+      // Offline packs are always an axis-aligned square (PMTiles bbox extract).
       var r = Math.max(5, Math.min(300, radiusMiles || 50));
-      if (shape === "circle") {
-        var ring = [];
-        var steps = 64;
-        for (var i = 0; i <= steps; i++) {
-          var ang = (i / steps) * Math.PI * 2;
-          ring.push(
-            this.offsetLngLat(lng, lat, Math.sin(ang) * r, Math.cos(ang) * r)
-          );
-        }
-        return ring;
-      }
-      if (shape === "triangle") {
-        var top = this.offsetLngLat(lng, lat, 0, r);
-        var bl = this.offsetLngLat(lng, lat, -r * 0.9, -r * 0.75);
-        var br = this.offsetLngLat(lng, lat, r * 0.9, -r * 0.75);
-        return [top, br, bl, top];
-      }
-      // rectangle (axis-aligned)
       var nw = this.offsetLngLat(lng, lat, -r, r);
       var ne = this.offsetLngLat(lng, lat, r, r);
       var se = this.offsetLngLat(lng, lat, r, -r);
@@ -1410,65 +1392,19 @@
       return true;
     },
 
-    clearRegionDraftMarkers: function (mapId) {
-      var bag = this.regionDraftMarkers[mapId];
-      if (!bag) return;
-      try {
-        if (bag.actions) bag.actions.remove();
-      } catch (_) {}
-      delete this.regionDraftMarkers[mapId];
-    },
-
-    updateRegionDraftMarkers: function (mapId) {
+    setCommittedCoverageVisible: function (mapId, visible) {
       var map = this.maps[mapId];
-      var draft = this.regionDraft[mapId];
-      if (!map || !draft || !global.maplibregl) {
-        this.clearRegionDraftMarkers(mapId);
-        return;
-      }
-      var ring = this.shapeRing(draft.shape, draft.lng, draft.lat, draft.radiusMiles);
-      var bbox = this.ringBbox(ring);
-      var anchor = [bbox[2], bbox[3]]; // NE corner
-      var bag = this.regionDraftMarkers[mapId];
-      if (!bag) {
-        var el = document.createElement("div");
-        el.className = "map-region-actions";
-        el.innerHTML =
-          '<button type="button" class="map-region-btn map-region-confirm" title="Confirm area">✓</button>' +
-          '<button type="button" class="map-region-btn map-region-cancel" title="Remove">✕</button>';
-        var self = this;
-        el.querySelector(".map-region-confirm").addEventListener("click", function (ev) {
-          ev.preventDefault();
-          ev.stopPropagation();
-          self.confirmRegionDraft(mapId);
-        });
-        el.querySelector(".map-region-cancel").addEventListener("click", function (ev) {
-          ev.preventDefault();
-          ev.stopPropagation();
-          self.cancelRegionDraft(mapId);
-        });
-        // Keep map drag from eating button clicks.
-        el.addEventListener("mousedown", function (ev) {
-          ev.stopPropagation();
-        });
-        el.addEventListener("click", function (ev) {
-          ev.stopPropagation();
-        });
-        bag = {
-          actions: new global.maplibregl.Marker({
-            element: el,
-            anchor: "bottom-left",
-            offset: [6, -6],
-          })
-            .setLngLat(anchor)
-            .addTo(map),
-        };
-        this.regionDraftMarkers[mapId] = bag;
-      } else {
-        bag.actions.setLngLat(anchor);
-      }
+      if (!map) return;
+      ["tile-coverage-fill", "tile-coverage-line"].forEach(function (id) {
+        if (map.getLayer(id)) {
+          try {
+            map.setLayoutProperty(id, "visibility", visible ? "visible" : "none");
+          } catch (_) {}
+        }
+      });
     },
 
+    /** Full redraw (place / style restore). Avoid on every pointer move. */
     renderRegionDraft: function (mapId) {
       var map = this.maps[mapId];
       var draft = this.regionDraft[mapId];
@@ -1476,22 +1412,65 @@
       if (!this.ensureDraftLayers(mapId)) return false;
       var source = map.getSource("region-draft");
       if (!source) return false;
+      var ring = this.shapeRing(
+        draft.shape,
+        draft.lng,
+        draft.lat,
+        draft.radiusMiles
+      );
+      this.applyDraftRingMeta(draft, ring);
       source.setData(this.draftFeatureCollection(draft));
-      this.updateRegionDraftMarkers(mapId);
       return true;
+    },
+
+    /** Stamp bbox from the ring currently painted (authoritative after drag). */
+    applyDraftRingMeta: function (draft, ring) {
+      if (!draft || !ring || !ring.length) return;
+      var bbox = this.ringBbox(ring);
+      draft.west = bbox[0];
+      draft.south = bbox[1];
+      draft.east = bbox[2];
+      draft.north = bbox[3];
+      draft.lng = (bbox[0] + bbox[2]) / 2;
+      draft.lat = (bbox[1] + bbox[3]) / 2;
+      draft.lastRing = ring;
+    },
+
+    /** Cheap drag frame: translate a cached ring + setData only (no marker DOM). */
+    paintDraftRing: function (mapId, ring) {
+      var map = this.maps[mapId];
+      var draft = this.regionDraft[mapId];
+      if (!map || !draft) return;
+      var source = map.getSource("region-draft");
+      if (!source) return;
+      this.applyDraftRingMeta(draft, ring);
+      source.setData({
+        type: "FeatureCollection",
+        features: [
+          {
+            type: "Feature",
+            properties: {
+              shape: draft.shape,
+              mode: draft.mode || "new",
+            },
+            geometry: { type: "Polygon", coordinates: [ring] },
+          },
+        ],
+      });
     },
 
     placeRegionDraft: function (mapId, opts) {
       var map = this.maps[mapId];
       if (!map) return false;
       opts = opts || {};
+      // Always prefer the live map center unless the caller opts into explicit coords.
+      // Rust used to pass a hardcoded LA fallback when getCamera failed, which pinned
+      // every pack to -118.24,34.05 even after the operator dragged the square.
       var center = map.getCenter();
-      var lng = isFinite(opts.lng) ? opts.lng : center.lng;
-      var lat = isFinite(opts.lat) ? opts.lat : center.lat;
-      var shape = opts.shape || "rectangle";
-      if (shape !== "circle" && shape !== "triangle" && shape !== "rectangle") {
-        shape = "rectangle";
-      }
+      var useCoords = !!opts.useCoords;
+      var lng = useCoords && isFinite(opts.lng) ? opts.lng : center.lng;
+      var lat = useCoords && isFinite(opts.lat) ? opts.lat : center.lat;
+      var shape = "rectangle";
       var radius = isFinite(opts.radiusMiles) ? opts.radiusMiles : 50;
       radius = Math.max(5, Math.min(300, radius));
       this.regionDraft[mapId] = {
@@ -1502,15 +1481,20 @@
         mode: opts.mode === "adjust" ? "adjust" : "new",
       };
       this.teardownDraftDrag(mapId);
+      // Hide committed pack ring so it does not look like a lagging ghost box.
+      this.setCommittedCoverageVisible(mapId, false);
       this.renderRegionDraft(mapId);
+      var ring = this.shapeRing(shape, lng, lat, radius);
+      this.applyDraftRingMeta(this.regionDraft[mapId], ring);
       this.bindDraftDrag(mapId);
+      this.publishLiveDraft(mapId);
       return true;
     },
 
     clearRegionDraft: function (mapId) {
       this.teardownDraftDrag(mapId);
-      this.clearRegionDraftMarkers(mapId);
       delete this.regionDraft[mapId];
+      this.clearDraftGlobals();
       var map = this.maps[mapId];
       if (map && map.getSource("region-draft")) {
         try {
@@ -1520,34 +1504,107 @@
           });
         } catch (_) {}
       }
+      this.setCommittedCoverageVisible(mapId, true);
       return true;
     },
 
-    confirmRegionDraft: function (mapId) {
-      var draft = this.regionDraft[mapId];
-      if (!draft) return false;
-      var ring = this.shapeRing(draft.shape, draft.lng, draft.lat, draft.radiusMiles);
-      var bbox = this.ringBbox(ring);
-      global.__metisRegionConfirm = JSON.stringify({
+    draftPayload: function (draft) {
+      var bbox;
+      if (
+        isFinite(draft.west) &&
+        isFinite(draft.south) &&
+        isFinite(draft.east) &&
+        isFinite(draft.north)
+      ) {
+        bbox = [draft.west, draft.south, draft.east, draft.north];
+      } else {
+        var ring = this.shapeRing(
+          draft.shape,
+          draft.lng,
+          draft.lat,
+          draft.radiusMiles
+        );
+        bbox = this.ringBbox(ring);
+      }
+      return {
         shape: draft.shape,
         mode: draft.mode || "new",
         radiusMiles: draft.radiusMiles,
-        lng: draft.lng,
-        lat: draft.lat,
+        lng: isFinite(draft.lng) ? draft.lng : (bbox[0] + bbox[2]) / 2,
+        lat: isFinite(draft.lat) ? draft.lat : (bbox[1] + bbox[3]) / 2,
         west: bbox[0],
         south: bbox[1],
         east: bbox[2],
         north: bbox[3],
-      });
-      this.clearRegionDraft(mapId);
-      return true;
+      };
     },
 
-    cancelRegionDraft: function (mapId) {
-      if (!this.regionDraft[mapId]) return false;
-      global.__metisRegionCancel = "1";
-      this.clearRegionDraft(mapId);
-      return true;
+    clearDraftGlobals: function () {
+      global.__metisRegionDraftLive = "";
+      global.__metisDraftW = null;
+      global.__metisDraftS = null;
+      global.__metisDraftE = null;
+      global.__metisDraftN = null;
+      global.__metisDraftLng = null;
+      global.__metisDraftLat = null;
+      global.__metisDraftR = null;
+      global.__metisDraftMode = "";
+      global.__metisDraftShape = "";
+    },
+
+    /** Publish draft to window globals. Numeric fields are the reliable path for Rust. */
+    publishLiveDraft: function (mapId) {
+      var draft = this.regionDraft[mapId];
+      if (!draft) {
+        this.clearDraftGlobals();
+        return "";
+      }
+      var p = this.draftPayload(draft);
+      var json = JSON.stringify(p);
+      global.__metisRegionDraftLive = json;
+      // Plain numbers — desktop eval often mangles long JSON strings.
+      global.__metisDraftW = p.west;
+      global.__metisDraftS = p.south;
+      global.__metisDraftE = p.east;
+      global.__metisDraftN = p.north;
+      global.__metisDraftLng = p.lng;
+      global.__metisDraftLat = p.lat;
+      global.__metisDraftR = p.radiusMiles;
+      global.__metisDraftMode = p.mode || "new";
+      global.__metisDraftShape = p.shape || "rectangle";
+      global.__metisRegionDraftSeq = (global.__metisRegionDraftSeq || 0) + 1;
+      return json;
+    },
+
+    /** Resolve active draft (exact mapId or any). */
+    activeRegionDraft: function (mapId) {
+      var draft = this.regionDraft[mapId];
+      if (draft) return { mapId: mapId, draft: draft };
+      var keys = Object.keys(this.regionDraft || {});
+      if (!keys.length) return null;
+      return { mapId: keys[0], draft: this.regionDraft[keys[0]] };
+    },
+
+    /** Live draft as JSON string (does not clear). Refreshes from painted ring. */
+    snapshotRegionDraft: function (mapId) {
+      var active = this.activeRegionDraft(mapId);
+      if (!active) {
+        return global.__metisRegionDraftLive || "";
+      }
+      var draft = active.draft;
+      // Prefer the ring currently painted on the map (post-drag), not Place coords.
+      if (draft.lastRing && draft.lastRing.length) {
+        this.applyDraftRingMeta(draft, draft.lastRing);
+      } else {
+        var ring = this.shapeRing(
+          draft.shape,
+          draft.lng,
+          draft.lat,
+          draft.radiusMiles
+        );
+        this.applyDraftRingMeta(draft, ring);
+      }
+      return this.publishLiveDraft(active.mapId);
     },
 
     teardownDraftDrag: function (mapId) {
@@ -1555,6 +1612,7 @@
       var state = this.coverageDrag[mapId];
       if (state && map) {
         try {
+          if (state.raf) cancelAnimationFrame(state.raf);
           if (state.onMove) map.off("mousemove", state.onMove);
           if (state.onUp) {
             map.off("mouseup", state.onUp);
@@ -1591,19 +1649,50 @@
         dragging: false,
         startLngLat: null,
         startCenter: null,
+        baseRing: null,
+        pendingLngLat: null,
+        raf: 0,
       };
 
       function beginDrag(e) {
         var draft = self.regionDraft[mapId];
         if (!draft || !e || !e.lngLat) return;
         state.dragging = true;
-        state.startLngLat = e.lngLat;
+        state.startLngLat = { lng: e.lngLat.lng, lat: e.lngLat.lat };
         state.startCenter = { lng: draft.lng, lat: draft.lat };
+        // Prefer the last painted ring so drag continues from where it looks.
+        state.baseRing =
+          draft.lastRing && draft.lastRing.length
+            ? draft.lastRing.slice()
+            : self.shapeRing(
+                draft.shape,
+                draft.lng,
+                draft.lat,
+                draft.radiusMiles
+              );
         map.dragPan.disable();
         map.getCanvas().style.cursor = "grabbing";
         if (e.originalEvent && e.originalEvent.preventDefault) {
           e.originalEvent.preventDefault();
         }
+      }
+
+      function flushMove() {
+        state.raf = 0;
+        if (!state.dragging || !state.pendingLngLat || !state.startLngLat || !state.startCenter) {
+          return;
+        }
+        var draft = self.regionDraft[mapId];
+        if (!draft || !state.baseRing) return;
+        var dLng = state.pendingLngLat.lng - state.startLngLat.lng;
+        var dLat = state.pendingLngLat.lat - state.startLngLat.lat;
+        var moved = new Array(state.baseRing.length);
+        for (var i = 0; i < state.baseRing.length; i++) {
+          var p = state.baseRing[i];
+          moved[i] = [p[0] + dLng, p[1] + dLat];
+        }
+        // Paint only while dragging — publish JSON once on mouseup (keeps drag snappy).
+        self.paintDraftRing(mapId, moved);
       }
 
       state.onDownFill = function (e) {
@@ -1613,22 +1702,25 @@
         beginDrag(e);
       };
       state.onMove = function (e) {
-        if (!state.dragging || !state.startLngLat || !state.startCenter) return;
-        var draft = self.regionDraft[mapId];
-        if (!draft) return;
-        var dLng = e.lngLat.lng - state.startLngLat.lng;
-        var dLat = e.lngLat.lat - state.startLngLat.lat;
-        draft.lng = state.startCenter.lng + dLng;
-        draft.lat = Math.max(-85, Math.min(85, state.startCenter.lat + dLat));
-        self.renderRegionDraft(mapId);
+        if (!state.dragging || !e || !e.lngLat) return;
+        state.pendingLngLat = { lng: e.lngLat.lng, lat: e.lngLat.lat };
+        if (state.raf) return;
+        state.raf = requestAnimationFrame(flushMove);
       };
       state.onUp = function () {
         if (!state.dragging) return;
+        if (state.raf) {
+          cancelAnimationFrame(state.raf);
+          flushMove();
+        }
         state.dragging = false;
         state.startLngLat = null;
         state.startCenter = null;
+        state.baseRing = null;
+        state.pendingLngLat = null;
         map.dragPan.enable();
         map.getCanvas().style.cursor = "grab";
+        self.publishLiveDraft(mapId);
       };
       state.onEnter = function () {
         if (!state.dragging) map.getCanvas().style.cursor = "grab";
@@ -1649,23 +1741,6 @@
       this.coverageDrag[mapId] = state;
       map.__metisDraftBound = true;
       return true;
-    },
-
-    takeRegionConfirm: function () {
-      var raw = global.__metisRegionConfirm;
-      global.__metisRegionConfirm = null;
-      return raw || "";
-    },
-
-    takeRegionCancel: function () {
-      var raw = global.__metisRegionCancel;
-      global.__metisRegionCancel = null;
-      return raw || "";
-    },
-
-    takeCoverageMove: function () {
-      // Legacy no-op (confirm flow replaced auto-commit on drag).
-      return "";
     },
   };
 

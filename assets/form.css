@@ -572,65 +572,6 @@ option {
   flex: 1 1 10rem;
 }
 
-.map-download-shapes {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-  margin-top: 0.45rem;
-}
-
-.map-shape-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  height: 1.85rem;
-  padding: 0 0.55rem;
-  border-radius: 0.4rem;
-  border: 1px solid #ffffff24;
-  background: #0b1220;
-  color: #c4c9d4;
-  font-size: 0.7rem;
-  cursor: pointer;
-}
-
-.map-shape-chip:hover {
-  border-color: #ffffff40;
-  color: #e4e4e7;
-}
-
-.map-shape-chip.active {
-  border-color: #34d399aa;
-  color: #ecfdf5;
-  background: #10241c;
-}
-
-.map-shape-icon {
-  width: 0.85rem;
-  height: 0.85rem;
-  display: inline-block;
-  flex-shrink: 0;
-  background: currentColor;
-}
-
-.map-shape-rectangle {
-  clip-path: inset(12% 8% 12% 8%);
-  border-radius: 0.08rem;
-  background: transparent;
-  border: 1.5px solid currentColor;
-  box-sizing: border-box;
-}
-
-.map-shape-circle {
-  border-radius: 999px;
-  background: transparent;
-  border: 1.5px solid currentColor;
-  box-sizing: border-box;
-}
-
-.map-shape-triangle {
-  clip-path: polygon(50% 8%, 92% 88%, 8% 88%);
-}
-
 .map-download-radii {
   display: flex;
   flex-wrap: wrap;
@@ -643,20 +584,29 @@ option {
   flex-wrap: wrap;
 }
 
-.map-region-name-panel {
+.map-region-step {
   display: flex;
   flex-direction: column;
-  gap: 0.45rem;
-  padding: 0.55rem 0.6rem;
-  margin-bottom: 0.55rem;
-  border-radius: 0.45rem;
-  border: 1px solid #34d39944;
-  background: #0f1f18;
+  gap: 0.55rem;
 }
 
 .map-region-name-input {
   width: 100%;
   flex: 1 1 auto;
+}
+
+.map-download-actions {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 0.45rem;
+  margin-top: 0;
+}
+
+.map-download-go-wide {
+  flex: 1 0 auto;
+  min-width: max-content;
+  white-space: nowrap;
 }
 
 .map-download-go-secondary {
@@ -668,47 +618,10 @@ option {
   background: transparent;
   border-color: #ffffff24;
   color: #9aa3af;
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 
-.map-region-actions {
-  display: flex;
-  gap: 0.3rem;
-  pointer-events: auto;
-}
-
-.map-region-btn {
-  width: 1.65rem;
-  height: 1.65rem;
-  border-radius: 0.4rem;
-  border: 1px solid #ffffff30;
-  font-size: 0.85rem;
-  line-height: 1;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
-}
-
-.map-region-confirm {
-  background: #14532d;
-  color: #ecfdf5;
-  border-color: #34d39988;
-}
-
-.map-region-confirm:hover {
-  background: #166534;
-}
-
-.map-region-cancel {
-  background: #450a0a;
-  color: #fecaca;
-  border-color: #f8717188;
-}
-
-.map-region-cancel:hover {
-  background: #7f1d1d;
-}
 
 .map-radius-chip {
   height: 1.7rem;
@@ -741,6 +654,11 @@ option {
   font-size: 0.75rem;
   font-weight: 600;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  white-space: nowrap;
 }
 
 .map-download-go:disabled {

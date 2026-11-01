@@ -201,6 +201,20 @@ pub async fn map_fly_to(lng: f64, lat: f64, zoom: f64) {
     let _ = document::eval(&js).await;
 }
 
+/// Soft recenter (keep zoom). No-op while the operator is panning.
+pub async fn map_ease_to(lng: f64, lat: f64) {
+    let js = format!(
+        r#"(() => {{
+  if (!window.MetisMap) return false;
+  return window.MetisMap.easeTo({id}, {lng}, {lat});
+}})()"#,
+        id = escape_js_string(MAP_ID),
+        lng = lng,
+        lat = lat,
+    );
+    let _ = document::eval(&js).await;
+}
+
 pub async fn map_bind_node_clicks(layer_id: &str) {
     let js = format!(
         r#"(() => {{
@@ -210,6 +224,24 @@ pub async fn map_bind_node_clicks(layer_id: &str) {
 }})()"#,
         id = escape_js_string(MAP_ID),
         layer = escape_js_string(layer_id),
+    );
+    let _ = document::eval(&js).await;
+}
+
+/// Ephemeral sonar rings at a lon/lat (`kind`: message | arrive | move).
+pub async fn map_pulse_at(lng: f64, lat: f64, color: Option<&str>, kind: &str) {
+    let js = format!(
+        r#"(() => {{
+  if (!window.MetisMap) return false;
+  return window.MetisMap.pulseAt({id}, {lng}, {lat}, {color}, {kind});
+}})()"#,
+        id = escape_js_string(MAP_ID),
+        lng = lng,
+        lat = lat,
+        color = color
+            .map(escape_js_string)
+            .unwrap_or_else(|| "null".into()),
+        kind = escape_js_string(kind),
     );
     let _ = document::eval(&js).await;
 }

@@ -820,6 +820,7 @@
     destroy: function (mapId) {
       this.teardownCoverageDrag(mapId);
       this.clearRegionDraft(mapId);
+      this.clearSonar(mapId);
       var map = this.maps[mapId];
       if (this._resizeObs && this._resizeObs[mapId]) {
         try {
@@ -846,6 +847,8 @@
       delete this.clusterEnabled[mapId];
       delete this.detailOpen[mapId];
       if (this.nodeFp) delete this.nodeFp[mapId];
+      if (this.seenPubkeys) delete this.seenPubkeys[mapId];
+      if (this.sonarMarkers) delete this.sonarMarkers[mapId];
       if (!map) return;
       this.loseWebGl(map);
       try {
@@ -1183,7 +1186,29 @@
               "icon-allow-overlap": true,
               "icon-ignore-placement": true,
             },
+            paint: {
+              // Tracked movers go stale when share-location ads stop.
+              "icon-opacity": [
+                "case",
+                ["==", ["get", "stale"], true],
+                0.42,
+                ["==", ["to-string", ["get", "stale"]], "true"],
+                0.42,
+                1,
+              ],
+            },
           });
+        } else {
+          try {
+            map.setPaintProperty("node-pins", "icon-opacity", [
+              "case",
+              ["==", ["get", "stale"], true],
+              0.42,
+              ["==", ["to-string", ["get", "stale"]], "true"],
+              0.42,
+              1,
+            ]);
+          } catch (_) {}
         }
         // Rebuild label layer if it lacks the pill (e.g. created before sprites).
         if (map.getLayer("node-labels")) {
@@ -1331,10 +1356,148 @@
           String(p.pubkey || p.name || i),
           String(p.color || ""),
           String(p.favorite || ""),
-          String(p.type_key || "")
+          String(p.type_key || ""),
+          String(p.lat || ""),
+          String(p.lon || ""),
+          String(p.stale || "")
         );
       }
       return parts.join("|");
+    },
+
+    prefersReducedMotion: function () {
+      try {
+        return !!(
+          global.matchMedia &&
+          global.matchMedia("(prefers-reduced-motion: reduce)").matches
+        );
+      } catch (_) {
+        return false;
+      }
+    },
+
+    /**
+     * Ephemeral sonar at a lon/lat (message TX/RX, new pin, move).
+     * kind: "message" | "arrive" | "move" — arrive adds a brief warp core.
+     */
+    pulseAt: function (mapId, lng, lat, color, kind) {
+      var map = this.maps[mapId];
+      if (!map || !global.maplibregl || typeof global.maplibregl.Marker !== "function") {
+        return false;
+      }
+      if (!isFinite(lng) || !isFinite(lat)) return false;
+      if (this.prefersReducedMotion()) return false;
+      var c =
+        typeof color === "string" && color
+          ? color
+          : "rgba(255, 255, 255, 0.9)";
+      var mode = kind === "arrive" || kind === "move" ? kind : "message";
+      var root = document.createElement("div");
+      root.className =
+        mode === "arrive" ? "metis-sonar metis-sonar--warp" : "metis-sonar";
+      root.style.setProperty("--metis-sonar-color", c);
+      if (mode === "arrive") {
+        var core = document.createElement("div");
+        core.className = "metis-sonar__core";
+        root.appendChild(core);
+      }
+      var ring1 = document.createElement("div");
+      ring1.className = "metis-sonar__ring";
+      root.appendChild(ring1);
+      var ring2 = document.createElement("div");
+      ring2.className = "metis-sonar__ring metis-sonar__ring--delay";
+      root.appendChild(ring2);
+      var marker = new global.maplibregl.Marker({
+        element: root,
+        anchor: "center",
+        pitchAlignment: "map",
+        rotationAlignment: "map",
+      })
+        .setLngLat([lng, lat])
+        .addTo(map);
+      if (!this.sonarMarkers) this.sonarMarkers = {};
+      if (!this.sonarMarkers[mapId]) this.sonarMarkers[mapId] = [];
+      this.sonarMarkers[mapId].push(marker);
+      var self = this;
+      var lifetime = mode === "arrive" ? 1300 : 1200;
+      setTimeout(function () {
+        try {
+          marker.remove();
+        } catch (_) {}
+        var bag = self.sonarMarkers && self.sonarMarkers[mapId];
+        if (!bag) return;
+        var idx = bag.indexOf(marker);
+        if (idx >= 0) bag.splice(idx, 1);
+      }, lifetime);
+      return true;
+    },
+
+    /** Look up a node in the current map GeoJSON and pulse its coordinates. */
+    pulsePubkey: function (mapId, pubkey, color, kind) {
+      var data = this.nodeData[mapId];
+      var feats = (data && data.features) || [];
+      var key = String(pubkey || "");
+      if (!key) return false;
+      for (var i = 0; i < feats.length; i++) {
+        var f = feats[i];
+        var p = (f && f.properties) || {};
+        if (String(p.pubkey || "") !== key) continue;
+        var coords = f.geometry && f.geometry.coordinates;
+        if (!coords || coords.length < 2) return false;
+        var tint = color || p.color || null;
+        return this.pulseAt(mapId, coords[0], coords[1], tint, kind);
+      }
+      return false;
+    },
+
+    clearSonar: function (mapId) {
+      var bag = this.sonarMarkers && this.sonarMarkers[mapId];
+      if (!bag) return;
+      bag.forEach(function (marker) {
+        try {
+          marker.remove();
+        } catch (_) {}
+      });
+      this.sonarMarkers[mapId] = [];
+    },
+
+    /** First paint seeds; later never-seen pubkeys with coords get a warp-in. */
+    noteArrivals: function (mapId, data) {
+      if (!this.seenPubkeys) this.seenPubkeys = {};
+      if (!this.seenPubkeys[mapId]) {
+        this.seenPubkeys[mapId] = { seeded: false, keys: {} };
+      }
+      var state = this.seenPubkeys[mapId];
+      var feats = (data && data.features) || [];
+      var arrivals = [];
+      for (var i = 0; i < feats.length; i++) {
+        var f = feats[i];
+        var p = (f && f.properties) || {};
+        var key = String(p.pubkey || "");
+        if (!key) continue;
+        var coords = f.geometry && f.geometry.coordinates;
+        if (!coords || coords.length < 2) continue;
+        if (!isFinite(coords[0]) || !isFinite(coords[1])) continue;
+        if (!state.seeded) {
+          state.keys[key] = true;
+          continue;
+        }
+        if (state.keys[key]) continue;
+        state.keys[key] = true;
+        arrivals.push({
+          lng: coords[0],
+          lat: coords[1],
+          color: p.color || null,
+        });
+      }
+      if (!state.seeded) {
+        state.seeded = true;
+        return;
+      }
+      for (var j = 0; j < arrivals.length && j < 8; j++) {
+        var a = arrivals[j];
+        this.pulseAt(mapId, a.lng, a.lat, a.color, "arrive");
+      }
     },
 
     setNodes: function (mapId, data, cluster, forceRebuild) {
@@ -1363,6 +1526,7 @@
         source.setData(enriched);
       }
       this.nodeFp[mapId] = fp;
+      this.noteArrivals(mapId, enriched);
       return true;
     },
 
@@ -1590,6 +1754,24 @@
       var map = this.maps[mapId];
       if (!map) return;
       map.flyTo({ center: [lng, lat], zoom: zoom || 12, duration: 700 });
+    },
+
+    /** Soft recenter for Tracker follow — keeps zoom, skips if operator is dragging. */
+    easeTo: function (mapId, lng, lat) {
+      var map = this.maps[mapId];
+      if (!map || !isFinite(lng) || !isFinite(lat)) return false;
+      if (global.__metisMapMoving) return false;
+      try {
+        map.easeTo({
+          center: [lng, lat],
+          zoom: map.getZoom(),
+          duration: 650,
+          essential: true,
+        });
+        return true;
+      } catch (_) {
+        return false;
+      }
     },
 
     bindNodeClicks: function (mapId, layerId) {

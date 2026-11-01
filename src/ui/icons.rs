@@ -21,6 +21,7 @@ pub enum IconName {
     Clock,
     Signal,
     Locate,
+    Track,
     Dashboard,
     Menu,
     PanelClose,
@@ -132,6 +133,11 @@ fn icon_paths(name: IconName) -> &'static [&'static str] {
             "M12 20v2",
             "M2 12h2",
             "M20 12h2",
+        ],
+        // Route / breadcrumb — Tracker whitelist movers.
+        IconName::Track => &[
+            "M4 15l4-8 4 4 4-8 4 8",
+            "M4 19h16",
         ],
         IconName::Dashboard => &[
             "M3 3h8v8H3z",

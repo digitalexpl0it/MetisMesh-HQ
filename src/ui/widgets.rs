@@ -263,6 +263,71 @@ pub fn Dialog(
     }
 }
 
+/// Generic top-of-window slide-down panel (roster details, etc.).
+///
+/// Layout lives in `form.css` (`.slide-down-*`) because arbitrary Tailwind
+/// max-height utilities are missing from the precompiled stylesheet.
+#[component]
+pub fn SlideDownPanel(
+    open: bool,
+    title: String,
+    #[props(default)] subtitle: String,
+    #[props(default)] icon: Option<IconName>,
+    on_close: EventHandler<()>,
+    children: Element,
+) -> Element {
+    let shell_class = if open {
+        "slide-down-shell slide-down-shell-open"
+    } else {
+        "slide-down-shell"
+    };
+    let panel_class = if open {
+        "slide-down-panel slide-down-panel-open"
+    } else {
+        "slide-down-panel"
+    };
+    rsx! {
+        div {
+            class: "{shell_class}",
+            // Soft dim so the roster stays visible but the sheet reads as a panel.
+            if open {
+                button {
+                    class: "slide-down-backdrop",
+                    r#type: "button",
+                    title: "Close details",
+                    "aria-label": "Close details",
+                    onclick: move |_| on_close.call(()),
+                }
+            }
+            div { class: "{panel_class}",
+                div { class: "slide-down-header",
+                    div { class: "min-w-0",
+                        h2 { class: "flex items-center gap-2 text-base font-semibold",
+                            if let Some(icon) = icon {
+                                Icon { name: icon, size: 18 }
+                            }
+                            "{title}"
+                        }
+                        if !subtitle.is_empty() {
+                            p { class: "mt-1 text-sm text-muted-foreground", "{subtitle}" }
+                        }
+                    }
+                    button {
+                        class: "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer",
+                        r#type: "button",
+                        title: "Close",
+                        onclick: move |_| on_close.call(()),
+                        Icon { name: IconName::Close, size: 16 }
+                    }
+                }
+                div { class: "slide-down-body",
+                    {children}
+                }
+            }
+        }
+    }
+}
+
 /// Top-of-window Bluetooth PIN prompt. The PIN field is uncontrolled so the
 /// one-second status refresh cannot rewrite what the operator is typing.
 #[component]

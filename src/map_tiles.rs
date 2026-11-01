@@ -382,7 +382,7 @@ fn geocode_us_zip(zip: &str) -> Result<(f64, f64, String), String> {
 /// Worldwide place lookup via OpenStreetMap Nominatim.
 /// Accepts city / region / postal code / free text. US 5-digit ZIP uses the
 /// postalcode endpoint for a tighter match.
-fn geocode_place(query: &str) -> Result<(f64, f64, String), String> {
+pub fn geocode_place(query: &str) -> Result<(f64, f64, String), String> {
     let query = query.trim();
     if query.is_empty() {
         return Err("Enter a city, postal code, or place name.".into());

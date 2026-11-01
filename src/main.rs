@@ -9,6 +9,7 @@ mod pmtiles_path;
 mod radio;
 mod radio_presets;
 mod secrets;
+mod services;
 mod signup;
 mod toast;
 mod ui;
@@ -42,6 +43,7 @@ fn main() {
     let secrets = Arc::new(Secrets::new(&data));
     contact_qr::spawn_qr_worker(db.clone(), data.clone());
     let radio = spawn_radio(db.clone(), secrets.clone());
+    services::spawn_poller(db.clone(), radio.clone());
     install(AppState { db, secrets, radio });
     hq_log!(info, "Metis Mesh HQ started · data {}", data.display());
     launch_window();

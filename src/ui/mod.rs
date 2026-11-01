@@ -2,6 +2,7 @@ mod cli_page;
 mod icons;
 mod map_host;
 mod map_page;
+mod tracker_page;
 mod widgets;
 
 use std::sync::{Arc, OnceLock};
@@ -26,10 +27,11 @@ use crate::signup::Enrollment;
 use cli_page::CliPage;
 use icons::{Icon, IconName};
 use map_page::MapPage;
+use tracker_page::TrackerPage;
 use widgets::{
     append_emoji, Badge, BarMix, BarMixRow, BatteryChart, BatteryPill, BatterySample, Button,
     ButtonKind, Card, ChartSeries, Dialog, EmojiPickerButton, LineChart, PageHeading, PinSlideDown,
-    SelectInput, Sparkline, TextInput, ToastHost,
+    SelectInput, SlideDownPanel, Sparkline, TextInput, ToastHost,
 };
 
 /// Show a transient toast (and log it). Prefer this over inline amber labels.
@@ -59,6 +61,7 @@ pub(crate) fn state() -> &'static AppState {
 enum Page {
     Dashboard,
     Map,
+    Tracker,
     Roster,
     Inbox,
     Messages,
@@ -102,6 +105,7 @@ pub fn App() -> Element {
     let page_title = match page() {
         Page::Dashboard => "Overview",
         Page::Map => "Map",
+        Page::Tracker => "Tracker",
         Page::Roster => "Roster",
         Page::Inbox => "Inbox",
         Page::Messages => "Messages",
@@ -174,6 +178,13 @@ pub fn App() -> Element {
                             onclick: move |_| page.set(Page::Map),
                         }
                         NavButton {
+                            icon: IconName::Track,
+                            label: "Tracker".to_string(),
+                            expanded,
+                            active: page() == Page::Tracker,
+                            onclick: move |_| page.set(Page::Tracker),
+                        }
+                        NavButton {
                             icon: IconName::Users,
                             label: "Roster".to_string(),
                             expanded,
@@ -229,6 +240,7 @@ pub fn App() -> Element {
                         match page() {
                             Page::Dashboard => rsx! { DashboardPage { radio: radio.clone(), on_navigate: move |next| page.set(next) } },
                             Page::Map => rsx! { MapPage {} },
+                            Page::Tracker => rsx! { TrackerPage {} },
                             Page::Roster => rsx! { RosterPage {} },
                             Page::Inbox => rsx! { InboxPage {} },
                             Page::Messages => rsx! { MessagesPage {} },
@@ -484,6 +496,16 @@ fn format_clock(seconds: i64) -> String {
         TimeFormatPref::TwentyFourHour => "%H:%M",
     };
     time.format(clock).to_string()
+}
+
+#[component]
+fn DetailField(label: String, children: Element) -> Element {
+    rsx! {
+        div { class: "min-w-0",
+            p { class: "mb-0.5 text-[0.65rem] uppercase tracking-[0.14em] text-muted-foreground", "{label}" }
+            div { class: "text-sm text-foreground", {children} }
+        }
+    }
 }
 
 fn node_title(name: &str, requested: &Option<String>) -> String {
@@ -1449,6 +1471,7 @@ fn RosterPage() -> Element {
     let mut dm_target = use_signal(|| None::<(String, String)>);
     let mut dm_body = use_signal(String::new);
     let mut invite_target = use_signal(|| None::<(String, String)>);
+    let mut details_pubkey = use_signal(|| None::<String>);
     let mut invite_channel = use_signal(|| {
         private_channels
             .first()
@@ -1475,8 +1498,180 @@ fn RosterPage() -> Element {
         })
         .collect();
     ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.to_lowercase().cmp(&b.2.to_lowercase())));
+
+    let details_key = details_pubkey();
+    let details_node = details_key
+        .as_ref()
+        .and_then(|key| state().db.get_node(key).ok().flatten());
+    let details_title = details_node
+        .as_ref()
+        .map(|n| node_title(&n.name, &n.requested_name))
+        .unwrap_or_else(|| "Device details".into());
+    let details_tracked = details_key
+        .as_ref()
+        .map(|key| {
+            state()
+                .db
+                .tracked_pubkey_set()
+                .ok()
+                .map(|set| set.contains(key))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    let details_rf = details_key
+        .as_ref()
+        .and_then(|key| state().db.rf_samples_for_pubkey(key, 5).ok())
+        .unwrap_or_default();
+    let details_messages = details_key
+        .as_ref()
+        .and_then(|key| state().db.messages_for_pubkey(key, 8).ok())
+        .unwrap_or_default();
+    let details_positions = details_key
+        .as_ref()
+        .and_then(|key| state().db.positions_for_pubkeys(&[key.clone()], None).ok())
+        .unwrap_or_default();
+    let details_pos_count = details_key
+        .as_ref()
+        .and_then(|key| state().db.position_count_for_pubkey(key).ok())
+        .unwrap_or(0);
+    let details_raw = details_key
+        .as_ref()
+        .and_then(|key| state().db.node_raw_json(key).ok().flatten())
+        .unwrap_or_else(|| "{}".into());
+    let details_raw_pretty = serde_json::from_str::<serde_json::Value>(&details_raw)
+        .ok()
+        .and_then(|v| serde_json::to_string_pretty(&v).ok())
+        .unwrap_or(details_raw);
+    let details_hops = details_node
+        .as_ref()
+        .map(|n| {
+            if n.hop_bytes.is_empty() {
+                "—".into()
+            } else {
+                hex::encode(&n.hop_bytes)
+            }
+        })
+        .unwrap_or_else(|| "—".into());
+    let details_open = details_node.is_some();
+
     rsx! {
         div { class: "flex flex-col gap-3",
+            SlideDownPanel {
+                open: details_open,
+                title: details_title.clone(),
+                subtitle: "Everything HQ has stored for this radio.".to_string(),
+                icon: Some(IconName::Users),
+                on_close: move |_| details_pubkey.set(None),
+                if let Some(node) = details_node.as_ref() {
+                    div { class: "flex flex-col gap-4 text-sm",
+                        div { class: "grid gap-3 sm:grid-cols-2",
+                            DetailField { label: "Enrollment".to_string(),
+                                Badge { tone: node.enrollment.as_str().to_string(), "{node.enrollment.label()}" }
+                            }
+                            DetailField { label: "Type".to_string(), "{contact_type_label(node.contact_type)}" }
+                            DetailField { label: "Prefix".to_string(),
+                                span { class: "font-mono text-xs", "{node.prefix}" }
+                            }
+                            DetailField { label: "On Tracker".to_string(),
+                                if details_tracked { "Yes" } else { "No" }
+                            }
+                            DetailField { label: "Last heard".to_string(), "{format_time(node.last_heard)}" }
+                            DetailField { label: "Last advert".to_string(), "{format_time(node.last_advert)}" }
+                            DetailField { label: "Path length".to_string(),
+                                if node.path_len >= 0 { "{node.path_len}" } else { "—" }
+                            }
+                            DetailField { label: "Hop hashes".to_string(),
+                                span { class: "break-all font-mono text-xs text-muted-foreground", "{details_hops}" }
+                            }
+                        }
+                        div { class: "rounded-md border border-border bg-background/60 p-3",
+                            p { class: "mb-2 text-xs uppercase tracking-[0.16em] text-muted-foreground", "Identity" }
+                            p { class: "break-all font-mono text-xs leading-relaxed", "{node.pubkey}" }
+                            if let Some(req) = node.requested_name.as_ref() {
+                                if !req.is_empty() {
+                                    p { class: "mt-2 text-xs text-muted-foreground", "Requested name: {req}" }
+                                }
+                            }
+                        }
+                        div { class: "rounded-md border border-border bg-background/60 p-3",
+                            p { class: "mb-2 text-xs uppercase tracking-[0.16em] text-muted-foreground", "Location" }
+                            if let (Some(lat), Some(lon)) = (node.lat, node.lon) {
+                                p { class: "font-mono text-xs", "{lat:.6}, {lon:.6}" }
+                                p { class: "mt-1 text-xs text-muted-foreground",
+                                    "{details_pos_count} position sample(s) in trail history"
+                                }
+                                if !details_positions.is_empty() {
+                                    ul { class: "mt-2 max-h-28 space-y-1 overflow-y-auto text-xs text-muted-foreground",
+                                        for point in details_positions.iter().rev().take(8) {
+                                            li { class: "font-mono",
+                                                "{point.lat:.5}, {point.lon:.5}"
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                p { class: "text-muted-foreground", "No GPS fix stored (or 0,0 ignored)." }
+                            }
+                        }
+                        div { class: "rounded-md border border-border bg-background/60 p-3",
+                            p { class: "mb-2 text-xs uppercase tracking-[0.16em] text-muted-foreground", "RF samples" }
+                            if details_rf.is_empty() {
+                                p { class: "text-muted-foreground", "No noise / RSSI / SNR samples yet. Use Map → Probe noise." }
+                            } else {
+                                ul { class: "space-y-1 text-xs",
+                                    for (noise, rssi, snr, at) in details_rf.iter() {
+                                        li { class: "flex flex-wrap gap-x-3 gap-y-0.5 text-muted-foreground",
+                                            span { "{format_time(Some(*at))}" }
+                                            span { class: "tabular-nums text-foreground", "noise {noise} dBm" }
+                                            span { class: "tabular-nums text-foreground", "rssi {rssi}" }
+                                            span { class: "tabular-nums text-foreground", "snr {snr:.1}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        div { class: "rounded-md border border-border bg-background/60 p-3",
+                            p { class: "mb-2 text-xs uppercase tracking-[0.16em] text-muted-foreground", "Recent messages" }
+                            if details_messages.is_empty() {
+                                p { class: "text-muted-foreground", "No messages attributed to this pubkey yet." }
+                            } else {
+                                ul { class: "space-y-2",
+                                    for msg in details_messages.iter() {
+                                        li { class: "rounded border border-border/70 bg-card/40 px-2.5 py-2",
+                                            div { class: "flex flex-wrap items-center gap-2 text-[0.7rem] text-muted-foreground",
+                                                span { "{format_time(Some(msg.received_at))}" }
+                                                span { class: "uppercase", "{msg.direction}" }
+                                                if let Some(hops) = msg.hop_count {
+                                                    span { "{hops} hop(s)" }
+                                                }
+                                                if let Some(snr) = msg.snr {
+                                                    span { "snr {snr:.1}" }
+                                                }
+                                            }
+                                            p { class: "mt-1 whitespace-pre-wrap break-words text-xs", "{msg.text}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        details { class: "rounded-md border border-border bg-background/60 p-3",
+                            summary { class: "cursor-pointer text-xs uppercase tracking-[0.16em] text-muted-foreground",
+                                "Raw contact snapshot (JSON)"
+                            }
+                            pre { class: "mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all font-mono text-[0.7rem] text-muted-foreground",
+                                "{details_raw_pretty}"
+                            }
+                        }
+                        div { class: "flex justify-end",
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| details_pubkey.set(None),
+                                "Close"
+                            }
+                        }
+                    }
+                }
+            }
             PageHeading { icon: IconName::Users, title: "Roster".to_string(),
                 "Search heard nodes, send a direct message, or manually share a private channel secret."
             }
@@ -1538,6 +1733,17 @@ fn RosterPage() -> Element {
                                 }
                                 td { class: "px-3 py-2",
                                     div { class: "flex flex-wrap justify-end gap-2",
+                                        Button {
+                                            kind: ButtonKind::Ghost,
+                                            onclick: {
+                                                let pubkey = node.pubkey.clone();
+                                                move |_| {
+                                                    details_pubkey.set(Some(pubkey.clone()));
+                                                }
+                                            },
+                                            Icon { name: IconName::ChevronRight, size: 14 }
+                                            "Details"
+                                        }
                                         if node.enrollment != Enrollment::Hq {
                                             Button {
                                                 kind: ButtonKind::Ghost,
@@ -1776,18 +1982,34 @@ fn contact_type_label(value: u8) -> &'static str {
 
 #[component]
 fn InboxPage() -> Element {
+    let mut refresh = use_signal(|| 0u64);
+    let mut refresh_started = use_signal(|| false);
+    if !refresh_started() {
+        refresh_started.set(true);
+        spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                refresh.set(refresh() + 1);
+            }
+        });
+    }
+    let _ = refresh();
     let pending = state().db.pending_nodes().unwrap_or_default();
+    let pending_alerts = state()
+        .db
+        .list_pending_service_events()
+        .unwrap_or_default();
     let secrets = state().secrets.clone();
     rsx! {
         div { class: "flex flex-col gap-3",
             PageHeading { icon: IconName::Inbox, title: "Signup inbox".to_string(),
-                "A direct message of signup asks to join. Approval sends the METIS-INFO channel secret once."
+                "A direct message of signup asks to join. Approval sends the METIS-INFO channel secret once. NWS alerts wait here when auto-relay is off."
             }
             if pending.is_empty() {
                 Card { title: "Waiting", icon: Some(IconName::Inbox),
                     p { class: "inline-flex items-center gap-2 text-sm text-muted-foreground",
                         Icon { name: IconName::Check, size: 16 }
-                        "No pending requests."
+                        "No pending signup requests."
                     }
                 }
             }
@@ -1818,6 +2040,49 @@ fn InboxPage() -> Element {
                             },
                             Icon { name: IconName::Close, size: 14 }
                             "Deny"
+                        }
+                    }
+                }
+            }
+            if !pending_alerts.is_empty() {
+                PageHeading { icon: IconName::Inbox, title: "Pending alerts".to_string(),
+                    "Relay sends the compact mesh line to the alerts channel. Dismiss drops it without transmitting."
+                }
+                for alert in pending_alerts {
+                    Card {
+                        title: format!("{} · {}", alert.kind.to_ascii_uppercase(), format_time(Some(alert.created_at))),
+                        icon: Some(IconName::Radio),
+                        p { class: "mb-3 text-sm whitespace-pre-wrap break-words", "{alert.body}" }
+                        div { class: "flex gap-2",
+                            Button {
+                                onclick: {
+                                    let id = alert.id.clone();
+                                    let body = alert.body.clone();
+                                    move |_| {
+                                        if let Ok(Some(_)) = state().db.decide_service_event(&id, "sent") {
+                                            let slot = crate::services::alerts_channel_slot(&state().db);
+                                            let _ = state().radio.send_channel(slot, body.clone());
+                                            let _ = state().db.audit("svc_nws_relay", "", &body);
+                                            status_note("Alert queued to the alerts channel.");
+                                        }
+                                        refresh.set(refresh() + 1);
+                                    }
+                                },
+                                Icon { name: IconName::Check, size: 14 }
+                                "Relay"
+                            }
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: {
+                                    let id = alert.id.clone();
+                                    move |_| {
+                                        let _ = state().db.decide_service_event(&id, "dismissed");
+                                        refresh.set(refresh() + 1);
+                                    }
+                                },
+                                Icon { name: IconName::Close, size: 14 }
+                                "Dismiss"
+                            }
                         }
                     }
                 }
@@ -3190,6 +3455,58 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
     let mut log_filter = use_signal(|| "all".to_string());
     let mut log_query = use_signal(String::new);
     let mut log_autoscroll = use_signal(|| true);
+    let mut svc_weather = use_signal(|| {
+        crate::services::setting_bool(&state().db, "svc_weather_enabled", true)
+    });
+    let mut svc_weather_unit = use_signal(|| {
+        state()
+            .db
+            .setting("svc_weather_unit")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "F".into())
+    });
+    let mut svc_nws = use_signal(|| {
+        crate::services::setting_bool(&state().db, "svc_nws_enabled", false)
+    });
+    let mut svc_nws_auto = use_signal(|| {
+        crate::services::setting_bool(&state().db, "svc_nws_auto_relay", false)
+    });
+    let mut svc_quake = use_signal(|| {
+        crate::services::setting_bool(&state().db, "svc_quake_enabled", false)
+    });
+    let mut svc_quake_mag = use_signal(|| {
+        state()
+            .db
+            .setting("svc_quake_min_mag")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "3.0".into())
+    });
+    let mut svc_site_lat = use_signal(|| {
+        state()
+            .db
+            .setting("hq_site_lat")
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    });
+    let mut svc_site_lon = use_signal(|| {
+        state()
+            .db
+            .setting("hq_site_lon")
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    });
+    let mut svc_alerts_channel = use_signal(|| {
+        state()
+            .db
+            .setting("svc_alerts_channel")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "METIS-INFO".into())
+    });
     let mut log_tick = use_signal(|| 0u32);
     let mut log_poll_started = use_signal(|| false);
     let mut presets_tick = use_signal(|| 0u32);
@@ -3550,6 +3867,156 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                     }
                 }
             }
+            Card { title: "Info services", icon: Some(IconName::Radio),
+                p { class: "mb-3 text-sm text-muted-foreground",
+                    "Bot home is the private METIS-INFO channel (enrolled secret only). Send #weather [zip], #quake, or #help there. NWS/USGS polls use the site pin. Alerts are labeled with source and time — not an official agency feed."
+                }
+                div { class: "mb-3 grid gap-3 sm:grid-cols-2",
+                    div {
+                        label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "HQ site latitude" }
+                        TextInput {
+                            value: svc_site_lat(),
+                            placeholder: radio.hq_lat.map(|v| format!("{v:.6}")).unwrap_or_else(|| "34.050000".into()),
+                            oninput: move |event: FormEvent| svc_site_lat.set(event.value()),
+                        }
+                    }
+                    div {
+                        label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "HQ site longitude" }
+                        TextInput {
+                            value: svc_site_lon(),
+                            placeholder: radio.hq_lon.map(|v| format!("{v:.6}")).unwrap_or_else(|| "-118.250000".into()),
+                            oninput: move |event: FormEvent| svc_site_lon.set(event.value()),
+                        }
+                    }
+                }
+                div { class: "mb-3 flex flex-wrap gap-2",
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        onclick: move |_| {
+                            let lat = svc_site_lat().trim().to_string();
+                            let lon = svc_site_lon().trim().to_string();
+                            if lat.parse::<f64>().is_ok() && lon.parse::<f64>().is_ok() {
+                                let _ = state().db.set_setting("hq_site_lat", &lat);
+                                let _ = state().db.set_setting("hq_site_lon", &lon);
+                                status_note("HQ site pin saved for weather and NWS.");
+                            } else {
+                                status_note("Enter valid decimal latitude and longitude.");
+                            }
+                        },
+                        Icon { name: IconName::Check, size: 14 }
+                        "Save site pin"
+                    }
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        onclick: move |_| {
+                            if let (Some(lat), Some(lon)) = (radio.hq_lat, radio.hq_lon) {
+                                let lat_s = format!("{lat:.6}");
+                                let lon_s = format!("{lon:.6}");
+                                let _ = state().db.set_setting("hq_site_lat", &lat_s);
+                                let _ = state().db.set_setting("hq_site_lon", &lon_s);
+                                svc_site_lat.set(lat_s);
+                                svc_site_lon.set(lon_s);
+                                status_note("Copied companion advert coords into the site pin.");
+                            } else {
+                                status_note("Companion has no advert coordinates yet.");
+                            }
+                        },
+                        "Use companion coords"
+                    }
+                }
+                div { class: "mb-3 flex flex-col gap-2",
+                    label { class: "flex items-center gap-2 text-sm",
+                        input {
+                            r#type: "checkbox",
+                            checked: svc_weather(),
+                            oninput: move |_| {
+                                let next = !svc_weather();
+                                svc_weather.set(next);
+                                crate::services::set_setting_bool(&state().db, "svc_weather_enabled", next);
+                            }
+                        }
+                        "Weather on METIS-INFO (#weather) via Open-Meteo"
+                    }
+                    div { class: "ml-6 w-40",
+                        SelectInput {
+                            id: "svc-weather-unit".to_string(),
+                            value: svc_weather_unit(),
+                            onchange: move |event: FormEvent| {
+                                let value = event.value();
+                                let _ = state().db.set_setting("svc_weather_unit", &value);
+                                svc_weather_unit.set(value);
+                            },
+                            option { value: "F", style: "background-color: #151a20; color: #f4f4f5;", "Fahrenheit" }
+                            option { value: "C", style: "background-color: #151a20; color: #f4f4f5;", "Celsius" }
+                        }
+                    }
+                    label { class: "flex items-center gap-2 text-sm",
+                        input {
+                            r#type: "checkbox",
+                            checked: svc_nws(),
+                            oninput: move |_| {
+                                let next = !svc_nws();
+                                svc_nws.set(next);
+                                crate::services::set_setting_bool(&state().db, "svc_nws_enabled", next);
+                            }
+                        }
+                        "Poll NWS alerts near site pin (US)"
+                    }
+                    label { class: "ml-6 flex items-center gap-2 text-sm text-muted-foreground",
+                        input {
+                            r#type: "checkbox",
+                            checked: svc_nws_auto(),
+                            disabled: !svc_nws(),
+                            oninput: move |_| {
+                                let next = !svc_nws_auto();
+                                svc_nws_auto.set(next);
+                                crate::services::set_setting_bool(&state().db, "svc_nws_auto_relay", next);
+                            }
+                        }
+                        "Auto-relay NWS to channel (otherwise Inbox confirms)"
+                    }
+                    label { class: "flex items-center gap-2 text-sm",
+                        input {
+                            r#type: "checkbox",
+                            checked: svc_quake(),
+                            oninput: move |_| {
+                                let next = !svc_quake();
+                                svc_quake.set(next);
+                                crate::services::set_setting_bool(&state().db, "svc_quake_enabled", next);
+                            }
+                        }
+                        "Poll USGS earthquakes in HQ box (default CA) and relay"
+                    }
+                }
+                div { class: "grid gap-3 sm:grid-cols-2",
+                    div {
+                        label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "Min magnitude" }
+                        TextInput {
+                            value: svc_quake_mag(),
+                            placeholder: "3.0",
+                            oninput: move |event: FormEvent| {
+                                let value = event.value();
+                                svc_quake_mag.set(value.clone());
+                                if value.parse::<f64>().is_ok() {
+                                    let _ = state().db.set_setting("svc_quake_min_mag", &value);
+                                }
+                            },
+                        }
+                    }
+                    div {
+                        label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "Alerts channel" }
+                        TextInput {
+                            value: svc_alerts_channel(),
+                            placeholder: "METIS-INFO",
+                            oninput: move |event: FormEvent| {
+                                let value = event.value();
+                                svc_alerts_channel.set(value.clone());
+                                let _ = state().db.set_setting("svc_alerts_channel", value.trim());
+                            },
+                        }
+                    }
+                }
+            }
             Card { title: "Channel secret", icon: Some(IconName::Key),
                 p { class: "text-sm text-muted-foreground",
                     "Storage: {secret_label}. The secret is sent only after approval, and the message list shows [secret sent]. Revoke on the roster rotates it."
@@ -3832,11 +4299,29 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                                                         kind: ButtonKind::Ghost,
                                                         disabled: qr_print.is_empty(),
                                                         onclick: move |_| {
+                                                            // Prefer a fresh data: URL from disk; metis:// works in the UI
+                                                            // but not inside a print iframe.
+                                                            let qr_data = state()
+                                                                .db
+                                                                .qr_contact_row(&key_print)
+                                                                .ok()
+                                                                .flatten()
+                                                                .and_then(|row| row.qr_file)
+                                                                .as_deref()
+                                                                .and_then(qr_data_url_from_file)
+                                                                .or_else(|| {
+                                                                    if qr_print.starts_with("data:") {
+                                                                        Some(qr_print.clone())
+                                                                    } else {
+                                                                        None
+                                                                    }
+                                                                })
+                                                                .unwrap_or_default();
                                                             print_contact_sheet(
                                                                 &name_print,
                                                                 &key_print,
                                                                 &uri,
-                                                                &qr_print,
+                                                                &qr_data,
                                                             );
                                                         },
                                                         Icon { name: IconName::Inbox, size: 14 }
@@ -4738,6 +5223,12 @@ fn ChannelKeepSelect(
 }
 
 fn print_contact_sheet(name: &str, pubkey: &str, uri: &str, qr_data_url: &str) {
+    // Desktop WebKit blocks window.open popups; print via a same-document iframe.
+    // Only data: QR URLs print reliably (metis:// is for the live UI protocol handler).
+    if qr_data_url.is_empty() || !qr_data_url.starts_with("data:") {
+        status_note("QR is not ready to print yet. Wait for the code to generate, then try again.");
+        return;
+    }
     let payload = serde_json::json!({
         "name": name,
         "pubkey": pubkey,
@@ -4747,32 +5238,63 @@ fn print_contact_sheet(name: &str, pubkey: &str, uri: &str, qr_data_url: &str) {
     let script = format!(
         r#"(function(){{
   var d = {payload};
-  var w = window.open('', '_blank', 'noopener,noreferrer,width=520,height=720');
-  if (!w) return;
   function esc(s) {{
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }}
-  w.document.open();
-  w.document.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>' +
+  var old = document.getElementById('metis-print-frame');
+  if (old && old.parentNode) old.parentNode.removeChild(old);
+  var iframe = document.createElement('iframe');
+  iframe.id = 'metis-print-frame';
+  iframe.setAttribute('aria-hidden', 'true');
+  iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;opacity:0;pointer-events:none;';
+  document.body.appendChild(iframe);
+  var doc = iframe.contentDocument || (iframe.contentWindow && iframe.contentWindow.document);
+  if (!doc) {{
+    document.body.removeChild(iframe);
+    return false;
+  }}
+  var html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' +
     esc(d.name) + ' — MeshCore contact</title><style>' +
-    'body{{font-family:system-ui,sans-serif;padding:2rem;text-align:center;color:#0f172a;background:#fff}}' +
+    'html,body{{margin:0;padding:0;background:#fff;color:#0f172a}}' +
+    'body{{font-family:system-ui,sans-serif;padding:2rem;text-align:center}}' +
     'h1{{font-size:1.35rem;margin:0 0 .35rem}}' +
     'p{{margin:.35rem 0;color:#475569}}' +
     'img{{width:240px;height:240px;margin:1.25rem auto;display:block;border:1px solid #e2e8f0}}' +
     'code{{font-size:11px;word-break:break-all;display:block;margin-top:1rem}}' +
     '.uri{{margin-top:1rem;font-size:11px;color:#64748b;word-break:break-all}}' +
-    '@media print{{body{{padding:0}}}}' +
+    '@media print{{body{{padding:0.75rem}}}}' +
     '</style></head><body>' +
     '<h1>' + esc(d.name) + '</h1>' +
     '<p>Scan with MeshCore to add this contact</p>' +
-    '<img src="' + String(d.qr).replace(/"/g,'') + '" alt="Contact QR"/>' +
+    '<img src="' + String(d.qr).replace(/"/g,'&quot;') + '" alt="Contact QR"/>' +
     '<code>' + esc(d.pubkey) + '</code>' +
     '<p class="uri">' + esc(d.uri) + '</p>' +
-    '<script>window.onload=function(){{try{{window.focus();window.print();}}catch(e){{}}}}<\/script>' +
-    '</body></html>');
-  w.document.close();
+    '</body></html>';
+  doc.open();
+  doc.write(html);
+  doc.close();
+  setTimeout(function(){{
+    try {{
+      var win = iframe.contentWindow;
+      if (win) {{ win.focus(); win.print(); }}
+    }} catch (e) {{}}
+    setTimeout(function(){{
+      var frame = document.getElementById('metis-print-frame');
+      if (frame && frame.parentNode) frame.parentNode.removeChild(frame);
+    }}, 1500);
+  }}, 300);
+  return true;
 }})()"#,
         payload = payload
     );
-    document::eval(&script);
+    spawn(async move {
+        let ok = document::eval(&format!("return {script};"))
+            .await
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !ok {
+            status_note("Could not open the print dialog. Check the desktop print permissions.");
+        }
+    });
 }

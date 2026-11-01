@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use meshcore_rs::commands::Destination;
@@ -20,6 +20,21 @@ use crate::secrets::{Secrets, CHANNEL_NAME};
 use crate::signup::{decide, parse_command};
 
 const REPLY_GAP: Duration = Duration::from_secs(20);
+
+/// Lets background fetches (weather/quake) enqueue a METIS-INFO channel reply.
+static RADIO_CMD_TX: OnceLock<UnboundedSender<RadioCmd>> = OnceLock::new();
+
+fn enqueue_channel_text(slot: u8, text: String) {
+    if let Some(tx) = RADIO_CMD_TX.get() {
+        let _ = tx.send(RadioCmd::SendChannel {
+            slot,
+            text,
+            reply: None,
+        });
+    } else {
+        hq_log!(warn, "channel bot reply dropped — radio cmd bus not ready");
+    }
+}
 
 /// One Bluetooth advertisement the scan was able to identify.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -369,6 +384,7 @@ impl RadioHandle {
 
 pub fn spawn_radio(db: Arc<Db>, secrets: Arc<Secrets>) -> RadioHandle {
     let (cmd, rx) = unbounded_channel();
+    let _ = RADIO_CMD_TX.set(cmd.clone());
     let (stop, stop_rx) = watch::channel(0u64);
     let reboot_pending = Arc::new(AtomicBool::new(false));
     let status = Arc::new(Mutex::new(RadioStatus::default()));
@@ -1130,6 +1146,155 @@ const SEND_LOCK_WAIT: Duration = Duration::from_secs(20);
 /// Background work (battery, channel push, contact retry) must not park the
 /// session loop; otherwise operator CLI/sends never get a turn.
 const BRIEF_LOCK_WAIT: Duration = Duration::from_millis(750);
+/// Noise probe is background RF sampling — never hold the lock as long as a send timeout.
+const PROBE_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
+const PROBE_CONTACTS_TIMEOUT: Duration = Duration::from_secs(20);
+const PROBE_MAX_TARGETS: usize = 5;
+
+/// Status probes are mesh DMs. Acquire the command lock per step and release
+/// between contacts so channel sends / CLI stay responsive.
+async fn run_noise_probe(db: Arc<Db>, meshcore: Arc<MeshCore>, status: Arc<Mutex<RadioStatus>>) {
+    write_status(
+        &status,
+        "connected",
+        "Noise probe: listing radio contacts…",
+    );
+    let radio_keys = {
+        let Ok(mut commands) =
+            tokio::time::timeout(SEND_LOCK_WAIT, meshcore.commands().lock()).await
+        else {
+            write_status(
+                &status,
+                "connected",
+                "Noise probe skipped — radio busy (try again after sending).",
+            );
+            return;
+        };
+        let prev_timeout = Duration::from_secs(5);
+        commands.set_default_timeout(Duration::from_secs(12));
+        let result = commands
+            .get_contacts_with_timeout(0, PROBE_CONTACTS_TIMEOUT)
+            .await;
+        commands.set_default_timeout(prev_timeout);
+        match result {
+            Ok(list) => list
+                .into_iter()
+                .map(|c| c.public_key_hex().to_ascii_lowercase())
+                .collect::<std::collections::HashSet<_>>(),
+            Err(err) => {
+                write_status(
+                    &status,
+                    "connected",
+                    format!("Noise probe aborted (contact list): {err}"),
+                );
+                return;
+            }
+        }
+    };
+    // Yield so a queued SendChannel can take the lock before we probe.
+    tokio::task::yield_now().await;
+
+    let mut candidates = db
+        .list_nodes()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| {
+            n.has_gps
+                && n.enrollment != crate::signup::Enrollment::Hq
+                && radio_keys.contains(&n.pubkey.to_ascii_lowercase())
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| {
+        let ae = matches!(a.enrollment, crate::signup::Enrollment::Enrolled);
+        let be = matches!(b.enrollment, crate::signup::Enrollment::Enrolled);
+        be.cmp(&ae).then(
+            b.last_heard
+                .unwrap_or(0)
+                .cmp(&a.last_heard.unwrap_or(0)),
+        )
+    });
+    candidates.truncate(PROBE_MAX_TARGETS);
+    if candidates.is_empty() {
+        write_status(
+            &status,
+            "connected",
+            "No GPS nodes on the radio contact table to probe.",
+        );
+        return;
+    }
+    write_status(
+        &status,
+        "connected",
+        format!("Noise probe: asking {} contact(s)…", candidates.len()),
+    );
+
+    let mut ok = 0usize;
+    let mut failed = 0usize;
+    for node in candidates {
+        let key = match parse_pubkey_full(&node.pubkey) {
+            Ok(k) => k,
+            Err(err) => {
+                hq_log!(warn, "noise probe {}: {err}", node.name);
+                failed += 1;
+                continue;
+            }
+        };
+        // Prefer operator traffic: wait briefly, then skip this target if busy.
+        let commands = match tokio::time::timeout(
+            Duration::from_secs(3),
+            meshcore.commands().lock(),
+        )
+        .await
+        {
+            Ok(guard) => guard,
+            Err(_) => {
+                hq_log!(
+                    warn,
+                    "noise probe {}: skipped (radio busy)",
+                    node.name
+                );
+                failed += 1;
+                tokio::task::yield_now().await;
+                continue;
+            }
+        };
+        let result = commands
+            .request_status_with_timeout(
+                Destination::Bytes(key.to_vec()),
+                PROBE_STATUS_TIMEOUT,
+            )
+            .await;
+        drop(commands);
+        match result {
+            Ok(info) => {
+                let _ = db.insert_rf_sample(
+                    &node.pubkey,
+                    info.noise_floor,
+                    info.last_rssi,
+                    info.snr,
+                );
+                ok += 1;
+            }
+            Err(err) => {
+                failed += 1;
+                hq_log!(warn, "noise probe {}: {err}", node.name);
+            }
+        }
+        // Gap so SendChannel's lock wait can win between targets.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    write_status(
+        &status,
+        "connected",
+        if failed == 0 {
+            format!("Noise probe stored {ok} sample(s).")
+        } else {
+            format!(
+                "Noise probe stored {ok} sample(s); {failed} timed out or unreachable."
+            )
+        },
+    );
+}
 
 async fn lock_commands_brief(
     meshcore: &MeshCore,
@@ -1385,7 +1550,7 @@ enum SessionEnd {
 async fn run_session(
     db: &Arc<Db>,
     secrets: &Secrets,
-    status: &Mutex<RadioStatus>,
+    status: &Arc<Mutex<RadioStatus>>,
     rx: &mut UnboundedReceiver<RadioCmd>,
     name: &str,
     live: &Mutex<Option<Arc<MeshCore>>>,
@@ -1438,6 +1603,10 @@ async fn run_session(
                 }
                 let _ = db.remember_radio("ble", name, label);
                 let (lat, lon) = crate::db::coords_from_micro(info.adv_lat, info.adv_lon);
+                if let (Some(lat), Some(lon)) = (lat, lon) {
+                    let _ = db.set_setting("hq_lat", &format!("{lat:.6}"));
+                    let _ = db.set_setting("hq_lon", &format!("{lon:.6}"));
+                }
                 let mut guard = status.lock().unwrap_or_else(|err| err.into_inner());
                 guard.hq_lat = lat;
                 guard.hq_lon = lon;
@@ -1783,6 +1952,8 @@ async fn run_session(
                                     guard.hq_lon = Some(lon);
                                 }
                                 let _ = db.update_hq_coords(lat, lon);
+                                let _ = db.set_setting("hq_lat", &format!("{lat:.6}"));
+                                let _ = db.set_setting("hq_lon", &format!("{lon:.6}"));
                                 write_status(
                                     status,
                                     "connected",
@@ -1969,56 +2140,15 @@ async fn run_session(
                         }
                     }
                     Some(RadioCmd::ProbeNoise) => {
-                        let contacts = {
-                            let nodes = db.list_nodes().unwrap_or_default();
-                            nodes
-                                .into_iter()
-                                .filter(|n| n.has_gps && n.enrollment.as_str() != "hq")
-                                .take(8)
-                                .collect::<Vec<_>>()
-                        };
-                        if contacts.is_empty() {
-                            write_status(
-                                status,
-                                "connected",
-                                "No GPS contacts to probe for noise floor.",
-                            );
-                            continue;
-                        }
-                        let commands = meshcore.commands().lock().await;
-                        let mut ok = 0usize;
-                        for node in contacts {
-                            // Status requests need the full 32-byte key (not a 6-byte prefix).
-                            let key = match parse_pubkey_full(&node.pubkey) {
-                                Ok(k) => k,
-                                Err(err) => {
-                                    hq_log!(warn, "noise probe {}: {err}", node.name);
-                                    continue;
-                                }
-                            };
-                            match commands
-                                .request_status(Destination::Bytes(key.to_vec()))
-                                .await
-                            {
-                                Ok(info) => {
-                                    let _ = db.insert_rf_sample(
-                                        &node.pubkey,
-                                        info.noise_floor,
-                                        info.last_rssi,
-                                        info.snr,
-                                    );
-                                    ok += 1;
-                                }
-                                Err(err) => {
-                                    hq_log!(warn, "noise probe {}: {err}", node.name);
-                                }
-                            }
-                        }
-                        write_status(
-                            status,
-                            "connected",
-                            format!("Noise probe stored {ok} sample(s)."),
-                        );
+                        // Run off the session select arm. Holding commands across
+                        // multi-minute status timeouts starved SendChannel (UI 30s
+                        // timeout while the frame sat in the cmd queue).
+                        let meshcore = meshcore.clone();
+                        let db = Arc::clone(db);
+                        let status = Arc::clone(status);
+                        tokio::spawn(async move {
+                            run_noise_probe(db, meshcore, status).await;
+                        });
                     }
                     Some(RadioCmd::Reboot) => {
                         // Prefer the out-of-band reboot path (stop + reboot_pending).
@@ -2091,6 +2221,9 @@ async fn run_session(
                 }
                 // Never run a multi-minute contact dump on the live loop — that
                 // held the select arm and made SendChannel look dead.
+                // Incremental get_contacts can still need ~15–25s on a busy radio;
+                // an 8s budget timed out every attempt and left need_contact_retry
+                // stuck true (retry spam every 2 minutes).
                 if need_contact_retry && Instant::now() >= contact_retry_at {
                     contact_retry_at = Instant::now() + Duration::from_secs(120);
                     if let Some(commands) = lock_commands_brief(&meshcore).await {
@@ -2101,7 +2234,7 @@ async fn run_session(
                             None,
                         );
                         let sync = tokio::time::timeout(
-                            Duration::from_secs(8),
+                            Duration::from_secs(25),
                             sync_contacts(db, &commands, meshcore.dispatcher(), Some(status)),
                         )
                         .await;
@@ -2113,6 +2246,9 @@ async fn run_session(
                                 write_status(status, "connected", connected_detail(status, name));
                             }
                             Ok(Err(err)) => {
+                                // Don't spin forever on a hard error — wait for a
+                                // fresh advert (5 min throttle) to re-arm.
+                                need_contact_retry = false;
                                 hq_log!(warn, "contact sync retry: {err}");
                                 write_sync(status, SyncPhase::Ready, "Companion ready", None);
                                 write_status(
@@ -2125,7 +2261,12 @@ async fn run_session(
                                 );
                             }
                             Err(_) => {
-                                hq_log!(debug, "contact sync retry: timed out");
+                                // Give up this pass; next advert can re-arm.
+                                need_contact_retry = false;
+                                hq_log!(
+                                    debug,
+                                    "contact sync retry: timed out (will retry after next advert)"
+                                );
                                 write_sync(status, SyncPhase::Ready, "Companion ready", None);
                                 write_status(status, "connected", connected_detail(status, name));
                             }
@@ -2481,6 +2622,12 @@ async fn handle_event(
             let sender_prefix = sender_name
                 .clone()
                 .unwrap_or_else(|| format!("ch{}", message.channel_idx));
+            // Channel frames have no pubkey — bind only when the display name
+            // matches exactly one roster node (never guess on collisions).
+            let resolved = sender_name
+                .as_ref()
+                .and_then(|name| db.unique_node_by_name(name).ok().flatten());
+            let sender_pubkey = resolved.as_ref().map(|n| n.pubkey.clone());
             let display = if let Some(name) = sender_name.as_ref() {
                 format!("{name}: {body}")
             } else {
@@ -2495,24 +2642,38 @@ async fn handle_event(
                 "text": message.text,
                 "sender_name": sender_name,
                 "body": body,
+                "resolved_pubkey": sender_pubkey,
             });
-            db.insert_message(
-                "channel",
-                "rx",
-                None,
-                &sender_prefix,
-                Some(message.channel_idx as i64),
-                hops,
-                message.sender_timestamp,
-                &message.text,
-                &display,
-                message.snr.map(f64::from),
-                None,
-                &raw,
-                "received",
-                Some(radio_id),
-            )
-            .map_err(|err| err.to_string())?;
+            let inserted = db
+                .insert_message(
+                    "channel",
+                    "rx",
+                    sender_pubkey.as_deref(),
+                    &sender_prefix,
+                    Some(message.channel_idx as i64),
+                    hops,
+                    message.sender_timestamp,
+                    &message.text,
+                    &display,
+                    message.snr.map(f64::from),
+                    None,
+                    &raw,
+                    "received",
+                    Some(radio_id),
+                )
+                .map_err(|err| err.to_string())?;
+            if let (Some(message_id), Some(pubkey)) = (inserted, sender_pubkey.as_deref()) {
+                let _ = db.touch_last_heard(pubkey);
+                remember_route(db, meshcore, pubkey, message_id).await;
+            }
+            // Bot commands live on METIS-INFO (private, enrolled secret), not DMs.
+            if inserted.is_some()
+                && crate::services::is_metis_info_slot(db, message.channel_idx)
+            {
+                if let Some(cmd) = crate::services::parse_bot_command(&body) {
+                    handle_bot_channel(db, message.channel_idx, resolved.as_ref(), cmd);
+                }
+            }
         }
         EventPayload::PathUpdate(update) => {
             let prefix = hex::encode(update.prefix);
@@ -2534,7 +2695,7 @@ async fn handle_event(
 }
 
 async fn on_direct(
-    db: &Db,
+    db: &Arc<Db>,
     meshcore: &MeshCore,
     message: ContactMessage,
     radio_id: i64,
@@ -2546,6 +2707,7 @@ async fn on_direct(
         .first()
         .map(|node| node.enrollment)
         .unwrap_or(crate::signup::Enrollment::Heard);
+    // Bot commands are METIS-INFO channel-only. DMs stay enrollment desk (signup/status).
     let command = parse_command(&message.text);
     let decision = decide(&command, current, unique);
     let pubkey = unique.then(|| matches[0].pubkey.clone());
@@ -2580,10 +2742,11 @@ async fn on_direct(
     let Some(message_id) = inserted else {
         return Ok(());
     };
-    if let Some(pubkey) = pubkey {
-        db.set_enrollment(&pubkey, decision.enrollment, decision.requested_name.clone())
+    if let Some(ref pubkey) = pubkey {
+        db.set_enrollment(pubkey, decision.enrollment, decision.requested_name.clone())
             .map_err(|err| err.to_string())?;
-        remember_route(db, meshcore, &pubkey, message_id).await;
+        let _ = db.touch_last_heard(pubkey);
+        remember_route(db, meshcore, pubkey, message_id).await;
     }
     if let Some(reply) = decision.reply {
         if let Some(pubkey) = matches.first().map(|node| node.pubkey.clone()) {
@@ -2592,6 +2755,151 @@ async fn on_direct(
         }
     }
     Ok(())
+}
+
+/// METIS-INFO channel bot. Replies go back on the same channel slot.
+fn handle_bot_channel(
+    db: &Arc<Db>,
+    slot: u8,
+    sender: Option<&crate::db::NodeRow>,
+    command: crate::services::BotCommand,
+) {
+    let Some(node) = sender else {
+        // Ambiguous / unknown advert name — do not guess; stay quiet on the mesh.
+        hq_log!(debug, "METIS-INFO cmd ignored — sender name not unique on roster");
+        return;
+    };
+    if !crate::services::is_enrolled(node.enrollment) {
+        enqueue_channel_text(
+            slot,
+            crate::signup::fit_mesh("Not enrolled. DM signup to this HQ first."),
+        );
+        return;
+    }
+    if !crate::services::bot_rate_ok(&node.pubkey) {
+        enqueue_channel_text(slot, crate::services::bot_rate_wait_line());
+        return;
+    }
+
+    let rate_key = node.pubkey.clone();
+    match command {
+        crate::services::BotCommand::Help => {
+            let reply = crate::services::help_line();
+            let _ = db.audit("svc_help", &rate_key, "channel");
+            enqueue_channel_text(slot, reply);
+        }
+        crate::services::BotCommand::Wx { place } => {
+            if !crate::services::setting_bool(db, "svc_weather_enabled", true) {
+                enqueue_channel_text(
+                    slot,
+                    crate::signup::fit_mesh("Weather service is off at this HQ."),
+                );
+                return;
+            }
+            let hq_lat = crate::services::setting_f64(db, "hq_lat", f64::NAN);
+            let hq_lon = crate::services::setting_f64(db, "hq_lon", f64::NAN);
+            let hq_lat = hq_lat.is_finite().then_some(hq_lat);
+            let hq_lon = hq_lon.is_finite().then_some(hq_lon);
+            let node_lat = node.lat;
+            let node_lon = node.lon;
+            let node_label = if node.name.trim().is_empty() {
+                node.prefix.clone()
+            } else {
+                node.name.clone()
+            };
+            let hq_label = db
+                .setting("hq_name")
+                .ok()
+                .flatten()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "HQ".into());
+            let fahrenheit = crate::services::weather_unit_f(db);
+            let db = db.clone();
+            tokio::task::spawn_blocking(move || {
+                let resolved = if let Some(place) = place.as_deref() {
+                    match crate::map_tiles::geocode_place(place) {
+                        Ok((lat, lon, label)) => Some((lat, lon, label)),
+                        Err(err) => {
+                            enqueue_channel_text(
+                                slot,
+                                crate::signup::fit_mesh(&format!("Place lookup failed: {err}")),
+                            );
+                            return;
+                        }
+                    }
+                } else {
+                    crate::services::resolve_weather_coords(
+                        &db, node_lat, node_lon, hq_lat, hq_lon,
+                    )
+                    .map(|(lat, lon, src)| {
+                        let label = if src == "node" {
+                            node_label
+                        } else {
+                            hq_label
+                        };
+                        (lat, lon, label)
+                    })
+                };
+                let Some((lat, lon, label)) = resolved else {
+                    enqueue_channel_text(
+                        slot,
+                        crate::signup::fit_mesh(
+                            "No position. Use #weather <zip> or set HQ site pin.",
+                        ),
+                    );
+                    return;
+                };
+                let query = crate::services::WeatherQuery {
+                    lat,
+                    lon,
+                    label,
+                    fahrenheit,
+                };
+                let reply = match crate::services::fetch_weather_line(&query) {
+                    Ok(line) => line,
+                    Err(err) => {
+                        hq_log!(warn, "wx: {err}");
+                        crate::signup::fit_mesh("Weather unavailable right now.")
+                    }
+                };
+                let _ = db.audit("svc_wx", &rate_key, &reply);
+                enqueue_channel_text(slot, reply);
+            });
+        }
+        crate::services::BotCommand::Quake => {
+            if !crate::services::setting_bool(db, "svc_quake_enabled", false) {
+                enqueue_channel_text(
+                    slot,
+                    crate::signup::fit_mesh("Earthquake watch is off at this HQ."),
+                );
+                return;
+            }
+            let (min_lat, max_lat, min_lon, max_lon) = crate::services::quake_bbox(db);
+            let min_mag = crate::services::quake_min_magnitude(db);
+            let db = db.clone();
+            tokio::task::spawn_blocking(move || {
+                let reply = match crate::services::fetch_quakes(
+                    min_lat, max_lat, min_lon, max_lon, min_mag, 24 * 60,
+                ) {
+                    Ok(events) => {
+                        if let Some(event) = events.first() {
+                            crate::services::format_quake(event)
+                        } else {
+                            crate::signup::fit_mesh(&format!(
+                                "USGS: no M{min_mag:.1}+ in HQ box last 24h"
+                            ))
+                        }
+                    }
+                    Err(err) => {
+                        hq_log!(warn, "quake: {err}");
+                        crate::signup::fit_mesh("USGS unavailable right now.")
+                    }
+                };
+                let _ = db.audit("svc_quake", &rate_key, &reply);
+                enqueue_channel_text(slot, reply);
+            });
+        }
+    }
 }
 
 async fn remember_route(db: &Db, meshcore: &MeshCore, pubkey_hex: &str, message_id: i64) {

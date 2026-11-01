@@ -106,6 +106,20 @@ pub struct OutboundRow {
 }
 
 #[derive(Debug, Clone)]
+pub struct ServiceEventRow {
+    pub id: String,
+    pub kind: String,
+    pub body: String,
+    #[allow(dead_code)]
+    pub detail: String,
+    #[allow(dead_code)]
+    pub status: String,
+    pub created_at: i64,
+    #[allow(dead_code)]
+    pub decided_at: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
 pub struct PurgePreview {
     pub messages: i64,
     pub paths: i64,
@@ -210,6 +224,27 @@ impl Db {
             );
             CREATE INDEX IF NOT EXISTS rf_samples_time ON rf_samples(at);",
         );
+        let _ = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS tracked_nodes (
+                pubkey TEXT PRIMARY KEY,
+                label TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                added_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS positions_pubkey_time ON positions(pubkey, at);",
+        );
+        let _ = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS service_events (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                body TEXT NOT NULL,
+                detail TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at INTEGER NOT NULL,
+                decided_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS service_events_status ON service_events(status, created_at);",
+        );
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -311,6 +346,27 @@ impl Db {
         if self.setting("date_format")?.is_none() {
             self.set_setting("date_format", "md_short")?;
         }
+        if self.setting("svc_weather_enabled")?.is_none() {
+            self.set_setting("svc_weather_enabled", "1")?;
+        }
+        if self.setting("svc_weather_unit")?.is_none() {
+            self.set_setting("svc_weather_unit", "F")?;
+        }
+        if self.setting("svc_nws_enabled")?.is_none() {
+            self.set_setting("svc_nws_enabled", "0")?;
+        }
+        if self.setting("svc_nws_auto_relay")?.is_none() {
+            self.set_setting("svc_nws_auto_relay", "0")?;
+        }
+        if self.setting("svc_quake_enabled")?.is_none() {
+            self.set_setting("svc_quake_enabled", "0")?;
+        }
+        if self.setting("svc_quake_min_mag")?.is_none() {
+            self.set_setting("svc_quake_min_mag", "3.0")?;
+        }
+        if self.setting("svc_alerts_channel")?.is_none() {
+            self.set_setting("svc_alerts_channel", "METIS-INFO")?;
+        }
         if let Some(name) = self.setting("radio_name")? {
             if !name.trim().is_empty() && !self.is_saved_radio(&name)? {
                 let _ = self.upsert_radio("ble", name.trim(), "Companion");
@@ -388,11 +444,11 @@ impl Db {
         self.vacate_channel_slot(metis_slot, CHANNEL_NAME)?;
         self.lock().execute(
             "INSERT INTO channels (name, slot, secret_account, visibility, role, active, created_at)
-             VALUES (?1, ?2, ?1, 'private', 'emergency', 1, ?3)
+             VALUES (?1, ?2, ?1, 'private', 'info', 1, ?3)
              ON CONFLICT(name) DO UPDATE SET
                slot = excluded.slot,
                visibility = 'private',
-               role = 'emergency',
+               role = 'info',
                active = 1",
             params![CHANNEL_NAME, metis_slot, now],
         )?;
@@ -977,7 +1033,7 @@ impl Db {
             return Ok(false);
         }
         if name.eq_ignore_ascii_case(CHANNEL_NAME) {
-            self.ensure_channel_row(CHANNEL_NAME, slot, "private", "emergency")?;
+            self.ensure_channel_row(CHANNEL_NAME, slot, "private", "info")?;
             return Ok(true);
         }
         let visibility = if name.eq_ignore_ascii_case("Public") || secret.iter().all(|b| *b == 0) {
@@ -1156,6 +1212,70 @@ impl Db {
         rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Error::from)
     }
 
+    pub fn get_node(&self, pubkey: &str) -> Result<Option<NodeRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT pubkey, name, requested_name, contact_type, enrollment, last_heard,
+                    last_advert, lat, lon, prefix, hop_bytes, path_len, qr_file, qr_uri
+             FROM nodes WHERE pubkey = ?1",
+        )?;
+        Ok(stmt.query_row(params![pubkey], map_node).optional()?)
+    }
+
+    pub fn node_raw_json(&self, pubkey: &str) -> Result<Option<String>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT raw_json FROM nodes WHERE pubkey = ?1",
+                params![pubkey],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn messages_for_pubkey(&self, pubkey: &str, limit: i64) -> Result<Vec<MessageRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT m.id, m.direction, m.kind,
+                    COALESCE(n.name, m.sender_prefix, 'channel'),
+                    m.sender_pubkey, m.channel_idx, m.hop_count, m.display_text, m.delivery, m.received_at,
+                    p.source, COALESCE(p.path, x''), COALESCE(p.hash_size, 1), m.snr
+             FROM messages m
+             LEFT JOIN nodes n ON n.pubkey = m.sender_pubkey
+             LEFT JOIN paths p ON p.id = (
+                SELECT id FROM paths WHERE message_id = m.id ORDER BY id DESC LIMIT 1
+             )
+             WHERE m.sender_pubkey = ?1
+             ORDER BY m.received_at DESC, m.id DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![pubkey, limit], Self::map_message_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::from)
+    }
+
+    pub fn rf_samples_for_pubkey(&self, pubkey: &str, limit: i64) -> Result<Vec<(i64, i64, f64, i64)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT noise_floor, last_rssi, snr, at FROM rf_samples
+             WHERE pubkey = ?1 ORDER BY at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![pubkey, limit], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::from)
+    }
+
+    pub fn position_count_for_pubkey(&self, pubkey: &str) -> Result<i64> {
+        let conn = self.lock();
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM positions WHERE pubkey = ?1",
+            params![pubkey],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Slim row for the QR worker.
     pub fn qr_contact_row(&self, pubkey: &str) -> Result<Option<QrContactRow>> {
         let conn = self.lock();
@@ -1228,6 +1348,37 @@ impl Db {
             params![pubkey, bytes, bytes.len() as i64],
         )?;
         Ok(())
+    }
+
+    pub fn touch_last_heard(&self, pubkey: &str) -> Result<()> {
+        self.lock().execute(
+            "UPDATE nodes SET last_heard = ?2 WHERE pubkey = ?1",
+            params![pubkey, unix_now()],
+        )?;
+        Ok(())
+    }
+
+    /// Resolve a channel/display name to exactly one known node (no guessing).
+    pub fn unique_node_by_name(&self, name: &str) -> Result<Option<NodeRow>> {
+        let needle = name.trim();
+        if needle.is_empty() {
+            return Ok(None);
+        }
+        let matches: Vec<_> = self
+            .list_nodes()?
+            .into_iter()
+            .filter(|n| {
+                n.name.eq_ignore_ascii_case(needle)
+                    || n.requested_name
+                        .as_deref()
+                        .is_some_and(|r| r.eq_ignore_ascii_case(needle))
+            })
+            .collect();
+        Ok(if matches.len() == 1 {
+            Some(matches.into_iter().next().unwrap())
+        } else {
+            None
+        })
     }
 
     pub fn insert_message(
@@ -1705,6 +1856,88 @@ impl Db {
         Ok(())
     }
 
+    pub fn service_event_seen(&self, id: &str) -> Result<bool> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT 1 FROM service_events WHERE id = ?1")?;
+        Ok(stmt.exists(params![id])?)
+    }
+
+    pub fn insert_service_event(
+        &self,
+        kind: &str,
+        id: &str,
+        body: &str,
+        detail: &str,
+        status: &str,
+    ) -> Result<()> {
+        let decided = if status == "pending" {
+            None
+        } else {
+            Some(unix_now())
+        };
+        self.lock().execute(
+            "INSERT OR IGNORE INTO service_events
+             (id, kind, body, detail, status, created_at, decided_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, kind, body, detail, status, unix_now(), decided],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_pending_service_events(&self) -> Result<Vec<ServiceEventRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, kind, body, detail, status, created_at, decided_at
+             FROM service_events
+             WHERE status = 'pending'
+             ORDER BY created_at DESC
+             LIMIT 50",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(ServiceEventRow {
+                    id: row.get(0)?,
+                    kind: row.get(1)?,
+                    body: row.get(2)?,
+                    detail: row.get(3)?,
+                    status: row.get(4)?,
+                    created_at: row.get(5)?,
+                    decided_at: row.get(6)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn decide_service_event(&self, id: &str, status: &str) -> Result<Option<ServiceEventRow>> {
+        let conn = self.lock();
+        let updated = conn.execute(
+            "UPDATE service_events SET status = ?2, decided_at = ?3
+             WHERE id = ?1 AND status = 'pending'",
+            params![id, status, unix_now()],
+        )?;
+        if updated == 0 {
+            return Ok(None);
+        }
+        let mut stmt = conn.prepare(
+            "SELECT id, kind, body, detail, status, created_at, decided_at
+             FROM service_events WHERE id = ?1",
+        )?;
+        Ok(stmt
+            .query_row(params![id], |row| {
+                Ok(ServiceEventRow {
+                    id: row.get(0)?,
+                    kind: row.get(1)?,
+                    body: row.get(2)?,
+                    detail: row.get(3)?,
+                    status: row.get(4)?,
+                    created_at: row.get(5)?,
+                    decided_at: row.get(6)?,
+                })
+            })
+            .optional()?)
+    }
+
     pub fn purge_preview(&self, cutoff: i64) -> Result<PurgePreview> {
         let conn = self.lock();
         Ok(PurgePreview {
@@ -1881,6 +2114,96 @@ impl Db {
         )?)
     }
 
+    pub fn list_tracked_nodes(&self) -> Result<Vec<TrackedNodeRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT pubkey, label, notes, added_at FROM tracked_nodes ORDER BY added_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(TrackedNodeRow {
+                pubkey: row.get(0)?,
+                label: row.get(1)?,
+                notes: row.get(2)?,
+                added_at: row.get(3)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::from)
+    }
+
+    pub fn tracked_pubkey_set(&self) -> Result<std::collections::HashSet<String>> {
+        Ok(self
+            .list_tracked_nodes()?
+            .into_iter()
+            .map(|row| row.pubkey)
+            .collect())
+    }
+
+    pub fn add_tracked_node(&self, pubkey: &str, label: &str, notes: &str) -> Result<()> {
+        let key = pubkey.trim();
+        if key.is_empty() {
+            return Err(Error::Msg("Missing pubkey.".into()));
+        }
+        self.lock().execute(
+            "INSERT INTO tracked_nodes (pubkey, label, notes, added_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(pubkey) DO UPDATE SET
+                label = excluded.label,
+                notes = excluded.notes",
+            params![key, label.trim(), notes.trim(), unix_now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_tracked_node(&self, pubkey: &str) -> Result<()> {
+        self.lock()
+            .execute("DELETE FROM tracked_nodes WHERE pubkey = ?1", params![pubkey])?;
+        Ok(())
+    }
+
+    pub fn update_tracked_notes(&self, pubkey: &str, notes: &str) -> Result<()> {
+        let n = self.lock().execute(
+            "UPDATE tracked_nodes SET notes = ?2 WHERE pubkey = ?1",
+            params![pubkey, notes.trim()],
+        )?;
+        if n == 0 {
+            return Err(Error::Msg("That device is not on the Tracker list.".into()));
+        }
+        Ok(())
+    }
+
+    /// Position breadcrumbs for trail drawing (oldest → newest per query order).
+    pub fn positions_for_pubkeys(
+        &self,
+        pubkeys: &[String],
+        since_unix: Option<i64>,
+    ) -> Result<Vec<PositionPoint>> {
+        if pubkeys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.lock();
+        let mut out = Vec::new();
+        for key in pubkeys {
+            let mut stmt = conn.prepare(
+                "SELECT pubkey, lat, lon, at FROM positions
+                 WHERE pubkey = ?1 AND (?2 IS NULL OR at >= ?2)
+                 ORDER BY at ASC
+                 LIMIT 2000",
+            )?;
+            let rows = stmt.query_map(params![key, since_unix], |row| {
+                Ok(PositionPoint {
+                    pubkey: row.get(0)?,
+                    lat: row.get(1)?,
+                    lon: row.get(2)?,
+                })
+            })?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn known_nodes_for_paths(&self) -> Result<Vec<crate::path::KnownNode>> {
         let conn = self.lock();
         let mut stmt = conn.prepare("SELECT pubkey, name, lat, lon FROM nodes")?;
@@ -1954,6 +2277,21 @@ pub struct QrContactRow {
     pub enrollment: String,
     pub qr_file: Option<String>,
     pub qr_uri: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TrackedNodeRow {
+    pub pubkey: String,
+    pub label: String,
+    pub notes: String,
+    pub added_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PositionPoint {
+    pub pubkey: String,
+    pub lat: f64,
+    pub lon: f64,
 }
 
 fn map_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRow> {
@@ -2135,6 +2473,13 @@ CREATE TABLE IF NOT EXISTS positions (
     at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS positions_time ON positions(at);
+CREATE INDEX IF NOT EXISTS positions_pubkey_time ON positions(pubkey, at);
+CREATE TABLE IF NOT EXISTS tracked_nodes (
+    pubkey TEXT PRIMARY KEY,
+    label TEXT NOT NULL DEFAULT '',
+    notes TEXT NOT NULL DEFAULT '',
+    added_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS telemetry_samples (
     id INTEGER PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -2166,6 +2511,16 @@ CREATE TABLE IF NOT EXISTS audit (
     pubkey TEXT NOT NULL DEFAULT '',
     detail TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS service_events (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    body TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at INTEGER NOT NULL,
+    decided_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS service_events_status ON service_events(status, created_at);
 "#;
 
 #[cfg(test)]

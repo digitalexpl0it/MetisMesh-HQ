@@ -5,7 +5,7 @@ Build in order; check boxes as we finish.
 
 ## Principles
 
-- Local HQ owns the radio; no second BLE client.
+- Local HQ owns the radio(s); one Tokio task per companion; phone app must drop BLE when HQ holds that link.
 - Mesh text stays plain; alerts labeled with source/time (not FEMA/NWS cosplay).
 - GPS tracks stay local; Tracker is an operator whitelist (share-location is on *their* radio).
 - Don’t invent positions; ignore `0,0`; site pin ≠ live GPS.
@@ -46,11 +46,31 @@ Cookbook: [agessaman/meshcore-bot](https://github.com/agessaman/meshcore-bot/) �
 
 - [x] **D1** Weather: Open-Meteo on **METIS-INFO** (`#weather [zip]`); clean `WX City ZIP:` lines; humidity; ≤160 bytes; `#weather+` multi-frame detail (no source stamp on air)
 - [x] **D1b** Scheduled ZIP weather: Settings ZIP list + interval (default 60m); one ZIP/min when due; silent otherwise
+- [ ] **D1c** Local MQTT weather station: subscribe to custom topics (meshcore-bot–style `MqttWeather` + Weather mapping); prefer station readings for HQ/`#weather` when fresh; fall back to Open-Meteo when MQTT is off/stale/missing fields; Settings for broker, topics, unit labels; same ≤160 mesh line shape
 - [x] **D2** NWS weather alerts: poll near HQ site pin; Inbox confirm unless auto-relay → METIS-INFO
 - [x] **D2b** Amber (CAE) + civil emergencies (CAP codes): `#amber` / `#alert`; `#amber+` / `#alert+` multi-frame CAP description; poll + auto toggles; state setting
 - [x] **D3** Earthquakes: USGS bbox + magnitude + dedupe; post **only when new**; `#quake` on demand
 - [x] HQ-owned `services` module + poller (not a second companion). DMs stay signup/status only.
 - [ ] **D4** Separate private peer channel (e.g. METIS-NET) for human emergency traffic (METIS-INFO = bot/info)
+
+## Phase E — Backup, contacts, optional public map
+
+HQ durability and sharing. One-off contact QR already exists (`meshcore://contact/add`); this phase is bulk + disaster recovery.
+
+- [ ] **E1** Backup / restore: encrypted archive (passphrase) of SQLite + channel secrets from keyring/`data/`; restore with confirm + audit entry; never leave secrets in cleartext zip
+- [ ] **E2** Contact bulk export: JSON (or MeshCore-compatible list) of pubkey, name, type, optional last lat/lon — no secrets / private keys
+- [ ] **E3** Contact bulk import into HQ DB: merge by pubkey; do **not** auto-push onto the radio contact table; “add to radio” stays deliberate
+- [ ] **E4** (optional) Map uploader → [map.meshcore.dev](https://map.meshcore.dev) ([bot docs](https://github.com/agessaman/meshcore-bot/blob/main/docs/map-uploader.md)): default **off**; infra ADVERTs with GPS only (repeaters/rooms/sensors); skip CHAT/companions, Tracker trails, site pins; rate-limit re-uploads; private-key signing operator-gated
+
+## Phase F — USB + multi-radio pool
+
+Stack already says BLE now, USB on the same radio pool later. Cookbook USB/serial patterns: [agessaman/meshcore-bot](https://github.com/agessaman/meshcore-bot). One HQ, several attached MeshCore devices (e.g. companion + room server + repeater).
+
+- [ ] **F1** USB serial transport beside BLE: discover ports, connect/disconnect, same session pipeline (appstart → contacts → drain → subscribe); reuse `meshcore-rs` USB path where available; study bot USB code for quirks
+- [ ] **F2** Multi-radio pool: N concurrent radio tasks (one per device); shared SQLite; UI shows each radio with transport (BLE/USB), name, battery/role, connect state
+- [ ] **F3** Operator roles per radio: label as companion / room server / repeater (and similar); clarify which radio owns METIS-INFO TX, enrollment, and bot replies (default: primary companion)
+- [ ] **F4** Contact/message ingest tagged by `radio_id`; map + roster stay unified; avoid double-counting the same pubkey heard on two HQ radios
+- [ ] **F5** Settings: pick primary radio; optional auto-reconnect per device; USB prefer sticky port/serial identity when the OS renumerates
 
 ## Non-goals (for now)
 
@@ -58,6 +78,7 @@ Cookbook: [agessaman/meshcore-bot](https://github.com/agessaman/meshcore-bot/) �
 - Merging meshes or bridging GPS tracks
 - Continuous cellular-style tracking
 - Auto-adding every public advert onto the radio contact table
+- Stamping Open-Meteo/USGS URLs on mesh text (devices are plain text)
 
 ## Suggested order
 
@@ -66,6 +87,8 @@ Cookbook: [agessaman/meshcore-bot](https://github.com/agessaman/meshcore-bot/) �
 3. A3 → B5  
 4. C  
 5. D1 → D3  
+6. D4 · D1c (local MQTT station vs Open-Meteo)  
+7. E1 → E3 (backup first), then E4 if wanted  
 
 ## Success checks
 
@@ -74,3 +97,6 @@ Cookbook: [agessaman/meshcore-bot](https://github.com/agessaman/meshcore-bot/) �
 - [x] Message from mapped node: two rings, no pan jank
 - [x] First-seen coords: warp-in once (not every refresh)
 - [x] Weather/quake: compact, sourced, enrolled-only, audited
+- [ ] MQTT station fresh → mesh WX uses it; stale/down → Open-Meteo fallback
+- [ ] Backup restores roster + secrets on a fresh machine; import does not flood radio contacts
+- [ ] Map uploader (if on): only infra GPS adverts; companions/tracks stay local

@@ -3028,7 +3028,7 @@ fn handle_bot_channel(
                 ) {
                     Ok(events) => {
                         if let Some(event) = events.first() {
-                            crate::services::format_quake(event)
+                            crate::services::format_quake(&db, event)
                         } else {
                             crate::signup::fit_mesh(&format!(
                                 "USGS: no M{min_mag:.1}+ in HQ box last 24h"

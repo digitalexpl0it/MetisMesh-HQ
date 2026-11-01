@@ -86,7 +86,7 @@ fn poll_quakes(db: &Db, radio: &RadioHandle) -> Result<(), String> {
         if db.service_event_seen(&event.id).unwrap_or(true) {
             continue;
         }
-        let body = format_quake(&event);
+        let body = format_quake(db, &event);
         let detail = serde_json::json!({
             "mag": event.magnitude,
             "place": event.place,

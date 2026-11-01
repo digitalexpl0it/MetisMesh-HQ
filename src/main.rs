@@ -11,6 +11,7 @@ mod radio_presets;
 mod secrets;
 mod services;
 mod signup;
+mod timefmt;
 mod toast;
 mod ui;
 

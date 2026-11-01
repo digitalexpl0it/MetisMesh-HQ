@@ -2,7 +2,9 @@
 
 use serde::Deserialize;
 
+use crate::db::Db;
 use crate::signup::fit_mesh;
+use crate::timefmt;
 
 #[derive(Debug, Clone)]
 pub struct QuakeEvent {
@@ -102,21 +104,30 @@ pub fn fetch_quakes(
     Ok(out)
 }
 
-pub fn format_quake(event: &QuakeEvent) -> String {
+pub fn format_quake(db: &Db, event: &QuakeEvent) -> String {
     let when = if event.time_ms > 0 {
-        let secs = event.time_ms / 1000;
-        chrono::DateTime::from_timestamp(secs, 0)
-            .map(|dt| dt.format("%H:%MZ").to_string())
-            .unwrap_or_else(|| "?".into())
+        // Local TZ + Settings date/time prefs (same as Messages UI).
+        timefmt::format_stamp(db, event.time_ms / 1000)
     } else {
         "?".into()
     };
-    let place = compact_place(&event.place, 42);
+    // Leave room for the formatted stamp (can be longer than HH:MMZ).
+    let place_budget = 42usize.saturating_sub(when.len().saturating_sub(6));
+    let place = compact_place(&event.place, place_budget.max(24));
+    // USGS depth is always km; follow weather unit (°F → miles).
+    let depth = depth_label(event.depth_km.abs(), crate::services::weather_unit_f(db));
     fit_mesh(&format!(
-        "USGS M{mag:.1} · {place} · {when} · d{depth:.0}km",
+        "USGS M{mag:.1} · {place} · {when} · {depth}",
         mag = event.magnitude,
-        depth = event.depth_km.abs(),
     ))
+}
+
+fn depth_label(depth_km: f64, imperial: bool) -> String {
+    if imperial {
+        format!("d{:.0}mi", depth_km * 0.621_371)
+    } else {
+        format!("d{depth_km:.0}km")
+    }
 }
 
 fn compact_place(place: &str, max_chars: usize) -> String {
@@ -133,6 +144,11 @@ mod tests {
 
     #[test]
     fn formats_labeled_quake() {
+        let db = Db::from_conn(rusqlite::Connection::open_in_memory().unwrap()).unwrap();
+        db.ensure_defaults().unwrap();
+        let _ = db.set_setting("time_format", "12h");
+        let _ = db.set_setting("date_format", "md_short");
+        let _ = db.set_setting("svc_weather_unit", "F");
         let event = QuakeEvent {
             id: "ci123".into(),
             magnitude: 3.2,
@@ -143,9 +159,22 @@ mod tests {
             lon: -116.42,
             url: String::new(),
         };
-        let line = format_quake(&event);
-        assert!(line.len() <= 160);
+        let line = format_quake(&db, &event);
+        assert!(line.len() <= 160, "{line}");
         assert!(line.starts_with("USGS M3.2"));
         assert!(line.contains("Borrego"));
+        assert!(!line.contains('Z'), "{line}");
+        assert!(
+            line.contains("AM") || line.contains("PM"),
+            "{line}"
+        );
+        assert!(line.contains("d7mi"), "{line}"); // 12km ≈ 7mi
+        assert!(!line.contains("d12km"), "{line}");
+    }
+
+    #[test]
+    fn depth_metric_when_celsius() {
+        assert_eq!(depth_label(20.0, false), "d20km");
+        assert_eq!(depth_label(20.0, true), "d12mi");
     }
 }

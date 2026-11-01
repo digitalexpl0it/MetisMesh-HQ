@@ -8,6 +8,8 @@ mod widgets;
 use std::sync::{Arc, OnceLock};
 
 use chrono::{Local, TimeZone, Timelike};
+
+use crate::timefmt::{self, DateFormatPref, TimeFormatPref};
 use dioxus::prelude::*;
 
 use crate::contact_qr::{
@@ -383,119 +385,15 @@ fn NavButton(
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TimeFormatPref {
-    TwelveHour,
-    TwentyFourHour,
-}
-
-impl TimeFormatPref {
-    fn parse(value: &str) -> Self {
-        match value.trim() {
-            "24h" | "24" => Self::TwentyFourHour,
-            _ => Self::TwelveHour,
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::TwelveHour => "12h",
-            Self::TwentyFourHour => "24h",
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DateFormatPref {
-    /// Oct 31
-    MonthDayShort,
-    /// Oct 31, 2026
-    MonthDayYear,
-    /// 10/31/2026
-    MdyNumeric,
-    /// 31/10/2026
-    DmyNumeric,
-    /// 2026-10-31
-    YmdIso,
-}
-
-impl DateFormatPref {
-    fn parse(value: &str) -> Self {
-        match value.trim() {
-            "mdy_long" | "month_day_year" => Self::MonthDayYear,
-            "mdy" | "mdy_numeric" => Self::MdyNumeric,
-            "dmy" | "dmy_numeric" => Self::DmyNumeric,
-            "ymd" | "iso" => Self::YmdIso,
-            _ => Self::MonthDayShort,
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::MonthDayShort => "md_short",
-            Self::MonthDayYear => "mdy_long",
-            Self::MdyNumeric => "mdy",
-            Self::DmyNumeric => "dmy",
-            Self::YmdIso => "ymd",
-        }
-    }
-
-    fn chrono_date(self) -> &'static str {
-        // %-d / %-m drop leading zeros on Unix; Local already applies the computer TZ.
-        match self {
-            Self::MonthDayShort => "%b %-d",
-            Self::MonthDayYear => "%b %-d, %Y",
-            Self::MdyNumeric => "%-m/%-d/%Y",
-            Self::DmyNumeric => "%-d/%-m/%Y",
-            Self::YmdIso => "%Y-%m-%d",
-        }
-    }
-}
-
-fn load_time_format() -> TimeFormatPref {
-    state()
-        .db
-        .setting("time_format")
-        .ok()
-        .flatten()
-        .map(|value| TimeFormatPref::parse(&value))
-        .unwrap_or(TimeFormatPref::TwelveHour)
-}
-
-fn load_date_format() -> DateFormatPref {
-    state()
-        .db
-        .setting("date_format")
-        .ok()
-        .flatten()
-        .map(|value| DateFormatPref::parse(&value))
-        .unwrap_or(DateFormatPref::MonthDayShort)
-}
-
 fn format_time(seconds: Option<i64>) -> String {
     let Some(seconds) = seconds else {
         return "—".into();
     };
-    let Some(time) = Local.timestamp_opt(seconds, 0).single() else {
-        return seconds.to_string();
-    };
-    let date = load_date_format().chrono_date();
-    let clock = match load_time_format() {
-        TimeFormatPref::TwelveHour => "%-I:%M %p",
-        TimeFormatPref::TwentyFourHour => "%H:%M",
-    };
-    time.format(&format!("{date} {clock}")).to_string()
+    timefmt::format_stamp(&state().db, seconds)
 }
 
 fn format_clock(seconds: i64) -> String {
-    let Some(time) = Local.timestamp_opt(seconds, 0).single() else {
-        return seconds.to_string();
-    };
-    let clock = match load_time_format() {
-        TimeFormatPref::TwelveHour => "%-I:%M %p",
-        TimeFormatPref::TwentyFourHour => "%H:%M",
-    };
-    time.format(clock).to_string()
+    timefmt::format_clock(&state().db, seconds)
 }
 
 #[component]

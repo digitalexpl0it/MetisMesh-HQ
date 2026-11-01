@@ -232,12 +232,48 @@ async fn eval_string(js: &str) -> Option<String> {
 }
 
 pub async fn map_take_selection() -> Option<String> {
-    eval_string(r#"(() => (window.MetisMap ? window.MetisMap.takeSelection() : ""))()"#).await
+    // Prefer the window global (written by showDetail) — avoids a MetisMap hop.
+    eval_string(
+        r#"(() => {
+  var raw = window.__metisMapSelection || "";
+  window.__metisMapSelection = null;
+  return raw;
+})()"#,
+    )
+    .await
 }
 
 pub async fn map_take_favorite_toggle() -> Option<String> {
-    eval_string(r#"(() => (window.MetisMap ? window.MetisMap.takeFavoriteToggle() : ""))()"#)
+    eval_string(
+        r#"(() => {
+  var raw = window.__metisMapFavoriteToggle || "";
+  window.__metisMapFavoriteToggle = null;
+  return raw;
+})()"#,
+    )
+    .await
+}
+
+/// True while the operator is panning/zooming (JS sets `__metisMapMoving`).
+pub async fn map_is_moving() -> bool {
+    eval_value(r#"!!window.__metisMapMoving"#)
         .await
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Camera JSON published on moveend/zoomend (no live getCenter call).
+pub async fn map_camera_from_global() -> Option<MapCamera> {
+    let raw = eval_string(r#"(() => (window.__metisMapCamera || ""))()"#).await?;
+    parse_camera_json(&raw)
+}
+
+pub async fn map_region_draft_seq() -> u64 {
+    eval_string(r#"(() => String(window.__metisRegionDraftSeq || 0))"#)
+        .await
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -588,13 +624,12 @@ struct VectorTheme {
     minor: &'static str,
     path: &'static str,
     boundary: &'static str,
-    /// Street-name “pill”: dark type on light halo.
+    /// Street-name text on a thick light halo (line labels; not icon-text-fit).
     street_label: &'static str,
     street_halo: &'static str,
     city_label: &'static str,
     city_halo: &'static str,
     neighbourhood_label: &'static str,
-    highway_shield_text: &'static str,
 }
 
 fn vector_theme(kind: BasemapKind) -> VectorTheme {
@@ -613,12 +648,11 @@ fn vector_theme(kind: BasemapKind) -> VectorTheme {
             minor: "#4d7c5c",
             path: "#3f6b4e",
             boundary: "#6ee7b7",
-            street_label: "#052e16",
-            street_halo: "#d1fae5",
+            street_label: "#0b1220",
+            street_halo: "#ffffff",
             city_label: "#a7f3d0",
             city_halo: "#0c1410",
             neighbourhood_label: "#86efac",
-            highway_shield_text: "#0b1220",
         },
         BasemapKind::Topo => VectorTheme {
             bg: "#16130e",
@@ -634,14 +668,13 @@ fn vector_theme(kind: BasemapKind) -> VectorTheme {
             minor: "#8a7350",
             path: "#6b5d4a",
             boundary: "#fbbf24",
-            street_label: "#1c1917",
-            street_halo: "#fef3c7",
+            street_label: "#0b1220",
+            street_halo: "#ffffff",
             city_label: "#fde68a",
             city_halo: "#16130e",
             neighbourhood_label: "#d6b981",
-            highway_shield_text: "#1c1917",
         },
-        // Streets: orange freeways, muted arterials (so cities/labels read), pill labels.
+        // Streets: orange freeways, muted arterials (so cities/labels read).
         _ => VectorTheme {
             bg: "#0b1220",
             earth: "#1a2740",
@@ -657,12 +690,11 @@ fn vector_theme(kind: BasemapKind) -> VectorTheme {
             minor: "#2a384c",
             path: "#243044",
             boundary: "#4b5c73",
-            street_label: "#0f172a",
-            street_halo: "#f1f5f9",
+            street_label: "#0b1220",
+            street_halo: "#ffffff",
             city_label: "#38bdf8",
             city_halo: "#0b1220",
             neighbourhood_label: "#7dd3fc",
-            highway_shield_text: "#0f172a",
         },
     }
 }
@@ -741,32 +773,41 @@ fn vector_basemap_layers(kind: BasemapKind) -> Vec<Value> {
         json!({"id":"roads-highway","type":"line","source":"protomaps","source-layer":"roads","filter":["==",["get","kind"],"highway"],"paint":{"line-color": t.highway,"line-width":["interpolate",["linear"],["zoom"],6,1.2,10,2.8,14,5.5],"line-opacity":1.0}}),
         json!({"id":"roads-rail","type":"line","source":"protomaps","source-layer":"roads","filter":["==",["get","kind"],"rail"],"paint":{"line-color": t.path,"line-width":0.8,"line-dasharray":[2,2],"line-opacity":0.45}}),
         json!({"id":"boundaries","type":"line","source":"protomaps","source-layer":"boundaries","paint":{"line-color": t.boundary,"line-width":["match",["get","kind"],"country",1.2,"region",0.9,0.5],"line-opacity":0.7}}),
-        // Major street names only — dark type + thick light halo ≈ pill contrast.
+        // Major street names — black type on a thick white halo.
+        // (Stretchable icon-text-fit pills break on line placement: empty white
+        // boxes where text couldn't sit on the road. Point-placed device pills
+        // stay in map_bridge.js.)
         json!({
             "id":"road_labels_major",
             "type":"symbol",
             "source":"protomaps",
             "source-layer":"roads",
             "minzoom": 12,
-            "filter": ["==", ["get", "kind"], "major_road"],
+            "filter": [
+                "all",
+                ["==", ["get", "kind"], "major_road"],
+                ["!=", ["coalesce", ["get", "name:en"], ["get", "name"], ["get", "ref"], ""], ""]
+            ],
             "layout": {
                 "symbol-placement": "line",
-                "symbol-spacing": 220,
+                "symbol-spacing": 280,
                 "text-field": name,
                 "text-font": ["Noto Sans Medium"],
-                "text-size": ["interpolate", ["linear"], ["zoom"], 12, 11, 16, 14],
-                "text-max-angle": 25,
-                "text-padding": 2,
+                "text-size": ["interpolate", ["linear"], ["zoom"], 12, 12, 16, 15],
+                "text-rotation-alignment": "map",
+                "text-max-angle": 30,
+                "text-padding": 4,
                 "text-optional": true
             },
             "paint": {
                 "text-color": t.street_label,
                 "text-halo-color": t.street_halo,
-                "text-halo-width": 3.2,
-                "text-halo-blur": 0.15
+                "text-halo-width": 4.5,
+                "text-halo-blur": 0.2
             }
         }),
-        // Freeway / highway shields (sprite) + fallback ref text.
+        // Freeway / highway shields — Protomaps sprites are named
+        // `{network}-{N}char` (e.g. US:I-2char), not bare `network`.
         json!({
             "id":"highway_shields",
             "type":"symbol",
@@ -780,8 +821,23 @@ fn vector_basemap_layers(kind: BasemapKind) -> Vec<Value> {
             "layout": {
                 "symbol-placement": "line",
                 "symbol-spacing": 260,
-                "icon-image": ["coalesce", ["get", "network"], ""],
-                "icon-size": 1.0,
+                "icon-image": [
+                    "concat",
+                    // Custom sprites: blue interstate vs white highway (see map_bridge.js).
+                    ["match", ["coalesce", ["get", "network"], ""],
+                        "US:I", "metis-shield-i-",
+                        "metis-shield-hwy-"
+                    ],
+                    ["to-string", ["case",
+                        [">=", ["length", ["to-string", ["coalesce", ["get", "shield_text"], ["get", "ref"], "1"]]], 5], 5,
+                        [">=", ["length", ["to-string", ["coalesce", ["get", "shield_text"], ["get", "ref"], "1"]]], 4], 4,
+                        [">=", ["length", ["to-string", ["coalesce", ["get", "shield_text"], ["get", "ref"], "1"]]], 3], 3,
+                        [">=", ["length", ["to-string", ["coalesce", ["get", "shield_text"], ["get", "ref"], "1"]]], 2], 2,
+                        1
+                    ]],
+                    "char"
+                ],
+                "icon-size": 1.05,
                 "icon-rotation-alignment": "viewport",
                 "icon-optional": true,
                 "icon-allow-overlap": false,
@@ -790,12 +846,15 @@ fn vector_basemap_layers(kind: BasemapKind) -> Vec<Value> {
                 "text-size": 11,
                 "text-optional": true,
                 "text-rotation-alignment": "viewport",
-                "text-offset": [0.0, 0.0]
+                "text-offset": [0.0, 0.15]
             },
             "paint": {
-                "text-color": t.highway_shield_text,
-                "text-halo-color": t.street_halo,
-                "text-halo-width": 2.4
+                // White digits on blue interstates; dark on white highway shields.
+                "text-color": ["match", ["coalesce", ["get", "network"], ""],
+                    "US:I", "#ffffff",
+                    "#0f172a"
+                ],
+                "text-halo-width": 0
             }
         }),
         json!({
@@ -909,7 +968,10 @@ pub fn dark_basemap_style(
     layers.extend(outline_underlay_layers(kind));
 
     let use_vector = pmtiles_url.is_some() && kind != BasemapKind::Outline;
-    let mut glyphs: Option<Value> = None;
+    // Glyphs for node/cluster labels even on Outline (pins are GL symbol layers).
+    let glyphs = json!(
+        "https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf"
+    );
     let mut sprite: Option<Value> = None;
     if let (Some(url), true) = (pmtiles_url, use_vector) {
         let mut protomaps = json!({
@@ -932,9 +994,6 @@ pub fn dark_basemap_style(
             }
         }
         sources.insert("protomaps".into(), protomaps);
-        glyphs = Some(json!(
-            "https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf"
-        ));
         sprite = Some(json!(match kind {
             BasemapKind::Terrain => {
                 "https://protomaps.github.io/basemaps-assets/sprites/v4/dark"
@@ -973,13 +1032,8 @@ pub fn dark_basemap_style(
         "version": 8,
         "sources": sources,
         "layers": layers,
+        "glyphs": glyphs,
     });
-    if let Some(g) = glyphs {
-        style
-            .as_object_mut()
-            .expect("style object")
-            .insert("glyphs".into(), g);
-    }
     if let Some(s) = sprite {
         style
             .as_object_mut()

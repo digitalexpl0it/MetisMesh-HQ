@@ -188,103 +188,293 @@
     return bits.join("");
   }
 
-  function typeKey(props) {
-    if (props.type_key) return String(props.type_key);
-    if (props.enrollment === "hq") return "hq";
-    var t = Number(props.contact_type);
-    if (t === 1) return "chat";
-    if (t === 2) return "repeater";
-    if (t === 3) return "room";
-    if (t === 4) return "sensor";
-    return "node";
+  var PIN_TYPE_COLORS = {
+    hq: "#f472b6",
+    chat: "#38bdf8",
+    repeater: "#34d399",
+    room: "#fbbf24",
+    sensor: "#fb923c",
+    node: "#94a3b8",
+  };
+
+  function strokePath(ctx, d) {
+    try {
+      ctx.stroke(new Path2D(d));
+    } catch (_) {}
   }
 
-  function typeIconSvg(key) {
-    // 24x24 stroke icons, white on colored pin.
-    var common =
-      'xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"';
+  /** Draw the 24x24 type glyph into ctx (origin at icon top-left). */
+  function drawTypeIcon(ctx, key) {
+    ctx.strokeStyle = "#0b1220";
+    ctx.fillStyle = "#0b1220";
+    ctx.lineWidth = 2.2;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
     if (key === "hq") {
-      return (
-        "<svg " +
-        common +
-        '><path d="M12 3l8 6v11a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V9z"/><path d="M9 21V12h6v9"/></svg>'
-      );
+      strokePath(ctx, "M12 3l8 6v11a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V9z");
+      strokePath(ctx, "M9 21V12h6v9");
+      return;
     }
     if (key === "chat") {
-      return (
-        "<svg " +
-        common +
-        '><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>'
+      strokePath(
+        ctx,
+        "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"
       );
+      return;
     }
     if (key === "repeater") {
-      return (
-        "<svg " +
-        common +
-        '><path d="M4.9 19.1a10 10 0 0 1 0-14.2"/><path d="M7.8 16.2a6 6 0 0 1 0-8.4"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><path d="M16.2 16.2a6 6 0 0 0 0-8.4"/><path d="M19.1 19.1a10 10 0 0 0 0-14.2"/></svg>'
-      );
+      strokePath(ctx, "M4.9 19.1a10 10 0 0 1 0-14.2");
+      strokePath(ctx, "M7.8 16.2a6 6 0 0 1 0-8.4");
+      strokePath(ctx, "M16.2 16.2a6 6 0 0 0 0-8.4");
+      strokePath(ctx, "M19.1 19.1a10 10 0 0 0 0-14.2");
+      ctx.beginPath();
+      ctx.arc(12, 12, 1.4, 0, Math.PI * 2);
+      ctx.fill();
+      return;
     }
     if (key === "room") {
-      return (
-        "<svg " +
-        common +
-        '><path d="M3 21h18"/><path d="M5 21V8l7-4 7 4v13"/><path d="M10 21v-6h4v6"/></svg>'
-      );
+      strokePath(ctx, "M3 21h18");
+      strokePath(ctx, "M5 21V8l7-4 7 4v13");
+      strokePath(ctx, "M10 21v-6h4v6");
+      return;
     }
     if (key === "sensor") {
-      return (
-        "<svg " +
-        common +
-        '><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>'
-      );
+      strokePath(ctx, "M22 12h-4l-3 9L9 3l-3 9H2");
+      return;
     }
-    return (
-      "<svg " +
-      common +
-      '><circle cx="12" cy="12" r="3"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="M2 12h2"/><path d="M20 12h2"/></svg>'
-    );
+    ctx.beginPath();
+    ctx.arc(12, 12, 3, 0, Math.PI * 2);
+    ctx.stroke();
+    strokePath(ctx, "M12 2v2");
+    strokePath(ctx, "M12 20v2");
+    strokePath(ctx, "M2 12h2");
+    strokePath(ctx, "M20 12h2");
   }
 
-  function pinHtml(props) {
-    var name = escapeHtml(props.name || "Node");
-    var typeLabel = escapeHtml(props.type_label || "Node");
-    var key = typeKey(props);
-    var color = escapeHtml(props.color || "#94a3b8");
-    var favorited =
+  /**
+   * Stretchable name-pill sprite for icon-text-fit labels.
+   * Height must exceed 2× radius so stretchY is a real band (empty stretch
+   * makes MapLibre reject / ignore the image — pills vanish, text-only left).
+   */
+  function rasterLabelPill(opts) {
+    opts = opts || {};
+    var fill = opts.fill || "rgba(11, 18, 32, 0.92)";
+    var stroke = opts.stroke || "rgba(244, 244, 245, 0.28)";
+    var pr = 2;
+    var w = 56 * pr;
+    var h = 24 * pr;
+    var r = 8 * pr;
+    var canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    var ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("no 2d context");
+    function roundRect(x, y, rw, rh, rad) {
+      var rr = Math.min(rad, rw / 2, rh / 2);
+      ctx.beginPath();
+      ctx.moveTo(x + rr, y);
+      ctx.arcTo(x + rw, y, x + rw, y + rh, rr);
+      ctx.arcTo(x + rw, y + rh, x, y + rh, rr);
+      ctx.arcTo(x, y + rh, x, y, rr);
+      ctx.arcTo(x, y, x + rw, y, rr);
+      ctx.closePath();
+    }
+    roundRect(1, 1, w - 2, h - 2, r);
+    ctx.fillStyle = fill;
+    ctx.fill();
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    var padX = 4 * pr;
+    var padY = 3 * pr;
+    var stretchX0 = r;
+    var stretchX1 = w - r;
+    var stretchY0 = r;
+    var stretchY1 = h - r;
+    if (stretchX1 - stretchX0 < 2 || stretchY1 - stretchY0 < 2) {
+      throw new Error("pill stretch band too small");
+    }
+    return {
+      image: ctx.getImageData(0, 0, w, h),
+      options: {
+        pixelRatio: pr,
+        stretchX: [[stretchX0, stretchX1]],
+        stretchY: [[stretchY0, stretchY1]],
+        content: [padX, padY, w - padX, h - padY],
+      },
+    };
+  }
+
+  function addLabelPillImage(map, id, opts, force) {
+    if (!map) return false;
+    if (map.hasImage(id)) {
+      if (!force) return true;
+      try {
+        map.removeImage(id);
+      } catch (_) {}
+    }
+    try {
+      var pill = rasterLabelPill(opts);
+      map.addImage(id, pill.image, pill.options);
+      return map.hasImage(id);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * Category-colored highway shields (own image ids — don’t fight the sprite sheet).
+   * interstate → blue; highway (US / generic) → white.
+   */
+  function rasterHighwayShield(kind, chars) {
+    var pr = 2;
+    var n = Math.max(1, Math.min(5, chars | 0));
+    var interstate = kind === "interstate";
+    // Interstates stay closer to a tall shield; highways can be a bit wider.
+    var w = (interstate ? 14 + n * 5.5 : 16 + n * 8) * pr;
+    var h = (interstate ? 22 : 20) * pr;
+    var canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    var ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("no 2d context");
+    var fill = interstate ? "#1d4ed8" : "#f8fafc";
+    var stroke = interstate ? "#93c5fd" : "#334155";
+    var r = 4 * pr;
+    function roundRect(x, y, rw, rh, rad) {
+      var rr = Math.min(rad, rw / 2, rh / 2);
+      ctx.beginPath();
+      ctx.moveTo(x + rr, y);
+      ctx.arcTo(x + rw, y, x + rw, y + rh, rr);
+      ctx.arcTo(x + rw, y + rh, x, y + rh, rr);
+      ctx.arcTo(x, y + rh, x, y, rr);
+      ctx.arcTo(x, y, x + rw, y, rr);
+      ctx.closePath();
+    }
+    if (interstate) {
+      // Simplified interstate silhouette: flat top, slight point at bottom.
+      var x = 1.5 * pr;
+      var y = 1.5 * pr;
+      var rw = w - 3 * pr;
+      var rh = h - 3 * pr;
+      ctx.beginPath();
+      ctx.moveTo(x + 2 * pr, y);
+      ctx.lineTo(x + rw - 2 * pr, y);
+      ctx.quadraticCurveTo(x + rw, y, x + rw, y + 3 * pr);
+      ctx.lineTo(x + rw, y + rh - 5 * pr);
+      ctx.lineTo(x + rw / 2, y + rh);
+      ctx.lineTo(x, y + rh - 5 * pr);
+      ctx.lineTo(x, y + 3 * pr);
+      ctx.quadraticCurveTo(x, y, x + 2 * pr, y);
+      ctx.closePath();
+    } else {
+      roundRect(1.5 * pr, 1.5 * pr, w - 3 * pr, h - 3 * pr, r);
+    }
+    ctx.fillStyle = fill;
+    ctx.fill();
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = 1.5 * pr;
+    ctx.stroke();
+    // Thin red cap on interstates (MUTCD cue) without eating the number area.
+    if (interstate) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(2.5 * pr, 2 * pr);
+      ctx.lineTo(w - 2.5 * pr, 2 * pr);
+      ctx.lineTo(w - 2.5 * pr, 5.5 * pr);
+      ctx.lineTo(2.5 * pr, 5.5 * pr);
+      ctx.closePath();
+      ctx.fillStyle = "#dc2626";
+      ctx.fill();
+      ctx.restore();
+    }
+    return ctx.getImageData(0, 0, w, h);
+  }
+
+  function addHighwayShieldImages(map, force) {
+    if (!map) return false;
+    var ok = true;
+    var kinds = [
+      { prefix: "metis-shield-i-", kind: "interstate" },
+      { prefix: "metis-shield-hwy-", kind: "highway" },
+    ];
+    kinds.forEach(function (spec) {
+      for (var n = 1; n <= 5; n++) {
+        var id = spec.prefix + n + "char";
+        if (map.hasImage(id)) {
+          if (!force) continue;
+          try {
+            map.removeImage(id);
+          } catch (_) {}
+        }
+        try {
+          map.addImage(id, rasterHighwayShield(spec.kind, n), { pixelRatio: 2 });
+        } catch (_) {
+          ok = false;
+        }
+      }
+    });
+    return ok;
+  }
+
+  /**
+   * Rasterize pin sprites with canvas. Desktop WebViews often never complete
+   * map.loadImage() for SVG data URLs, which left node layers unregistered.
+   */
+  function rasterPinImageData(key, favorite) {
+    var size = 64;
+    var canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    var ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("no 2d context");
+    var scale = size / 32;
+    ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    var color = PIN_TYPE_COLORS[key] || PIN_TYPE_COLORS.node;
+    ctx.beginPath();
+    ctx.arc(16, 16, 13, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "#f4f4f5";
+    ctx.stroke();
+    if (favorite) {
+      ctx.beginPath();
+      ctx.arc(16, 16, 15.2, 0, Math.PI * 2);
+      ctx.strokeStyle = "#fbbf24";
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+    }
+    ctx.save();
+    ctx.translate(4, 4);
+    drawTypeIcon(ctx, key);
+    ctx.restore();
+    return ctx.getImageData(0, 0, size, size);
+  }
+
+  function isFavoriteProp(props) {
+    return (
       props.favorite === true ||
       props.favorite === "true" ||
       props.favorite === 1 ||
-      props.favorite === "1";
-    return (
-      '<div class="metis-node-pin-wrap' +
-      (favorited ? " is-favorite" : "") +
-      '">' +
-      '<div class="metis-node-pin metis-type-' +
-      escapeHtml(key) +
-      '" style="--pin:' +
-      color +
-      '">' +
-      typeIconSvg(key) +
-      "</div>" +
-      '<div class="metis-node-label">' +
-      '<span class="metis-node-label-name">' +
-      name +
-      "</span>" +
-      '<span class="metis-node-label-type">' +
-      typeLabel +
-      "</span></div></div>"
+      props.favorite === "1"
     );
   }
 
-  function clusterHtml(count) {
-    var tone = count >= 40 ? "hot" : count >= 15 ? "warm" : "cool";
-    return (
-      '<div class="metis-cluster metis-cluster-' +
-      tone +
-      '"><span>' +
-      escapeHtml(count) +
-      "</span></div>"
-    );
+  function enrichNodeFeatures(data) {
+    var out = data || { type: "FeatureCollection", features: [] };
+    var feats = out.features || [];
+    for (var i = 0; i < feats.length; i++) {
+      var f = feats[i];
+      if (!f) continue;
+      var p = Object.assign({}, f.properties || {});
+      var key = String(p.type_key || "node");
+      if (!PIN_TYPE_COLORS[key]) key = "node";
+      p.type_key = key;
+      p.icon = isFavoriteProp(p) ? "pin-" + key + "-fav" : "pin-" + key;
+      f.properties = p;
+    }
+    return out;
   }
 
   /** Keep MapLibre DOM events out of Dioxus (avoids element:null parse errors). */
@@ -515,6 +705,10 @@
       try {
         await this.hydrateOutlineSources(mapId);
       } catch (_) {}
+      // Street-name pills are style images — register before overlays arrive.
+      try {
+        this.ensurePinImages(mapId);
+      } catch (_) {}
       try {
         if (this.regionDraft[mapId]) {
           this.renderRegionDraft(mapId);
@@ -529,40 +723,32 @@
           zoom: map.getZoom(),
         });
       }
+      function setMoving(on) {
+        global.__metisMapMoving = !!on;
+      }
+      setMoving(false);
+      map.on("movestart", function () {
+        setMoving(true);
+      });
+      map.on("zoomstart", function () {
+        setMoving(true);
+      });
       map.on("moveend", function () {
+        setMoving(false);
         publishCamera();
-        // Clusters/pins can be empty until the source finishes indexing — refresh
-        // after pan too when overlays are missing (zoom alone was the old workaround).
-        if (
-          !self.detailOpen[mapId] &&
-          (!self.labels[mapId] || !self.labels[mapId].length) &&
-          self.nodeData[mapId]
-        ) {
-          self.scheduleOverlayRefresh(mapId);
-        }
       });
       map.on("zoomend", function () {
+        setMoving(false);
         publishCamera();
-        if (self._zoomRefreshTimer) clearTimeout(self._zoomRefreshTimer);
-        self._zoomRefreshTimer = setTimeout(function () {
-          if (!self.detailOpen[mapId]) {
-            self.refreshOverlayMarkers(mapId);
-          }
-        }, 120);
-      });
-      map.on("sourcedata", function (e) {
-        if (
-          e &&
-          e.sourceId === "nodes" &&
-          e.isSourceLoaded &&
-          !self.detailOpen[mapId]
-        ) {
-          self.scheduleOverlayRefresh(mapId);
-        }
       });
       map.on("click", function (e) {
         if (e.defaultPrevented) return;
-        var layers = ["node-dots", "clusters"].filter(function (id) {
+        var layers = [
+          "node-pins",
+          "node-labels",
+          "clusters",
+          "cluster-count",
+        ].filter(function (id) {
           return map.getLayer(id);
         });
         var feats = layers.length
@@ -614,6 +800,23 @@
       return true;
     },
 
+    /** Drop WebGL before map.remove — cuts WebKitGTK epoxy assert noise on exit. */
+    loseWebGl: function (map) {
+      if (!map) return;
+      try {
+        var canvas = map.getCanvas && map.getCanvas();
+        if (!canvas || typeof canvas.getContext !== "function") return;
+        ["webgl2", "webgl", "experimental-webgl"].forEach(function (kind) {
+          try {
+            var gl = canvas.getContext(kind);
+            if (!gl) return;
+            var ext = gl.getExtension("WEBGL_lose_context");
+            if (ext && typeof ext.loseContext === "function") ext.loseContext();
+          } catch (_) {}
+        });
+      } catch (_) {}
+    },
+
     destroy: function (mapId) {
       this.teardownCoverageDrag(mapId);
       this.clearRegionDraft(mapId);
@@ -644,6 +847,7 @@
       delete this.detailOpen[mapId];
       if (this.nodeFp) delete this.nodeFp[mapId];
       if (!map) return;
+      this.loseWebGl(map);
       try {
         map.remove();
       } catch (_) {}
@@ -651,6 +855,7 @@
     },
 
     clearLabels: function (mapId) {
+      // Legacy HTML pin markers removed — pins are GL layers now.
       var list = this.labels[mapId] || [];
       list.forEach(function (marker) {
         try {
@@ -658,6 +863,75 @@
         } catch (_) {}
       });
       this.labels[mapId] = [];
+    },
+
+    /** Register pin + label-pill sprites once per style (canvas ImageData). */
+    ensurePinImages: function (mapId, done) {
+      var map = this.maps[mapId];
+      if (!map) {
+        if (done) done(false);
+        return;
+      }
+      // Device-name pills only (point symbols). Street line labels use text-halo —
+      // icon-text-fit on lines leaves empty white boxes where text can't place.
+      var forcePills = !map.__metisPillsBuilt;
+      if (addLabelPillImage(map, "label-pill", null, forcePills)) {
+        map.__metisPillsBuilt = true;
+      }
+      // Bump version when shield geometry changes so remounts pick up new art.
+      var shieldVer = 2;
+      var forceShields =
+        !map.__metisShieldsBuilt || map.__metisShieldsVer !== shieldVer;
+      if (addHighwayShieldImages(map, forceShields)) {
+        map.__metisShieldsBuilt = true;
+        map.__metisShieldsVer = shieldVer;
+      }
+      try {
+        if (map.hasImage("street-label-pill")) map.removeImage("street-label-pill");
+      } catch (_) {}
+      this.stripStreetLabelPills(mapId);
+      if (map.__metisPinsReady) {
+        if (done) done(true);
+        return;
+      }
+      var keys = Object.keys(PIN_TYPE_COLORS);
+      var ok = 0;
+      keys.forEach(function (key) {
+        [false, true].forEach(function (fav) {
+          var id = fav ? "pin-" + key + "-fav" : "pin-" + key;
+          if (map.hasImage(id)) {
+            ok += 1;
+            return;
+          }
+          try {
+            var imgData = rasterPinImageData(key, fav);
+            map.addImage(id, imgData, { pixelRatio: 2 });
+            ok += 1;
+          } catch (_) {}
+        });
+      });
+      map.__metisPinsReady = ok > 0;
+      map.__metisPinsLoading = false;
+      if (done) done(map.__metisPinsReady);
+    },
+
+    /** Drop leftover street icon-text-fit (empty white boxes on line labels). */
+    stripStreetLabelPills: function (mapId) {
+      var map = this.maps[mapId];
+      if (!map || !map.getLayer("road_labels_major")) return;
+      try {
+        // null clears a layout property in MapLibre.
+        map.setLayoutProperty("road_labels_major", "icon-image", null);
+      } catch (_) {}
+      try {
+        map.setLayoutProperty("road_labels_major", "icon-text-fit", "none");
+      } catch (_) {}
+      try {
+        map.setPaintProperty("road_labels_major", "text-color", "#0b1220");
+        map.setPaintProperty("road_labels_major", "text-halo-color", "#ffffff");
+        map.setPaintProperty("road_labels_major", "text-halo-width", 4.5);
+        map.setPaintProperty("road_labels_major", "text-halo-blur", 0.2);
+      } catch (_) {}
     },
 
     showTip: function (mapId, lngLat, props) {
@@ -734,17 +1008,31 @@
       return true;
     },
 
+    NODE_LAYER_IDS: [
+      "clusters",
+      "cluster-count",
+      "node-pins",
+      "node-labels",
+      "node-dots",
+      "cluster-count-hit",
+    ],
+
     ensureNodeLayers: function (mapId, cluster) {
       var map = this.maps[mapId];
       if (!map) return;
+      var self = this;
       var wantCluster = !!cluster;
       var source = map.getSource("nodes");
       if (source && this.clusterEnabled[mapId] !== wantCluster) {
-        ["node-dots", "clusters", "cluster-count-hit"].forEach(function (id) {
+        this.NODE_LAYER_IDS.forEach(function (id) {
           if (map.getLayer(id)) map.removeLayer(id);
         });
         map.removeSource("nodes");
         source = null;
+        delete map["__metisCluster_" + mapId];
+        delete map["__metisClick_" + mapId + "_node-pins"];
+        delete map["__metisClick_" + mapId + "_node-labels"];
+        delete map["__metisClick_" + mapId + "_node-dots"];
       }
       this.clusterEnabled[mapId] = wantCluster;
       if (!source) {
@@ -765,45 +1053,232 @@
               }
         );
       }
-      if (wantCluster && !map.getLayer("clusters")) {
-        // Invisible hit targets only — visible cluster UI is the HTML marker.
-        // Drawing both caused the "bubble inside a bubble" look.
-        map.addLayer({
-          id: "clusters",
-          type: "circle",
-          source: "nodes",
-          filter: ["has", "point_count"],
-          paint: {
-            "circle-radius": [
-              "step",
-              ["get", "point_count"],
-              22,
-              15,
-              28,
-              40,
-              36,
+      function addVisibleLayers() {
+        var unclustered = wantCluster
+          ? ["!", ["has", "point_count"]]
+          : ["all"];
+        if (wantCluster && !map.getLayer("clusters")) {
+          map.addLayer({
+            id: "clusters",
+            type: "circle",
+            source: "nodes",
+            filter: ["has", "point_count"],
+            paint: {
+              "circle-color": [
+                "step",
+                ["get", "point_count"],
+                "#34d399",
+                15,
+                "#fbbf24",
+                40,
+                "#fb7185",
+              ],
+              "circle-radius": [
+                "interpolate",
+                ["linear"],
+                ["zoom"],
+                8,
+                ["step", ["get", "point_count"], 14, 15, 17, 40, 21],
+                12,
+                ["step", ["get", "point_count"], 18, 15, 22, 40, 28],
+                16,
+                ["step", ["get", "point_count"], 26, 15, 32, 40, 40],
+              ],
+              "circle-stroke-width": 2,
+              "circle-stroke-color": "#0b1220",
+              "circle-opacity": 0.95,
+            },
+          });
+        }
+        if (wantCluster && !map.getLayer("cluster-count")) {
+          map.addLayer({
+            id: "cluster-count",
+            type: "symbol",
+            source: "nodes",
+            filter: ["has", "point_count"],
+            layout: {
+              "text-field": ["get", "point_count_abbreviated"],
+              "text-size": [
+                "interpolate",
+                ["linear"],
+                ["zoom"],
+                8,
+                11,
+                16,
+                15,
+              ],
+              "text-font": ["Noto Sans Medium"],
+              "text-allow-overlap": true,
+            },
+            paint: {
+              "text-color": "#0b1220",
+            },
+          });
+        }
+        // Colored circles always paint even if a symbol sprite is missing.
+        if (!map.getLayer("node-dots")) {
+          map.addLayer({
+            id: "node-dots",
+            type: "circle",
+            source: "nodes",
+            filter: unclustered,
+            paint: {
+              "circle-radius": [
+                "interpolate",
+                ["linear"],
+                ["zoom"],
+                8,
+                8,
+                12,
+                12,
+                15,
+                18,
+                18,
+                24,
+              ],
+              "circle-color": [
+                "match",
+                ["get", "type_key"],
+                "hq",
+                PIN_TYPE_COLORS.hq,
+                "chat",
+                PIN_TYPE_COLORS.chat,
+                "repeater",
+                PIN_TYPE_COLORS.repeater,
+                "room",
+                PIN_TYPE_COLORS.room,
+                "sensor",
+                PIN_TYPE_COLORS.sensor,
+                PIN_TYPE_COLORS.node,
+              ],
+              "circle-stroke-width": 2,
+              "circle-stroke-color": "#f4f4f5",
+              "circle-opacity": 0.95,
+            },
+          });
+        }
+        if (!map.getLayer("node-pins")) {
+          map.addLayer({
+            id: "node-pins",
+            type: "symbol",
+            source: "nodes",
+            filter: unclustered,
+            layout: {
+              "icon-image": ["coalesce", ["get", "icon"], "pin-node"],
+              // Grow with zoom so street-level pins are easy to hit/read.
+              "icon-size": [
+                "interpolate",
+                ["linear"],
+                ["zoom"],
+                8,
+                0.75,
+                11,
+                1.0,
+                14,
+                1.4,
+                17,
+                1.85,
+              ],
+              "icon-anchor": "center",
+              "icon-allow-overlap": true,
+              "icon-ignore-placement": true,
+            },
+          });
+        }
+        // Rebuild label layer if it lacks the pill (e.g. created before sprites).
+        if (map.getLayer("node-labels")) {
+          var labelIcon = null;
+          try {
+            labelIcon = map.getLayoutProperty("node-labels", "icon-image");
+          } catch (_) {}
+          if (labelIcon !== "label-pill" || !map.hasImage("label-pill")) {
+            try {
+              map.removeLayer("node-labels");
+            } catch (_) {}
+            delete map["__metisClick_" + mapId + "_node-labels"];
+          }
+        }
+        if (!map.getLayer("node-labels")) {
+          var namedUnclustered = wantCluster
+            ? [
+                "all",
+                ["!", ["has", "point_count"]],
+                ["!=", ["coalesce", ["get", "name"], ""], ""],
+              ]
+            : ["!=", ["coalesce", ["get", "name"], ""], ""];
+          var labelLayout = {
+            "text-field": ["coalesce", ["get", "name"], ""],
+            "text-size": [
+              "interpolate",
+              ["linear"],
+              ["zoom"],
+              10,
+              12,
+              14,
+              14,
+              17,
+              16,
             ],
-            "circle-opacity": 0,
-          },
-        });
+            "text-font": ["Noto Sans Regular"],
+            "text-anchor": "top",
+            "text-offset": [
+              "interpolate",
+              ["linear"],
+              ["zoom"],
+              10,
+              ["literal", [0, 1.55]],
+              14,
+              ["literal", [0, 2.0]],
+              17,
+              ["literal", [0, 2.4]],
+            ],
+            "text-max-width": 10,
+            "text-allow-overlap": false,
+            "text-ignore-placement": false,
+          };
+          var labelPaint = {
+            "text-color": "#f4f4f5",
+          };
+          if (map.hasImage("label-pill")) {
+            labelLayout["icon-image"] = "label-pill";
+            labelLayout["icon-text-fit"] = "both";
+            labelLayout["icon-text-fit-padding"] = [2, 6, 2, 6];
+            labelLayout["icon-anchor"] = "top";
+            labelLayout["icon-allow-overlap"] = false;
+            labelLayout["icon-ignore-placement"] = false;
+            labelLayout["text-optional"] = false;
+            labelPaint["text-halo-width"] = 0;
+          } else {
+            labelLayout["text-optional"] = true;
+            labelPaint["text-halo-color"] = "#0b1220";
+            labelPaint["text-halo-width"] = 1.5;
+          }
+          map.addLayer({
+            id: "node-labels",
+            type: "symbol",
+            source: "nodes",
+            filter: namedUnclustered,
+            minzoom: 10,
+            layout: labelLayout,
+            paint: labelPaint,
+          });
+        }
+        self.bindClusterHandlers(mapId);
+        self.bindNodeClicks(mapId, "node-pins");
+        self.bindNodeClicks(mapId, "node-labels");
+        self.bindNodeClicks(mapId, "node-dots");
+        // Circles are the fallback when sprites fail; hide them under working icons.
+        if (map.getLayer("node-dots")) {
+          map.setLayoutProperty(
+            "node-dots",
+            "visibility",
+            map.__metisPinsReady ? "none" : "visible"
+          );
+        }
       }
-      if (!map.getLayer("node-dots")) {
-        map.addLayer({
-          id: "node-dots",
-          type: "circle",
-          source: "nodes",
-          filter: wantCluster ? ["!", ["has", "point_count"]] : ["all"],
-          paint: {
-            // Invisible hit target — visible pins are HTML icon markers.
-            "circle-radius": 14,
-            "circle-color": "#000000",
-            "circle-opacity": 0,
-            "circle-stroke-width": 0,
-          },
-        });
-      }
-      this.bindClusterHandlers(mapId);
-      this.bindNodeClicks(mapId, "node-dots");
+      // Register sprites first (sync canvas), then layers — never gate on SVG loadImage.
+      this.ensurePinImages(mapId);
+      addVisibleLayers();
     },
 
     bindClusterHandlers: function (mapId) {
@@ -812,11 +1287,14 @@
       var key = "__metisCluster_" + mapId;
       if (map[key]) return;
       map[key] = true;
-      map.on("click", "clusters", function (e) {
+      function onClusterClick(e) {
         e.preventDefault();
-        var features = map.queryRenderedFeatures(e.point, {
-          layers: ["clusters"],
+        var layers = ["clusters", "cluster-count"].filter(function (id) {
+          return map.getLayer(id);
         });
+        var features = layers.length
+          ? map.queryRenderedFeatures(e.point, { layers: layers })
+          : [];
         if (!features.length) return;
         var clusterId = features[0].properties.cluster_id;
         var source = map.getSource("nodes");
@@ -830,12 +1308,17 @@
             duration: 500,
           });
         });
-      });
-      map.on("mouseenter", "clusters", function () {
+      }
+      function pointerOn() {
         map.getCanvas().style.cursor = "pointer";
-      });
-      map.on("mouseleave", "clusters", function () {
+      }
+      function pointerOff() {
         map.getCanvas().style.cursor = "";
+      }
+      ["clusters", "cluster-count"].forEach(function (layerId) {
+        map.on("click", layerId, onClusterClick);
+        map.on("mouseenter", layerId, pointerOn);
+        map.on("mouseleave", layerId, pointerOff);
       });
     },
 
@@ -854,46 +1337,32 @@
       return parts.join("|");
     },
 
-    scheduleOverlayRefresh: function (mapId) {
-      var self = this;
-      var map = this.maps[mapId];
-      if (!map) return;
-      if (this._overlayRefreshTimer) {
-        clearTimeout(this._overlayRefreshTimer);
-      }
-      var run = function () {
-        if (!self.detailOpen[mapId]) {
-          self.refreshOverlayMarkers(mapId);
-        }
-      };
-      // Clustering / tile index is async after setData — idle + retries avoid
-      // empty markers until the user zooms.
-      try {
-        map.triggerRepaint();
-      } catch (_) {}
-      map.once("idle", run);
-      this._overlayRefreshTimer = setTimeout(run, 80);
-      setTimeout(run, 250);
-      setTimeout(run, 700);
-      setTimeout(run, 1500);
-    },
-
     setNodes: function (mapId, data, cluster, forceRebuild) {
       var map = this.maps[mapId];
       if (!map) return false;
-      var fp = this.nodeFingerprint(data, cluster);
-      var same = !forceRebuild && this.nodeFp && this.nodeFp[mapId] === fp;
-      this.nodeData[mapId] = data;
+      var enriched = enrichNodeFeatures(
+        data || { type: "FeatureCollection", features: [] }
+      );
       if (!this.nodeFp) this.nodeFp = {};
-      this.nodeFp[mapId] = fp;
+      var fp = this.nodeFingerprint(enriched, cluster);
+      var same = !forceRebuild && this.nodeFp[mapId] === fp;
+      this.nodeData[mapId] = enriched;
       this.ensureNodeLayers(mapId, cluster);
       var source = map.getSource("nodes");
-      if (source) source.setData(data || { type: "FeatureCollection", features: [] });
-      var missing =
-        !this.labels[mapId] || !this.labels[mapId].length;
-      if (!same || missing) {
-        this.scheduleOverlayRefresh(mapId);
+      if (!source) return false;
+      var empty = false;
+      try {
+        empty =
+          !source._data ||
+          !source._data.features ||
+          !source._data.features.length;
+      } catch (_) {
+        empty = true;
       }
+      if (!same || forceRebuild || empty) {
+        source.setData(enriched);
+      }
+      this.nodeFp[mapId] = fp;
       return true;
     },
 
@@ -1019,6 +1488,11 @@
       this.teardownCoverageDrag(mapId);
       if (self.clusterEnabled) delete self.clusterEnabled[mapId];
       if (this.nodeFp) delete this.nodeFp[mapId];
+      // Style swap clears GL images — re-register pin/pill/shield sprites after load.
+      map.__metisPinsReady = false;
+      map.__metisPinsLoading = false;
+      map.__metisPillsBuilt = false;
+      map.__metisShieldsBuilt = false;
       // Reset click binders so layers can rebind after style.load.
       Object.keys(map).forEach(function (k) {
         if (
@@ -1055,6 +1529,9 @@
         await this.hydrateOutlineSources(mapId);
       } catch (_) {}
       try {
+        this.ensurePinImages(mapId);
+      } catch (_) {}
+      try {
         if (this.regionDraft[mapId]) {
           this.renderRegionDraft(mapId);
           this.bindDraftDrag(mapId);
@@ -1062,105 +1539,6 @@
       } catch (_) {}
       restoreCamera();
       return true;
-    },
-
-    refreshOverlayMarkers: function (mapId) {
-      var map = this.maps[mapId];
-      if (!map || !global.maplibregl) return;
-      this.clearLabels(mapId);
-      var self = this;
-      var clustered = !!this.clusterEnabled[mapId];
-      var seen = {};
-
-      function addMarker(el, coords, onClick, anchor) {
-        el.style.pointerEvents = "auto";
-        el.style.cursor = "pointer";
-        // Capture + stopImmediatePropagation: HTML markers are outside the
-        // Dioxus VDOM; leaking click events logs "invalid type: null, expected usize".
-        wireSealedClick(el, function () {
-          if (onClick) onClick();
-        });
-        // No hover tip popup — it stole pointer events and flickered when
-        // markers were rebuilt. Labels on the pin are enough for hover context.
-        var marker = new global.maplibregl.Marker({
-          element: el,
-          anchor: anchor || "bottom",
-          offset: [0, 0],
-        })
-          .setLngLat(coords)
-          .addTo(map);
-        self.labels[mapId].push(marker);
-      }
-
-      if (clustered && map.getSource("nodes")) {
-        var features = map.querySourceFeatures("nodes");
-        if (features && features.length) {
-          features.forEach(function (feature) {
-            var props = propsFromFeature(feature);
-            var coords =
-              feature && feature.geometry && feature.geometry.coordinates;
-            if (!coords || coords.length < 2) return;
-            if (props.cluster || props.point_count) {
-              var cid = "c:" + props.cluster_id;
-              if (seen[cid]) return;
-              seen[cid] = true;
-              var el = document.createElement("div");
-              el.className = "metis-cluster-marker";
-              el.innerHTML = clusterHtml(props.point_count || 0);
-              addMarker(
-                el,
-                coords,
-                function () {
-                  var source = map.getSource("nodes");
-                  if (
-                    !source ||
-                    typeof source.getClusterExpansionZoom !== "function"
-                  ) {
-                    return;
-                  }
-                  source
-                    .getClusterExpansionZoom(props.cluster_id)
-                    .then(function (zoom) {
-                      map.easeTo({ center: coords, zoom: zoom, duration: 500 });
-                    });
-                },
-                "center"
-              );
-              return;
-            }
-            var key =
-              props.pubkey || props.name + ":" + coords[0] + "," + coords[1];
-            if (seen[key]) return;
-            seen[key] = true;
-            var label = document.createElement("div");
-            label.className = "metis-node-marker";
-            label.innerHTML = pinHtml(props);
-            addMarker(label, coords, function () {
-              self.showDetail(mapId, coords, props);
-            });
-          });
-          return;
-        }
-        // Cluster index not ready yet — fall through to raw points so pins
-        // appear without requiring a manual zoom.
-      }
-
-      var collection = this.nodeData[mapId] || { features: [] };
-      var list = collection.features || [];
-      var zoom = map.getZoom();
-      var maxLabels = zoom < 8 ? 48 : zoom < 11 ? 100 : 200;
-      list.slice(0, maxLabels).forEach(function (feature) {
-        var coords =
-          feature && feature.geometry && feature.geometry.coordinates;
-        if (!coords || coords.length < 2) return;
-        var props = propsFromFeature(feature);
-        var el = document.createElement("div");
-        el.className = "metis-node-marker";
-        el.innerHTML = pinHtml(props);
-        addMarker(el, [coords[0], coords[1]], function () {
-          self.showDetail(mapId, coords, props);
-        });
-      });
     },
 
     setGeoJson: function (mapId, sourceId, data, layerSpecs) {

@@ -8,12 +8,14 @@ use crate::contact_qr::{contact_add_uri, enqueue_contact_qr, qr_public_url};
 use crate::db::unix_now;
 use crate::path::{build_line, MapLine};
 use crate::pmtiles_path;
+use crate::radio::SyncPhase;
 
 use super::icons::{Icon, IconName};
 use super::map_host::{
     dark_basemap_style, load_saved_basemap, load_saved_camera, map_bind_node_clicks, map_destroy,
     map_exists, map_fit_bounds, map_fly_to, map_get_camera, map_init, map_set_geojson,
-    map_clear_region_draft, map_place_region_draft, map_set_nodes, map_set_style,
+    map_camera_from_global, map_clear_region_draft, map_is_moving,
+    map_place_region_draft, map_region_draft_seq, map_set_nodes, map_set_style,
     map_set_visibility, map_snapshot_region_draft, map_take_favorite_toggle,
     map_take_selection, region_draft_from_placement, save_basemap, save_camera,
     BasemapKind, MapCamera, RegionDraftConfirm, MAP_CONTAINER_ID,
@@ -753,7 +755,9 @@ pub fn MapPage() -> Element {
             map_set_geojson("dashed-routes", &dashed, &dashed_layers()).await;
             map_set_geojson("snr-points", &snr, &snr_layers()).await;
             map_set_geojson("noise-points", &noise, &noise_layers()).await;
-            map_bind_node_clicks("node-dots").await;
+            // GL pin/label layers (HTML markers removed).
+            map_bind_node_clicks("node-pins").await;
+            map_bind_node_clicks("node-labels").await;
             if do_fit {
                 if let Some((w, s, e, n)) = bounds {
                     map_fit_bounds(w, s, e, n).await;
@@ -782,6 +786,7 @@ pub fn MapPage() -> Element {
     use_effect(move || {
         spawn(async move {
             let mut cam_ticks: u32 = 0;
+            let mut last_draft_seq: u64 = 0;
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                 if let Some(key) = map_take_favorite_toggle().await {
@@ -812,15 +817,18 @@ pub fn MapPage() -> Element {
                         }
                     }
                 }
-                // Camera persistence: every ~2s, not every poll (was locking the webview).
+                // Camera from moveend global — skip getCenter while dragging.
                 cam_ticks = cam_ticks.wrapping_add(1);
-                if cam_ticks % 14 == 0 {
-                    if let Some(cam) = map_get_camera().await {
+                if cam_ticks % 14 == 0 && !map_is_moving().await {
+                    if let Some(cam) = map_camera_from_global().await {
                         save_camera(cam);
                     }
-                    // After a drag ends, JS bumps __metisRegionDraftSeq. Sync Rust
-                    // then (not every frame) so Confirm never falls back to Place coords.
-                    if draft_placed() {
+                }
+                // Region draft: only when placing and JS seq advanced (mouseup).
+                if draft_placed() {
+                    let seq = map_region_draft_seq().await;
+                    if seq != last_draft_seq {
+                        last_draft_seq = seq;
                         if let Some(live) = map_snapshot_region_draft().await {
                             live_draft.set(Some(live));
                         }
@@ -833,7 +841,11 @@ pub fn MapPage() -> Element {
     use_effect(move || {
         spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                // Idle overlay refresh — skip mid-pan so eval does not fight drag.
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if map_is_moving().await {
+                    continue;
+                }
                 tick.with_mut(|n| *n = n.wrapping_add(1));
             }
         });
@@ -851,6 +863,16 @@ pub fn MapPage() -> Element {
             save_basemap(kind);
             style_key.with_mut(|n| *n = n.wrapping_add(1));
         });
+    };
+
+    // Route/SNR/noise capture needs a live companion; Fit/cluster still work offline.
+    let radio = state().radio.snapshot();
+    let radio_linked = radio.state == "connected"
+        && matches!(radio.sync_phase, SyncPhase::Ready | SyncPhase::Idle);
+    let rf_title = if radio_linked {
+        "Toggle mesh RF overlays from recent traffic / samples"
+    } else {
+        "Connect a MeshCore companion to capture routes, SNR, and noise"
     };
 
     rsx! {
@@ -922,20 +944,64 @@ pub fn MapPage() -> Element {
                     input { r#type: "checkbox", checked: cluster(), oninput: move |_| cluster.set(!cluster()) }
                     "Cluster markers"
                 }
-                label { class: "map-toggle",
-                    input { r#type: "checkbox", checked: show_solid(), oninput: move |_| show_solid.set(!show_solid()) }
+                label {
+                    class: if radio_linked { "map-toggle" } else { "map-toggle map-toggle-disabled" },
+                    title: "{rf_title}",
+                    input {
+                        r#type: "checkbox",
+                        checked: show_solid(),
+                        disabled: !radio_linked,
+                        oninput: move |_| {
+                            if radio_linked {
+                                show_solid.set(!show_solid());
+                            }
+                        },
+                    }
                     "Solid routes"
                 }
-                label { class: "map-toggle",
-                    input { r#type: "checkbox", checked: show_dashed(), oninput: move |_| show_dashed.set(!show_dashed()) }
+                label {
+                    class: if radio_linked { "map-toggle" } else { "map-toggle map-toggle-disabled" },
+                    title: "{rf_title}",
+                    input {
+                        r#type: "checkbox",
+                        checked: show_dashed(),
+                        disabled: !radio_linked,
+                        oninput: move |_| {
+                            if radio_linked {
+                                show_dashed.set(!show_dashed());
+                            }
+                        },
+                    }
                     "Dashed routes"
                 }
-                label { class: "map-toggle",
-                    input { r#type: "checkbox", checked: show_snr(), oninput: move |_| show_snr.set(!show_snr()) }
+                label {
+                    class: if radio_linked { "map-toggle" } else { "map-toggle map-toggle-disabled" },
+                    title: "{rf_title}",
+                    input {
+                        r#type: "checkbox",
+                        checked: show_snr(),
+                        disabled: !radio_linked,
+                        oninput: move |_| {
+                            if radio_linked {
+                                show_snr.set(!show_snr());
+                            }
+                        },
+                    }
                     "SNR"
                 }
-                label { class: "map-toggle",
-                    input { r#type: "checkbox", checked: show_noise(), oninput: move |_| show_noise.set(!show_noise()) }
+                label {
+                    class: if radio_linked { "map-toggle" } else { "map-toggle map-toggle-disabled" },
+                    title: "{rf_title}",
+                    input {
+                        r#type: "checkbox",
+                        checked: show_noise(),
+                        disabled: !radio_linked,
+                        oninput: move |_| {
+                            if radio_linked {
+                                show_noise.set(!show_noise());
+                            }
+                        },
+                    }
                     "Noise"
                 }
                 Button {
@@ -954,11 +1020,23 @@ pub fn MapPage() -> Element {
                     Icon { name: IconName::Locate, size: 14 }
                     "Fit"
                 }
-                Button {
-                    kind: ButtonKind::Ghost,
-                    onclick: move |_| state().radio.probe_noise_samples(),
-                    Icon { name: IconName::Signal, size: 14 }
-                    "Probe noise"
+                span {
+                    title: if radio_linked {
+                        "Poll GPS contacts for noise / RSSI / SNR samples"
+                    } else {
+                        "Connect a MeshCore companion to probe noise"
+                    },
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        disabled: !radio_linked,
+                        onclick: move |_| {
+                            if radio_linked {
+                                state().radio.probe_noise_samples();
+                            }
+                        },
+                        Icon { name: IconName::Signal, size: 14 }
+                        "Probe noise"
+                    }
                 }
             }
             div { class: "map-stage",

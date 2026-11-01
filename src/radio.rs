@@ -1046,6 +1046,21 @@ fn parse_pubkey_prefix(hex_key: &str) -> Result<[u8; 6], String> {
     Ok(prefix)
 }
 
+/// Full 32-byte identity key (required for binary status / noise probes).
+fn parse_pubkey_full(hex_key: &str) -> Result<[u8; 32], String> {
+    let cleaned: String = hex_key
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .collect();
+    if cleaned.len() < 64 {
+        return Err("Contact key must be 64 hex characters (32 bytes).".into());
+    }
+    let bytes = hex::decode(&cleaned[..64]).map_err(|err| err.to_string())?;
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&bytes);
+    Ok(key)
+}
+
 fn cli_correlation_tag() -> String {
     // Firmware / mesh-client use two [a-z0-9] chars so replies can be matched.
     const ALPH: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
@@ -1973,12 +1988,16 @@ async fn run_session(
                         let commands = meshcore.commands().lock().await;
                         let mut ok = 0usize;
                         for node in contacts {
-                            let prefix = match parse_pubkey_prefix(&node.pubkey) {
-                                Ok(p) => p,
-                                Err(_) => continue,
+                            // Status requests need the full 32-byte key (not a 6-byte prefix).
+                            let key = match parse_pubkey_full(&node.pubkey) {
+                                Ok(k) => k,
+                                Err(err) => {
+                                    hq_log!(warn, "noise probe {}: {err}", node.name);
+                                    continue;
+                                }
                             };
                             match commands
-                                .request_status(Destination::Bytes(prefix.to_vec()))
+                                .request_status(Destination::Bytes(key.to_vec()))
                                 .await
                             {
                                 Ok(info) => {
@@ -2978,6 +2997,16 @@ mod tests {
         let (name, body) = channel_sender_and_body("Foo 🤷🏡: @[RCZ001] 👍");
         assert_eq!(name.as_deref(), Some("Foo 🤷🏡"));
         assert_eq!(body, "@[RCZ001] 👍");
+    }
+
+    #[test]
+    fn status_probe_needs_full_32_byte_key_not_prefix() {
+        let hex64 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let full = parse_pubkey_full(hex64).expect("full key");
+        assert_eq!(full.len(), 32);
+        assert!(parse_pubkey_full(&hex64[..12]).is_err());
+        let prefix = parse_pubkey_prefix(hex64).expect("prefix");
+        assert_eq!(prefix.len(), 6);
     }
 
     #[test]

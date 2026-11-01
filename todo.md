@@ -57,9 +57,9 @@ Cookbook: [agessaman/meshcore-bot](https://github.com/agessaman/meshcore-bot/) �
 
 HQ durability and sharing. One-off contact QR already exists (`meshcore://contact/add`); this phase is bulk + disaster recovery.
 
-- [ ] **E1** Backup / restore: encrypted archive (passphrase) of SQLite + channel secrets from keyring/`data/`; restore with confirm + audit entry; never leave secrets in cleartext zip
-- [ ] **E2** Contact bulk export: JSON (or MeshCore-compatible list) of pubkey, name, type, optional last lat/lon — no secrets / private keys
-- [ ] **E3** Contact bulk import into HQ DB: merge by pubkey; do **not** auto-push onto the radio contact table; “add to radio” stays deliberate
+- [x] **E1** Backup / restore: encrypted archive (passphrase) of SQLite + channel secrets from keyring/`data/`; restore with confirm + audit entry; never leave secrets in cleartext zip
+- [x] **E2** Contact bulk export: JSON (or MeshCore-compatible list) of pubkey, name, type, optional last lat/lon — no secrets / private keys
+- [x] **E3** Contact bulk import into HQ DB: merge by pubkey; do **not** auto-push onto the radio contact table; “add to radio” stays deliberate
 - [ ] **E4** (optional) Map uploader → [map.meshcore.dev](https://map.meshcore.dev) ([bot docs](https://github.com/agessaman/meshcore-bot/blob/main/docs/map-uploader.md)): default **off**; infra ADVERTs with GPS only (repeaters/rooms/sensors); skip CHAT/companions, Tracker trails, site pins; rate-limit re-uploads; private-key signing operator-gated
 
 ## Phase F — USB + multi-radio pool
@@ -88,7 +88,8 @@ Stack already says BLE now, USB on the same radio pool later. Cookbook USB/seria
 4. C  
 5. D1 → D3  
 6. D4 · D1c (local MQTT station vs Open-Meteo)  
-7. E1 → E3 (backup first), then E4 if wanted  
+7. F1 → F3 (USB + multi-radio; primary companion owns bot)  
+8. E1 → E3 (backup first), then E4 / F4–F5 polish  
 
 ## Success checks
 
@@ -98,5 +99,6 @@ Stack already says BLE now, USB on the same radio pool later. Cookbook USB/seria
 - [x] First-seen coords: warp-in once (not every refresh)
 - [x] Weather/quake: compact, sourced, enrolled-only, audited
 - [ ] MQTT station fresh → mesh WX uses it; stale/down → Open-Meteo fallback
-- [ ] Backup restores roster + secrets on a fresh machine; import does not flood radio contacts
+- [ ] USB companion + BLE/USB second radio both live under one HQ; bot TX from primary only
+- [x] Backup restores roster + secrets on a fresh machine; import does not flood radio contacts
 - [ ] Map uploader (if on): only infra GPS adverts; companions/tracks stay local

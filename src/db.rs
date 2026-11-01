@@ -260,6 +260,255 @@ impl Db {
         self.conn.lock().unwrap_or_else(|err| err.into_inner())
     }
 
+    /// Private channel names (secret inventory for backup), including inactive.
+    pub fn private_channel_names(&self) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT name FROM channels
+             WHERE lower(COALESCE(visibility, 'private')) != 'public'
+             ORDER BY name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::from)
+    }
+
+    /// Online SQLite backup into a byte snapshot (WAL-safe).
+    pub fn sqlite_snapshot_bytes(&self) -> Result<Vec<u8>> {
+        use rusqlite::backup::Backup;
+        use std::time::Duration;
+
+        let path = std::env::temp_dir().join(format!(
+            "metis-snap-{}-{}.db",
+            std::process::id(),
+            unix_now()
+        ));
+        {
+            let src = self.lock();
+            let mut dst = Connection::open(&path)?;
+            {
+                let backup = Backup::new(&src, &mut dst)?;
+                backup
+                    .run_to_completion(64, Duration::from_millis(1), None)
+                    .map_err(|e| Error::Msg(e.to_string()))?;
+            }
+        }
+        let bytes = std::fs::read(&path).map_err(|e| Error::Msg(e.to_string()))?;
+        let _ = std::fs::remove_file(&path);
+        Ok(bytes)
+    }
+
+    /// Replace this connection's database contents from a snapshot.
+    pub fn restore_sqlite_bytes(&self, bytes: &[u8]) -> Result<()> {
+        use rusqlite::backup::Backup;
+        use std::time::Duration;
+
+        let path = std::env::temp_dir().join(format!(
+            "metis-restore-{}-{}.db",
+            std::process::id(),
+            unix_now()
+        ));
+        std::fs::write(&path, bytes).map_err(|e| Error::Msg(e.to_string()))?;
+        {
+            let src = Connection::open(&path)?;
+            let mut dst = self.lock();
+            {
+                let backup = Backup::new(&src, &mut dst)?;
+                backup
+                    .run_to_completion(64, Duration::from_millis(1), None)
+                    .map_err(|e| Error::Msg(e.to_string()))?;
+            }
+            let _ = dst.pragma_update(None, "journal_mode", "WAL");
+        }
+        let _ = std::fs::remove_file(&path);
+        // Re-apply additive migrations in case the snapshot is from an older build.
+        {
+            let conn = self.lock();
+            // from_conn migrations are not re-run; open a side connection on the
+            // same in-memory DB is impossible — re-run the ALTER/CREATE IF NOT EXISTS
+            // batch against the live connection.
+            drop(conn);
+        }
+        Self::apply_migrations(&self.lock())?;
+        Ok(())
+    }
+
+    fn apply_migrations(conn: &Connection) -> Result<()> {
+        let _ = conn.execute(
+            "ALTER TABLE radios ADD COLUMN last_connected INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE channels ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE channels ADD COLUMN role TEXT NOT NULL DEFAULT 'general'",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE channels ADD COLUMN active INTEGER NOT NULL DEFAULT 1",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE channels ADD COLUMN created_at INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE channels ADD COLUMN message_keep TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE nodes ADD COLUMN qr_file TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE nodes ADD COLUMN qr_uri TEXT",
+            [],
+        );
+        let _ = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS rf_samples (
+                id INTEGER PRIMARY KEY,
+                pubkey TEXT NOT NULL,
+                noise_floor INTEGER NOT NULL,
+                last_rssi INTEGER NOT NULL,
+                snr REAL NOT NULL DEFAULT 0,
+                at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS rf_samples_time ON rf_samples(at);
+            CREATE TABLE IF NOT EXISTS tracked_nodes (
+                pubkey TEXT PRIMARY KEY,
+                label TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                added_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS service_events (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                body TEXT NOT NULL,
+                detail TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at INTEGER NOT NULL,
+                decided_at INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS bot_handled (
+                id TEXT PRIMARY KEY,
+                at INTEGER NOT NULL
+            );",
+        );
+        Ok(())
+    }
+
+    /// Counts inside a SQLite snapshot (for restore preview).
+    pub fn count_snapshot(bytes: &[u8]) -> Result<(i64, i64, i64)> {
+        let path = std::env::temp_dir().join(format!(
+            "metis-count-{}-{}.db",
+            std::process::id(),
+            unix_now()
+        ));
+        std::fs::write(&path, bytes).map_err(|e| Error::Msg(e.to_string()))?;
+        let conn = Connection::open(&path)?;
+        let nodes: i64 = conn
+            .query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))
+            .unwrap_or(0);
+        let messages: i64 = conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap_or(0);
+        let channels: i64 = conn
+            .query_row("SELECT COUNT(*) FROM channels", [], |r| r.get(0))
+            .unwrap_or(0);
+        let _ = std::fs::remove_file(&path);
+        Ok((nodes, messages, channels))
+    }
+
+    /// Merge a roster contact from bulk import. Never pushes to the radio.
+    /// Returns `"new"`, `"updated"`, or `"skipped"`.
+    pub fn import_roster_contact(
+        &self,
+        pubkey: &str,
+        name: &str,
+        contact_type: u8,
+        lat: Option<f64>,
+        lon: Option<f64>,
+        enrollment: Enrollment,
+        last_heard: Option<i64>,
+    ) -> Result<&'static str> {
+        let key = pubkey.trim().to_ascii_lowercase();
+        if key.len() != 64 || !key.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok("skipped");
+        }
+        let ty = match contact_type {
+            1..=4 => contact_type,
+            _ => 1,
+        };
+        let (lat, lon) = match (lat, lon) {
+            (Some(la), Some(lo)) if la.abs() > 0.000_001 || lo.abs() > 0.000_001 => {
+                (Some(la), Some(lo))
+            }
+            _ => (None, None),
+        };
+        let prefix: String = key.chars().take(12).collect();
+        let conn = self.lock();
+        let existing: Option<(String, Option<f64>, Option<f64>)> = conn
+            .query_row(
+                "SELECT enrollment, lat, lon FROM nodes WHERE pubkey = ?1",
+                params![key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let is_new = existing.is_none();
+        let current = existing
+            .as_ref()
+            .map(|(e, _, _)| Enrollment::parse(e))
+            .unwrap_or(Enrollment::Heard);
+        // Never invent HQ from import; never demote HQ.
+        let merged = if current == Enrollment::Hq {
+            Enrollment::Hq
+        } else if enrollment == Enrollment::Hq {
+            current
+        } else {
+            merge_enrollment_rank(current, enrollment)
+        };
+        let (store_lat, store_lon) = match (lat, lon) {
+            (Some(la), Some(lo)) => (Some(la), Some(lo)),
+            _ => existing
+                .as_ref()
+                .map(|(_, a, b)| (*a, *b))
+                .unwrap_or((None, None)),
+        };
+        let heard = last_heard.unwrap_or_else(unix_now);
+        let label = if name.trim().is_empty() {
+            prefix.clone()
+        } else {
+            name.trim().chars().take(32).collect()
+        };
+        conn.execute(
+            "INSERT INTO nodes (
+                pubkey, name, contact_type, flags, path_len, hop_bytes, last_advert,
+                lat, lon, lastmod, enrollment, prefix, last_heard, raw_json
+             ) VALUES (?1, ?2, ?3, 0, -1, x'', NULL, ?4, ?5, ?6, ?7, ?8, ?6, '{}')
+             ON CONFLICT(pubkey) DO UPDATE SET
+                name = excluded.name,
+                contact_type = excluded.contact_type,
+                lat = COALESCE(excluded.lat, nodes.lat),
+                lon = COALESCE(excluded.lon, nodes.lon),
+                enrollment = excluded.enrollment,
+                last_heard = MAX(COALESCE(nodes.last_heard, 0), excluded.last_heard),
+                prefix = excluded.prefix",
+            params![
+                key,
+                label,
+                ty,
+                store_lat,
+                store_lon,
+                heard,
+                merged.as_str(),
+                prefix
+            ],
+        )?;
+        Ok(if is_new { "new" } else { "updated" })
+    }
+
     pub fn setting(&self, key: &str) -> Result<Option<String>> {
         let conn = self.lock();
         let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
@@ -396,6 +645,18 @@ impl Db {
         }
         if self.setting("svc_emerg_state")?.is_none() {
             self.set_setting("svc_emerg_state", "CA")?;
+        }
+        if self.setting("backup_schedule")?.is_none() {
+            self.set_setting("backup_schedule", "off")?;
+        }
+        if self.setting("backup_last_at")?.is_none() {
+            self.set_setting("backup_last_at", "0")?;
+        }
+        if self.setting("mesh_regions")?.is_none() {
+            self.set_setting("mesh_regions", "[]")?;
+        }
+        if self.setting("mesh_region_active")?.is_none() {
+            self.set_setting("mesh_region_active", "")?;
         }
         if let Some(name) = self.setting("radio_name")? {
             if !name.trim().is_empty() && !self.is_saved_radio(&name)? {
@@ -2412,6 +2673,23 @@ pub fn unix_now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
+}
+
+pub fn merge_enrollment_rank(current: Enrollment, incoming: Enrollment) -> Enrollment {
+    fn rank(e: Enrollment) -> u8 {
+        match e {
+            Enrollment::Hq => 4,
+            Enrollment::Enrolled => 3,
+            Enrollment::Pending => 2,
+            Enrollment::Heard => 1,
+            Enrollment::Denied => 0,
+        }
+    }
+    if rank(incoming) > rank(current) {
+        incoming
+    } else {
+        current
+    }
 }
 
 pub fn coords_from_micro(lat_micro: i32, lon_micro: i32) -> (Option<f64>, Option<f64>) {

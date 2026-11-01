@@ -318,6 +318,13 @@ pub fn App() -> Element {
                         }
                     }
                 }
+                if radio.sync_phase.is_discover() {
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        onclick: move |_| state().radio.cancel_mesh_scan(),
+                        "Stop"
+                    }
+                }
                 if let Some(pct) = radio.battery_pct {
                     span { class: "shrink-0 text-foreground", "{pct}%" }
                 }
@@ -3091,6 +3098,18 @@ enum DeviceTab {
     Advanced,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HqTab {
+    /// Pair / reconnect companions.
+    Connect,
+    /// Date/time, secrets label, message keep / purge.
+    Preferences,
+    /// Weather, NWS, quake, Amber toggles.
+    Services,
+    /// Backup, contacts I/O, offline map packs.
+    Data,
+}
+
 fn custom_var_label(key: &str) -> String {
     let lower = key.to_ascii_lowercase();
     if lower.contains("gps") {
@@ -3331,6 +3350,30 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
     let mut regions_tick = use_signal(|| 0u32);
     let mut confirm_purge = use_signal(|| false);
     let mut purge_note = use_signal(String::new);
+    let mut backup_pass = use_signal(String::new);
+    let mut backup_pass2 = use_signal(String::new);
+    let mut backup_note = use_signal(String::new);
+    let mut backups_tick = use_signal(|| 0u32);
+    let mut download_backups_open = use_signal(|| false);
+    let mut backup_schedule = use_signal(|| {
+        state()
+            .db
+            .setting("backup_schedule")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "off".into())
+    });
+    // Last schedule value successfully written to the DB (dropdown can differ until Save).
+    let mut backup_schedule_saved = use_signal(|| backup_schedule());
+    let mut restore_path = use_signal(String::new);
+    let mut restore_pass = use_signal(String::new);
+    let mut restore_preview = use_signal(|| None::<(String, String, crate::backup::BackupPreview)>);
+    let mut contacts_note = use_signal(String::new);
+    let mut exports_tick = use_signal(|| 0u32);
+    let mut download_exports_open = use_signal(|| false);
+    let mut contacts_import_path = use_signal(String::new);
+    let mut confirm_contacts_import = use_signal(|| false);
+    let mut contacts_import_preview = use_signal(String::new);
     let mut device_query = use_signal(String::new);
     let mut lat_draft = use_signal(String::new);
     let mut lon_draft = use_signal(String::new);
@@ -3340,10 +3383,19 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
     let mut sf_draft = use_signal(String::new);
     let mut cr_draft = use_signal(String::new);
     let mut repeat_draft = use_signal(|| false);
-    let mut scope_draft = use_signal(String::new);
+    let mut region_select = use_signal(|| {
+        crate::mesh_regions::load_active_region(&state().db).unwrap_or_default()
+    });
+    let mut region_manual = use_signal(String::new);
+    let mut regions_list_tick = use_signal(|| 0u32);
+    let mut region_scan_busy = use_signal(|| false);
+    let mut region_note = use_signal(String::new);
+    let mut node_discover_busy = use_signal(|| false);
+    let mut node_discover_note = use_signal(String::new);
     let mut preset_open = use_signal(|| false);
     let mut preset_query = use_signal(String::new);
     let mut settings_tab = use_signal(|| SettingsTab::Hq);
+    let mut hq_tab = use_signal(|| HqTab::Connect);
     let mut device_tab = use_signal(|| DeviceTab::Identity);
     let mut var_drafts = use_signal(std::collections::BTreeMap::<String, String>::new);
     let mut reboot_armed = use_signal(|| false);
@@ -3594,6 +3646,34 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                 }
             }
             if settings_tab() == SettingsTab::Hq {
+            div { class: "settings-subtabs",
+                button {
+                    class: if hq_tab() == HqTab::Connect { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
+                    onclick: move |_| hq_tab.set(HqTab::Connect),
+                    Icon { name: IconName::Bluetooth, size: 14 }
+                    "Connect"
+                }
+                button {
+                    class: if hq_tab() == HqTab::Preferences { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
+                    onclick: move |_| hq_tab.set(HqTab::Preferences),
+                    Icon { name: IconName::Settings, size: 14 }
+                    "Preferences"
+                }
+                button {
+                    class: if hq_tab() == HqTab::Services { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
+                    onclick: move |_| hq_tab.set(HqTab::Services),
+                    Icon { name: IconName::Signal, size: 14 }
+                    "Services"
+                }
+                button {
+                    class: if hq_tab() == HqTab::Data { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
+                    onclick: move |_| hq_tab.set(HqTab::Data),
+                    Icon { name: IconName::Key, size: 14 }
+                    "Data"
+                }
+            }
+            div { class: "hq-settings-panel",
+            if hq_tab() == HqTab::Connect {
             Card { title: "Saved companions", icon: Some(IconName::Radio),
                 p { class: "mb-3 text-sm text-muted-foreground",
                     "Radios you have already paired stay here. Connect reconnects without asking for the PIN again."
@@ -3730,6 +3810,9 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                     }
                 }
             }
+            } // end HqTab::Connect
+
+            if hq_tab() == HqTab::Preferences {
             Card { title: "Date & time", icon: Some(IconName::Clock),
                 p { class: "mb-3 text-sm text-muted-foreground",
                     "Timestamps use this computer’s local timezone. Preview: {time_preview}"
@@ -3804,6 +3887,9 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                     }
                 }
             }
+            } // end HqTab::Preferences (date/time)
+
+            if hq_tab() == HqTab::Services {
             Card { title: "Info services", icon: Some(IconName::Radio),
                 p { class: "mb-3 text-sm text-muted-foreground",
                     "Bot home is the private METIS-INFO channel (enrolled secret only). Send #weather [zip], #quake, #amber, or #help there. Add + for detail (#weather+ / #amber+) — multi-frame replies. Quake/NWS polls stay silent when nothing new is found. Alerts are labeled with source and time — not an official agency feed."
@@ -4070,6 +4156,9 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                     }
                 }
             }
+            } // end HqTab::Services
+
+            if hq_tab() == HqTab::Preferences {
             Card { title: "Channel secret", icon: Some(IconName::Key),
                 p { class: "text-sm text-muted-foreground",
                     "Storage: {secret_label}. The secret is sent only after approval, and the message list shows [secret sent]. Revoke on the roster rotates it."
@@ -4123,6 +4212,9 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                     p { class: "mt-2 text-sm text-muted-foreground", "{purge_note}" }
                 }
             }
+            } // end HqTab::Preferences (secret + history)
+
+            if hq_tab() == HqTab::Data {
             {
                 let _ = regions_tick();
                 let regions = crate::map_tiles::list_installed_regions(&state().db);
@@ -4220,6 +4312,500 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                     }
                 }
             }
+
+            Card { title: "Backup & restore", icon: Some(IconName::Key),
+                p { class: "mb-3 text-sm text-muted-foreground",
+                    "Encrypted .metisbak archive (passphrase required). Includes the database and private channel secrets. Restore replaces this HQ’s state."
+                }
+                div { class: "mb-3 grid gap-2 sm:grid-cols-2",
+                    div {
+                        label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "Passphrase" }
+                        TextInput {
+                            value: backup_pass(),
+                            placeholder: "Passphrase",
+                            kind: "password".to_string(),
+                            oninput: move |event: FormEvent| backup_pass.set(event.value()),
+                        }
+                    }
+                    div {
+                        label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "Confirm" }
+                        TextInput {
+                            value: backup_pass2(),
+                            placeholder: "Confirm passphrase",
+                            kind: "password".to_string(),
+                            oninput: move |event: FormEvent| backup_pass2.set(event.value()),
+                        }
+                    }
+                }
+                {
+                    let a = backup_pass();
+                    let b = backup_pass2();
+                    let pass_ok = !a.trim().is_empty() && a == b;
+                    let pass_mismatch = !a.is_empty() && !b.is_empty() && a != b;
+                    rsx! {
+                        if pass_mismatch {
+                            p { class: "mb-2 text-sm text-amber-200", "Passphrases do not match." }
+                        } else if a.trim().is_empty() {
+                            p { class: "mb-2 text-sm text-muted-foreground", "Enter a passphrase to create a backup or enable a schedule." }
+                        }
+                        div { class: "mb-3 flex flex-wrap gap-2",
+                            Button {
+                                kind: ButtonKind::Primary,
+                                disabled: !pass_ok,
+                                onclick: move |_| {
+                                    let a = backup_pass();
+                                    let b = backup_pass2();
+                                    if a.trim().is_empty() {
+                                        let msg = "Passphrase required to create a backup.";
+                                        backup_note.set(msg.into());
+                                        crate::toast::push(crate::toast::ToastKind::Error, msg);
+                                        return;
+                                    }
+                                    if a != b {
+                                        let msg = "Passphrases do not match.";
+                                        backup_note.set(msg.into());
+                                        crate::toast::push(crate::toast::ToastKind::Error, msg);
+                                        return;
+                                    }
+                                    let path = crate::backup::default_backup_path(&crate::data_dir());
+                                    match crate::backup::write_backup_file(
+                                        &state().db,
+                                        &state().secrets,
+                                        a.trim(),
+                                        &path,
+                                    ) {
+                                        Ok(saved) => {
+                                            let _ = state().db.audit(
+                                                "backup",
+                                                "",
+                                                &saved.display().to_string(),
+                                            );
+                                            backup_note.set(format!("Saved {}", saved.display()));
+                                            status_note(format!("Backup saved to {}", saved.display()));
+                                            restore_path.set(saved.display().to_string());
+                                            backups_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                            backup_pass.set(String::new());
+                                            backup_pass2.set(String::new());
+                                        }
+                                        Err(err) => {
+                                            backup_note.set(err.to_string());
+                                            crate::toast::push(crate::toast::ToastKind::Error, err.to_string());
+                                        }
+                                    }
+                                },
+                                "Create backup"
+                            }
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| {
+                                    backups_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                    download_backups_open.set(true);
+                                },
+                                Icon { name: IconName::Copy, size: 14 }
+                                "Download / manage…"
+                            }
+                        }
+                        div { class: "mb-4 rounded-md border border-border bg-background/50 p-3",
+                            label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "Schedule" }
+                            p { class: "mb-2 text-xs text-muted-foreground",
+                                "Automatic backups need a passphrase saved under data/ (0600). Changing the dropdown alone does nothing — enter matching passphrases above, then Save schedule."
+                            }
+                            p { class: "mb-2 text-xs text-muted-foreground",
+                                "Currently saved: {backup_schedule_saved()}"
+                            }
+                            if backup_schedule() != backup_schedule_saved() {
+                                p { class: "mb-2 text-xs text-amber-200",
+                                    "Draft change not saved yet."
+                                }
+                            }
+                            div { class: "mb-2",
+                                SelectInput {
+                                    id: "backup-schedule".to_string(),
+                                    value: backup_schedule(),
+                                    onchange: move |event: FormEvent| backup_schedule.set(event.value()),
+                                    option { value: "off", style: "background-color:#151a20;color:#f4f4f5;", "Off" }
+                                    option { value: "daily", style: "background-color:#151a20;color:#f4f4f5;", "Once a day" }
+                                    option { value: "weekly", style: "background-color:#151a20;color:#f4f4f5;", "Once a week" }
+                                    option { value: "monthly", style: "background-color:#151a20;color:#f4f4f5;", "Once a month" }
+                                }
+                            }
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                disabled: backup_schedule() != "off" && !pass_ok,
+                                onclick: move |_| {
+                                    let schedule = backup_schedule();
+                                    if schedule == "off" {
+                                        let _ = state().db.set_setting("backup_schedule", "off");
+                                        crate::backup::clear_schedule_passphrase(&crate::data_dir());
+                                        backup_schedule_saved.set("off".into());
+                                        backup_note.set("Scheduled backups off.".into());
+                                        status_note("Scheduled backups off");
+                                        return;
+                                    }
+                                    let a = backup_pass();
+                                    let b = backup_pass2();
+                                    if a.trim().is_empty() || a != b {
+                                        let msg = "Enter matching passphrase fields to save the schedule.";
+                                        backup_note.set(msg.into());
+                                        crate::toast::push(crate::toast::ToastKind::Error, msg);
+                                        backup_schedule.set(backup_schedule_saved());
+                                        return;
+                                    }
+                                    match crate::backup::save_schedule_passphrase(&crate::data_dir(), a.trim()) {
+                                        Ok(()) => {
+                                            let _ = state().db.set_setting("backup_schedule", &schedule);
+                                            backup_schedule_saved.set(schedule.clone());
+                                            backup_note.set(format!("Schedule saved ({schedule})."));
+                                            status_note(format!("Backup schedule: {schedule}"));
+                                            backup_pass.set(String::new());
+                                            backup_pass2.set(String::new());
+                                        }
+                                        Err(err) => {
+                                            backup_note.set(err.to_string());
+                                            crate::toast::push(crate::toast::ToastKind::Error, err.to_string());
+                                            backup_schedule.set(backup_schedule_saved());
+                                        }
+                                    }
+                                },
+                                "Save schedule"
+                            }
+                        }
+                    }
+                }
+                div { class: "backup-restore-section",
+                span { class: "backup-restore-pill", "Restore" }
+                {
+                    let _ = backups_tick();
+                    let backups = crate::backup::list_backup_entries(&crate::data_dir());
+                    let selected = restore_path();
+                    let select_value = if backups.iter().any(|b| b.path_string() == selected) {
+                        selected
+                    } else {
+                        String::new()
+                    };
+                    rsx! {
+                        if backups.is_empty() {
+                            p { class: "mb-3 text-sm text-muted-foreground",
+                                "No backups in data/backups yet. Create one above, or open a .metisbak file."
+                            }
+                        } else {
+                            div { class: "mb-3",
+                                label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "Backup" }
+                                SelectInput {
+                                    id: "restore-backup-select".to_string(),
+                                    value: select_value,
+                                    onchange: move |event: FormEvent| restore_path.set(event.value()),
+                                    option {
+                                        value: "",
+                                        style: "background-color:#151a20;color:#f4f4f5;",
+                                        "Choose a backup…"
+                                    }
+                                    for entry in backups.iter() {
+                                        {
+                                            let path_s = entry.path_string();
+                                            let when = if entry.created_at > 0 {
+                                                timefmt::format_stamp(&state().db, entry.created_at)
+                                            } else {
+                                                entry.file_name.clone()
+                                            };
+                                            let label = format!("{when} · {}", entry.file_name);
+                                            rsx! {
+                                                option {
+                                                    key: "{path_s}",
+                                                    value: "{path_s}",
+                                                    style: "background-color:#151a20;color:#f4f4f5;",
+                                                    "{label}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        div { class: "mb-3",
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| {
+                                    match crate::backup::import_backup_with_dialog(&crate::data_dir()) {
+                                        Ok(dest) => {
+                                            let shown = dest.display().to_string();
+                                            let _ = state().db.audit("backup_import", "", &shown);
+                                            restore_path.set(shown.clone());
+                                            backups_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                            backup_note.set(format!("Opened {shown}"));
+                                            status_note("Backup file opened for restore");
+                                        }
+                                        Err(err) => {
+                                            let msg = err.to_string();
+                                            if msg != "Open cancelled." {
+                                                backup_note.set(msg.clone());
+                                                crate::toast::push(crate::toast::ToastKind::Error, msg);
+                                            }
+                                        }
+                                    }
+                                },
+                                "Open backup file…"
+                            }
+                        }
+                    }
+                }
+                div { class: "mb-3",
+                    label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "Passphrase" }
+                    TextInput {
+                        value: restore_pass(),
+                        placeholder: "Passphrase for selected backup",
+                        kind: "password".to_string(),
+                        oninput: move |event: FormEvent| restore_pass.set(event.value()),
+                    }
+                }
+                div { class: "flex flex-wrap gap-2",
+                    Button {
+                        kind: ButtonKind::Danger,
+                        onclick: move |_| {
+                            let path = restore_path();
+                            let pass = restore_pass();
+                            if path.trim().is_empty() || pass.trim().is_empty() {
+                                let msg = "Choose a backup and enter its passphrase.";
+                                backup_note.set(msg.into());
+                                crate::toast::push(crate::toast::ToastKind::Error, msg);
+                                return;
+                            }
+                            match crate::backup::decrypt_backup_file(
+                                std::path::Path::new(path.trim()),
+                                pass.trim(),
+                            ) {
+                                Ok(payload) => match crate::backup::preview_backup(&payload) {
+                                    Ok(preview) => {
+                                        restore_preview.set(Some((path, pass, preview)));
+                                    }
+                                    Err(err) => {
+                                        backup_note.set(err.to_string());
+                                        crate::toast::push(crate::toast::ToastKind::Error, err.to_string());
+                                    }
+                                },
+                                Err(err) => {
+                                    backup_note.set(err.to_string());
+                                    crate::toast::push(crate::toast::ToastKind::Error, err.to_string());
+                                }
+                            }
+                        },
+                        "Preview restore…"
+                    }
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        onclick: move |_| {
+                            let path = restore_path();
+                            if path.trim().is_empty() {
+                                let msg = "Choose a backup to delete.";
+                                backup_note.set(msg.into());
+                                crate::toast::push(crate::toast::ToastKind::Error, msg);
+                                return;
+                            }
+                            match crate::backup::delete_backup(std::path::Path::new(path.trim())) {
+                                Ok(()) => {
+                                    let _ = state().db.audit("backup_delete", "", path.trim());
+                                    backup_note.set(format!("Deleted {path}"));
+                                    status_note("Backup deleted");
+                                    restore_path.set(String::new());
+                                    backups_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                }
+                                Err(err) => {
+                                    backup_note.set(err.to_string());
+                                    crate::toast::push(crate::toast::ToastKind::Error, err.to_string());
+                                }
+                            }
+                        },
+                        Icon { name: IconName::Trash, size: 14 }
+                        "Delete selected"
+                    }
+                }
+                }
+                if !backup_note().is_empty() {
+                    p { class: "mt-4 text-sm text-muted-foreground", "{backup_note}" }
+                }
+            }
+            Card { title: "Contacts export / import", icon: Some(IconName::Users),
+                p { class: "mb-3 text-sm text-muted-foreground",
+                    "Bulk roster JSON (pubkey, name, type, optional GPS). Import merges into HQ only — it does not push contacts onto the radio."
+                }
+                div { class: "mb-3 flex flex-wrap gap-2",
+                    Button {
+                        kind: ButtonKind::Primary,
+                        onclick: move |_| {
+                            match crate::contact_export::create_timestamped_export(
+                                &state().db,
+                                &crate::data_dir(),
+                            ) {
+                                Ok((json_path, n)) => {
+                                    let _ = state().db.audit(
+                                        "contacts_export",
+                                        "",
+                                        &format!("{n} → {}", json_path.display()),
+                                    );
+                                    contacts_import_path.set(json_path.display().to_string());
+                                    contacts_note.set(format!(
+                                        "Exported {n} contacts to {}.",
+                                        json_path.display()
+                                    ));
+                                    status_note(format!("Exported {n} contacts"));
+                                    exports_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                }
+                                Err(err) => contacts_note.set(err),
+                            }
+                        },
+                        "Export contacts"
+                    }
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        onclick: move |_| {
+                            exports_tick.with_mut(|n| *n = n.wrapping_add(1));
+                            download_exports_open.set(true);
+                        },
+                        Icon { name: IconName::Copy, size: 14 }
+                        "Download / manage…"
+                    }
+                }
+                div { class: "backup-restore-section",
+                span { class: "backup-restore-pill backup-restore-pill-import", "Import" }
+                {
+                    let _ = exports_tick();
+                    let exports = crate::contact_export::list_contact_exports(&crate::data_dir());
+                    let selected = contacts_import_path();
+                    let select_value = if exports.iter().any(|e| e.path_string() == selected) {
+                        selected
+                    } else {
+                        String::new()
+                    };
+                    rsx! {
+                        if exports.is_empty() {
+                            p { class: "mb-3 text-sm text-muted-foreground",
+                                "No contact exports yet. Export above, or open a contacts JSON file."
+                            }
+                        } else {
+                            div { class: "mb-3",
+                                label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "Export file" }
+                                SelectInput {
+                                    id: "contacts-import-select".to_string(),
+                                    value: select_value,
+                                    onchange: move |event: FormEvent| contacts_import_path.set(event.value()),
+                                    option {
+                                        value: "",
+                                        style: "background-color:#151a20;color:#f4f4f5;",
+                                        "Choose an export…"
+                                    }
+                                    for entry in exports.iter() {
+                                        {
+                                            let path_s = entry.path_string();
+                                            let when = if entry.created_at > 0 {
+                                                timefmt::format_stamp(&state().db, entry.created_at)
+                                            } else {
+                                                entry.file_name.clone()
+                                            };
+                                            let label = format!("{when} · {}", entry.file_name);
+                                            rsx! {
+                                                option {
+                                                    key: "{path_s}",
+                                                    value: "{path_s}",
+                                                    style: "background-color:#151a20;color:#f4f4f5;",
+                                                    "{label}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        div { class: "mb-3",
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| {
+                                    match crate::contact_export::import_contacts_with_dialog(
+                                        &crate::data_dir(),
+                                    ) {
+                                        Ok(dest) => {
+                                            let shown = dest.display().to_string();
+                                            let _ = state().db.audit("contacts_import_open", "", &shown);
+                                            contacts_import_path.set(shown.clone());
+                                            exports_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                            contacts_note.set(format!("Opened {shown}"));
+                                            status_note("Contacts file opened for import");
+                                        }
+                                        Err(err) => {
+                                            if err != "Open cancelled." {
+                                                contacts_note.set(err.clone());
+                                                crate::toast::push(crate::toast::ToastKind::Error, err);
+                                            }
+                                        }
+                                    }
+                                },
+                                "Open contacts file…"
+                            }
+                        }
+                    }
+                }
+                div { class: "flex flex-wrap gap-2",
+                    Button {
+                        kind: ButtonKind::Primary,
+                        onclick: move |_| {
+                            let path = contacts_import_path();
+                            if path.trim().is_empty() {
+                                let msg = "Choose or open a contacts export first.";
+                                contacts_note.set(msg.into());
+                                crate::toast::push(crate::toast::ToastKind::Error, msg);
+                                return;
+                            }
+                            match crate::contact_export::read_contacts_file(std::path::Path::new(
+                                path.trim(),
+                            )) {
+                                Ok(file) => {
+                                    contacts_import_preview.set(crate::contact_export::preview_import(&file));
+                                    confirm_contacts_import.set(true);
+                                }
+                                Err(err) => {
+                                    contacts_note.set(err.clone());
+                                    crate::toast::push(crate::toast::ToastKind::Error, err);
+                                }
+                            }
+                        },
+                        "Import selected…"
+                    }
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        onclick: move |_| {
+                            let path = contacts_import_path();
+                            if path.trim().is_empty() {
+                                let msg = "Choose an export to delete.";
+                                contacts_note.set(msg.into());
+                                crate::toast::push(crate::toast::ToastKind::Error, msg);
+                                return;
+                            }
+                            match crate::contact_export::delete_contact_export(
+                                std::path::Path::new(path.trim()),
+                            ) {
+                                Ok(()) => {
+                                    let _ = state().db.audit("contacts_export_delete", "", path.trim());
+                                    contacts_note.set(format!("Deleted {path}"));
+                                    status_note("Contact export deleted");
+                                    contacts_import_path.set(String::new());
+                                    exports_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                }
+                                Err(err) => {
+                                    contacts_note.set(err.clone());
+                                    crate::toast::push(crate::toast::ToastKind::Error, err);
+                                }
+                            }
+                        },
+                        Icon { name: IconName::Trash, size: 14 }
+                        "Delete selected"
+                    }
+                }
+                }
+                if !contacts_note().is_empty() {
+                    p { class: "mt-4 text-sm text-muted-foreground", "{contacts_note}" }
+                }
+            }
+            } // end HqTab::Data
+            } // end hq-settings-panel
             } // end HQ tab
 
             if settings_tab() == SettingsTab::Device {
@@ -4239,21 +4825,25 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                         button {
                             class: if device_tab() == DeviceTab::Identity { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
                             onclick: move |_| device_tab.set(DeviceTab::Identity),
+                            Icon { name: IconName::Radio, size: 14 }
                             "Identity"
                         }
                         button {
                             class: if device_tab() == DeviceTab::Radio { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
                             onclick: move |_| device_tab.set(DeviceTab::Radio),
+                            Icon { name: IconName::Signal, size: 14 }
                             "Radio"
                         }
                         button {
                             class: if device_tab() == DeviceTab::Network { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
                             onclick: move |_| device_tab.set(DeviceTab::Network),
+                            Icon { name: IconName::Locate, size: 14 }
                             "Network"
                         }
                         button {
                             class: if device_tab() == DeviceTab::Advanced { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
                             onclick: move |_| device_tab.set(DeviceTab::Advanced),
+                            Icon { name: IconName::Settings, size: 14 }
                             "Advanced"
                         }
                     }
@@ -4751,43 +5341,321 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                     if device_tab() == DeviceTab::Network {
                         Card { title: "Network".to_string(), icon: Some(IconName::Signal),
                             p { class: "mb-3 text-sm text-muted-foreground",
-                                "Flood region scope and path-hash size for this mesh."
+                                "Flood region scope and path-hash size for this mesh. Region names must match local repeater config exactly (lowercase a-z, 0-9, hyphen)."
                             }
                             p { class: "mb-2 text-xs text-muted-foreground",
                                 if let Some(scope) = radio.flood_scope.as_ref() {
-                                    "Current flood scope: {scope}"
+                                    "Companion default scope (this session): {scope}"
                                 } else {
-                                    "Current flood scope: not set this session"
+                                    "Companion default scope (this session): none / unscoped"
                                 }
                             }
-                            div { class: "mb-3 flex flex-col gap-2 sm:flex-row sm:items-end",
-                                div { class: "min-w-0 flex-1",
-                                    label { class: "mb-1 block text-xs text-muted-foreground", "Default region scope" }
-                                    TextInput {
-                                        value: scope_draft(),
-                                        placeholder: "Region code (blank clears)",
-                                        oninput: move |event: FormEvent| scope_draft.set(event.value()),
+                            {
+                                let _ = regions_list_tick();
+                                let known = crate::mesh_regions::load_known_regions(&state().db);
+                                let selected = region_select();
+                                let select_value = if selected.is_empty()
+                                    || known.iter().any(|n| n == &selected)
+                                {
+                                    selected
+                                } else {
+                                    String::new()
+                                };
+                                rsx! {
+                                    div { class: "mb-3",
+                                        label { class: "mb-1 block text-xs text-muted-foreground", "Default region scope" }
+                                        SelectInput {
+                                            id: "mesh-region-select".to_string(),
+                                            value: select_value,
+                                            onchange: move |event: FormEvent| region_select.set(event.value()),
+                                            option {
+                                                value: "",
+                                                style: "background-color:#151a20;color:#f4f4f5;",
+                                                "(none / unscoped)"
+                                            }
+                                            for name in known.iter() {
+                                                {
+                                                    let name = name.clone();
+                                                    rsx! {
+                                                        option {
+                                                            key: "{name}",
+                                                            value: "{name}",
+                                                            style: "background-color:#151a20;color:#f4f4f5;",
+                                                            "{name}"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    div { class: "mb-3 flex flex-col gap-2 sm:flex-row sm:items-end",
+                                        div { class: "min-w-0 flex-1",
+                                            label { class: "mb-1 block text-xs text-muted-foreground", "Add region manually" }
+                                            TextInput {
+                                                value: region_manual(),
+                                                placeholder: "e.g. socal-west",
+                                                oninput: move |event: FormEvent| region_manual.set(event.value()),
+                                            }
+                                        }
+                                        Button {
+                                            kind: ButtonKind::Ghost,
+                                            onclick: move |_| {
+                                                match crate::mesh_regions::add_known_region(
+                                                    &state().db,
+                                                    &region_manual(),
+                                                ) {
+                                                    Ok(name) => {
+                                                        region_select.set(name.clone());
+                                                        region_manual.set(String::new());
+                                                        regions_list_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                                        region_note.set(format!("Added region {name}."));
+                                                        status_note(format!("Region added: {name}"));
+                                                    }
+                                                    Err(err) => {
+                                                        region_note.set(err.clone());
+                                                        crate::toast::push(crate::toast::ToastKind::Error, err);
+                                                    }
+                                                }
+                                            },
+                                            "Add"
+                                        }
+                                    }
+                                    div { class: "mb-3 flex flex-wrap gap-2",
+                                        if region_scan_busy() {
+                                            Button {
+                                                kind: ButtonKind::Danger,
+                                                onclick: move |_| {
+                                                    state().radio.cancel_mesh_scan();
+                                                    region_note.set("Stopping region scan…".into());
+                                                },
+                                                "Stop scan"
+                                            }
+                                        } else {
+                                            Button {
+                                                kind: ButtonKind::Ghost,
+                                                disabled: !linked || node_discover_busy(),
+                                                onclick: move |_| {
+                                                    if region_scan_busy() {
+                                                        return;
+                                                    }
+                                                    region_scan_busy.set(true);
+                                                    region_note.set("Scanning nearby repeaters/rooms…".into());
+                                                    let rx = state().radio.discover_regions();
+                                                    spawn(async move {
+                                                        let result = rx.await.unwrap_or_else(|_| {
+                                                            Err("Region scan cancelled.".into())
+                                                        });
+                                                        region_scan_busy.set(false);
+                                                        match result {
+                                                            Ok(names) => {
+                                                                let n = names.len();
+                                                                match crate::mesh_regions::merge_known_regions(
+                                                                    &state().db,
+                                                                    &names,
+                                                                ) {
+                                                                    Ok(_) => {
+                                                                        let _ = state().db.audit(
+                                                                            "regions_scan",
+                                                                            "",
+                                                                            &format!("{n} regions"),
+                                                                        );
+                                                                        regions_list_tick.with_mut(|t| {
+                                                                            *t = t.wrapping_add(1)
+                                                                        });
+                                                                        region_note.set(format!(
+                                                                            "Scan found {n} region{}.",
+                                                                            if n == 1 { "" } else { "s" }
+                                                                        ));
+                                                                        status_note(format!(
+                                                                            "Region scan: {n} found"
+                                                                        ));
+                                                                    }
+                                                                    Err(err) => {
+                                                                        region_note.set(err.clone());
+                                                                        crate::toast::push(
+                                                                            crate::toast::ToastKind::Error,
+                                                                            err,
+                                                                        );
+                                                                    }
+                                                                }
+                                                            }
+                                                            Err(err) => {
+                                                                region_note.set(err.clone());
+                                                                crate::toast::push(
+                                                                    crate::toast::ToastKind::Error,
+                                                                    err,
+                                                                );
+                                                            }
+                                                        }
+                                                    });
+                                                },
+                                                Icon { name: IconName::Scan, size: 14 }
+                                                "Scan regions"
+                                            }
+                                        }
+                                        Button {
+                                            disabled: !linked,
+                                            onclick: move |_| {
+                                                let raw = region_select();
+                                                let scope = if raw.trim().is_empty() {
+                                                    None
+                                                } else {
+                                                    Some(raw.trim().to_string())
+                                                };
+                                                match crate::mesh_regions::save_active_region(
+                                                    &state().db,
+                                                    scope.as_deref(),
+                                                ) {
+                                                    Ok(()) => {
+                                                        state()
+                                                            .radio
+                                                            .set_default_flood_scope(scope.clone());
+                                                        let _ = state().db.audit(
+                                                            "region_apply",
+                                                            "",
+                                                            scope.as_deref().unwrap_or(""),
+                                                        );
+                                                        let msg = match scope.as_deref() {
+                                                            Some(name) => format!("Applied scope {name}"),
+                                                            None => "Cleared flood scope".into(),
+                                                        };
+                                                        region_note.set(msg.clone());
+                                                        status_note(msg);
+                                                    }
+                                                    Err(err) => {
+                                                        region_note.set(err.clone());
+                                                        crate::toast::push(
+                                                            crate::toast::ToastKind::Error,
+                                                            err,
+                                                        );
+                                                    }
+                                                }
+                                            },
+                                            Icon { name: IconName::Check, size: 14 }
+                                            "Apply scope"
+                                        }
+                                        Button {
+                                            kind: ButtonKind::Ghost,
+                                            disabled: !linked,
+                                            onclick: move |_| {
+                                                region_select.set(String::new());
+                                                let _ = crate::mesh_regions::save_active_region(
+                                                    &state().db,
+                                                    None,
+                                                );
+                                                state().radio.set_default_flood_scope(None);
+                                                let _ = state().db.audit("region_apply", "", "");
+                                                region_note.set("Cleared flood scope.".into());
+                                                status_note("Flood scope cleared");
+                                            },
+                                            "Clear"
+                                        }
+                                    }
+                                    if !region_note().is_empty() {
+                                        p { class: "mb-3 text-sm text-muted-foreground", "{region_note}" }
                                     }
                                 }
-                                Button {
-                                    onclick: move |_| {
-                                        let raw = scope_draft().trim().to_string();
-                                        if raw.is_empty() {
-                                            state().radio.set_flood_scope(None);
-                                        } else {
-                                            state().radio.set_flood_scope(Some(raw));
-                                        }
-                                    },
-                                    Icon { name: IconName::Check, size: 14 }
-                                    "Apply scope"
+                            }
+                            div { class: "mb-4 mt-4 border-t border-border pt-4",
+                                p { class: "mb-1 text-xs uppercase tracking-[0.14em] text-muted-foreground",
+                                    "Discover nearby"
                                 }
-                                Button {
-                                    kind: ButtonKind::Ghost,
-                                    onclick: move |_| {
-                                        scope_draft.set(String::new());
-                                        state().radio.set_flood_scope(None);
-                                    },
-                                    "Clear"
+                                p { class: "mb-2 text-xs text-muted-foreground",
+                                    "Zero-hop scan (direct radio range). Repeaters/rooms or sensors that answer are added to the companion contact table and HQ roster."
+                                }
+                                div { class: "mb-2 flex flex-wrap gap-2",
+                                    if node_discover_busy() {
+                                        Button {
+                                            kind: ButtonKind::Danger,
+                                            onclick: move |_| {
+                                                state().radio.cancel_mesh_scan();
+                                                node_discover_note.set("Stopping discover…".into());
+                                            },
+                                            "Stop discover"
+                                        }
+                                    } else {
+                                        Button {
+                                            kind: ButtonKind::Ghost,
+                                            disabled: !linked || region_scan_busy(),
+                                            onclick: move |_| {
+                                                if node_discover_busy() {
+                                                    return;
+                                                }
+                                                node_discover_busy.set(true);
+                                                node_discover_note.set("Discovering repeaters…".into());
+                                                let rx = state().radio.discover_nodes(
+                                                    crate::radio::DISCOVER_FILTER_REPEATERS,
+                                                );
+                                                spawn(async move {
+                                                    let result = rx.await.unwrap_or_else(|_| {
+                                                        Err("Discover cancelled.".into())
+                                                    });
+                                                    node_discover_busy.set(false);
+                                                    match result {
+                                                        Ok(summary) => {
+                                                            let msg = format!(
+                                                                "Repeaters: {} returned, {} new.",
+                                                                summary.returned, summary.added
+                                                            );
+                                                            node_discover_note.set(msg.clone());
+                                                            status_note(msg);
+                                                        }
+                                                        Err(err) => {
+                                                            node_discover_note.set(err.clone());
+                                                            crate::toast::push(
+                                                                crate::toast::ToastKind::Error,
+                                                                err,
+                                                            );
+                                                        }
+                                                    }
+                                                });
+                                            },
+                                            Icon { name: IconName::Scan, size: 14 }
+                                            "Discover repeaters"
+                                        }
+                                        Button {
+                                            kind: ButtonKind::Ghost,
+                                            disabled: !linked || region_scan_busy(),
+                                            onclick: move |_| {
+                                                if node_discover_busy() {
+                                                    return;
+                                                }
+                                                node_discover_busy.set(true);
+                                                node_discover_note.set("Discovering sensors…".into());
+                                                let rx = state().radio.discover_nodes(
+                                                    crate::radio::DISCOVER_FILTER_SENSORS,
+                                                );
+                                                spawn(async move {
+                                                    let result = rx.await.unwrap_or_else(|_| {
+                                                        Err("Discover cancelled.".into())
+                                                    });
+                                                    node_discover_busy.set(false);
+                                                    match result {
+                                                        Ok(summary) => {
+                                                            let msg = format!(
+                                                                "Sensors: {} returned, {} new.",
+                                                                summary.returned, summary.added
+                                                            );
+                                                            node_discover_note.set(msg.clone());
+                                                            status_note(msg);
+                                                        }
+                                                        Err(err) => {
+                                                            node_discover_note.set(err.clone());
+                                                            crate::toast::push(
+                                                                crate::toast::ToastKind::Error,
+                                                                err,
+                                                            );
+                                                        }
+                                                    }
+                                                });
+                                            },
+                                            Icon { name: IconName::Scan, size: 14 }
+                                            "Discover sensors"
+                                        }
+                                    }
+                                }
+                                if !node_discover_note().is_empty() {
+                                    p { class: "mb-2 text-sm text-muted-foreground", "{node_discover_note}" }
                                 }
                             }
                             div { class: "mt-2",
@@ -4808,17 +5676,17 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                                 }
                                 div { class: "flex flex-wrap gap-2",
                                     Button {
-                                        kind: ButtonKind::Ghost,
+                                        kind: if path_hash_mode == Some(0) { ButtonKind::Primary } else { ButtonKind::Ghost },
                                         onclick: move |_| apply_path_hash_mode_ui(0),
                                         "1-byte"
                                     }
                                     Button {
-                                        kind: ButtonKind::Ghost,
+                                        kind: if path_hash_mode == Some(1) { ButtonKind::Primary } else { ButtonKind::Ghost },
                                         onclick: move |_| apply_path_hash_mode_ui(1),
                                         "2-byte"
                                     }
                                     Button {
-                                        kind: ButtonKind::Ghost,
+                                        kind: if path_hash_mode == Some(2) { ButtonKind::Primary } else { ButtonKind::Ghost },
                                         onclick: move |_| apply_path_hash_mode_ui(2),
                                         "3-byte"
                                     }
@@ -5101,6 +5969,301 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                     }
                 } else {
                     p { class: "text-sm text-muted-foreground", "Set a retention window before purging." }
+                }
+            }
+
+            Dialog {
+                open: restore_preview().is_some(),
+                title: "Restore backup".to_string(),
+                on_close: move |_| restore_preview.set(None),
+                if let Some((path, pass, preview)) = restore_preview() {
+                    p { class: "mb-3 text-sm text-muted-foreground",
+                        "Replace this HQ with backup from {preview.hq_name} (app {preview.app_version}, created {preview.created_at}). "
+                        "{preview.node_count} nodes, {preview.message_count} messages, {preview.channel_count} channels, {preview.secret_count} secrets. "
+                        "File: {path}. Restart recommended if a radio is connected."
+                    }
+                    div { class: "flex gap-2",
+                        Button {
+                            kind: ButtonKind::Danger,
+                            onclick: move |_| {
+                                match crate::backup::decrypt_backup_file(
+                                    std::path::Path::new(&path),
+                                    &pass,
+                                ) {
+                                    Ok(payload) => {
+                                        match crate::backup::apply_restore(
+                                            &state().db,
+                                            &state().secrets,
+                                            &payload,
+                                        ) {
+                                            Ok(()) => {
+                                                let _ = state().db.audit(
+                                                    "restore",
+                                                    "",
+                                                    &path,
+                                                );
+                                                backup_note.set(format!(
+                                                    "Restored from {path}. Restart recommended if radio was connected."
+                                                ));
+                                                status_note("HQ restored from backup");
+                                                restore_pass.set(String::new());
+                                            }
+                                            Err(err) => backup_note.set(err.to_string()),
+                                        }
+                                    }
+                                    Err(err) => backup_note.set(err.to_string()),
+                                }
+                                restore_preview.set(None);
+                            },
+                            "Replace HQ state"
+                        }
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| restore_preview.set(None),
+                            Icon { name: IconName::Close, size: 14 }
+                            "Cancel"
+                        }
+                    }
+                }
+            }
+
+            Dialog {
+                open: confirm_contacts_import(),
+                title: "Import contacts".to_string(),
+                on_close: move |_| confirm_contacts_import.set(false),
+                p { class: "mb-3 text-sm text-muted-foreground",
+                    "{contacts_import_preview()} Merge by public key into the HQ roster. Radio contact table is not changed."
+                }
+                div { class: "flex gap-2",
+                    Button {
+                        kind: ButtonKind::Primary,
+                        onclick: move |_| {
+                            let path = contacts_import_path();
+                            match crate::contact_export::import_contacts_path(
+                                &state().db,
+                                std::path::Path::new(path.trim()),
+                            ) {
+                                Ok(summary) => {
+                                    contacts_note.set(format!(
+                                        "Import done: {} new, {} updated, {} skipped.",
+                                        summary.new, summary.updated, summary.skipped
+                                    ));
+                                    status_note(format!(
+                                        "Imported {} contacts",
+                                        summary.new + summary.updated
+                                    ));
+                                }
+                                Err(err) => contacts_note.set(err),
+                            }
+                            confirm_contacts_import.set(false);
+                        },
+                        "Import"
+                    }
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        onclick: move |_| confirm_contacts_import.set(false),
+                        Icon { name: IconName::Close, size: 14 }
+                        "Cancel"
+                    }
+                }
+            }
+
+            {
+                let _ = backups_tick();
+                let download_list = crate::backup::list_backup_entries(&crate::data_dir());
+                rsx! {
+                    SlideDownPanel {
+                        open: download_backups_open(),
+                        title: "Download backups".to_string(),
+                        subtitle: "Save a copy anywhere on this computer, or delete archives you no longer need.".to_string(),
+                        icon: Some(IconName::Key),
+                        on_close: move |_| download_backups_open.set(false),
+                        if download_list.is_empty() {
+                            p { class: "text-sm text-muted-foreground",
+                                "No backups yet. Create one from Settings → Data first."
+                            }
+                        } else {
+                            div { class: "flex flex-col gap-2",
+                                for entry in download_list {
+                                    {
+                                        let path = entry.path.clone();
+                                        let path_del = entry.path.clone();
+                                        let path_s = entry.path_string();
+                                        let path_clear = path_s.clone();
+                                        let when = if entry.created_at > 0 {
+                                            timefmt::format_stamp(&state().db, entry.created_at)
+                                        } else {
+                                            "Unknown date".into()
+                                        };
+                                        rsx! {
+                                            div {
+                                                key: "{path_s}",
+                                                class: "flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-background px-3 py-3",
+                                                div { class: "min-w-0",
+                                                    p { class: "font-medium", "{when}" }
+                                                    p { class: "truncate font-mono text-xs text-muted-foreground", "{entry.file_name}" }
+                                                }
+                                                div { class: "flex flex-wrap gap-2",
+                                                    Button {
+                                                        kind: ButtonKind::Primary,
+                                                        onclick: move |_| {
+                                                            match crate::backup::export_backup_with_dialog(&path) {
+                                                                Ok(dest) => {
+                                                                    status_note(format!(
+                                                                        "Backup saved to {}",
+                                                                        dest.display()
+                                                                    ));
+                                                                    backup_note.set(format!(
+                                                                        "Downloaded to {}",
+                                                                        dest.display()
+                                                                    ));
+                                                                }
+                                                                Err(err) => {
+                                                                    let msg = err.to_string();
+                                                                    if !msg.contains("cancelled") {
+                                                                        status_note(msg.clone());
+                                                                        backup_note.set(msg);
+                                                                    }
+                                                                }
+                                                            }
+                                                        },
+                                                        Icon { name: IconName::Copy, size: 14 }
+                                                        "Save as…"
+                                                    }
+                                                    Button {
+                                                        kind: ButtonKind::Ghost,
+                                                        onclick: move |_| {
+                                                            match crate::backup::delete_backup(&path_del) {
+                                                                Ok(()) => {
+                                                                    let _ = state().db.audit(
+                                                                        "backup_delete",
+                                                                        "",
+                                                                        &path_clear,
+                                                                    );
+                                                                    if restore_path() == path_clear {
+                                                                        restore_path.set(String::new());
+                                                                    }
+                                                                    backup_note.set(format!("Deleted {path_clear}"));
+                                                                    status_note("Backup deleted");
+                                                                    backups_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                                                }
+                                                                Err(err) => {
+                                                                    status_note(err.to_string());
+                                                                    backup_note.set(err.to_string());
+                                                                }
+                                                            }
+                                                        },
+                                                        Icon { name: IconName::Trash, size: 14 }
+                                                        "Delete"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            {
+                let _ = exports_tick();
+                let export_list = crate::contact_export::list_contact_exports(&crate::data_dir());
+                rsx! {
+                    SlideDownPanel {
+                        open: download_exports_open(),
+                        title: "Download contact exports".to_string(),
+                        subtitle: "Save JSON exports anywhere on this computer, or delete ones you no longer need.".to_string(),
+                        icon: Some(IconName::Users),
+                        on_close: move |_| download_exports_open.set(false),
+                        if export_list.is_empty() {
+                            p { class: "text-sm text-muted-foreground",
+                                "No contact exports yet. Export from Settings → Data first."
+                            }
+                        } else {
+                            div { class: "flex flex-col gap-2",
+                                for entry in export_list {
+                                    {
+                                        let path = entry.path.clone();
+                                        let path_del = entry.path.clone();
+                                        let path_s = entry.path_string();
+                                        let path_clear = path_s.clone();
+                                        let when = if entry.created_at > 0 {
+                                            timefmt::format_stamp(&state().db, entry.created_at)
+                                        } else {
+                                            "Unknown date".into()
+                                        };
+                                        rsx! {
+                                            div {
+                                                key: "{path_s}",
+                                                class: "flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-background px-3 py-3",
+                                                div { class: "min-w-0",
+                                                    p { class: "font-medium", "{when}" }
+                                                    p { class: "truncate font-mono text-xs text-muted-foreground", "{entry.file_name}" }
+                                                }
+                                                div { class: "flex flex-wrap gap-2",
+                                                    Button {
+                                                        kind: ButtonKind::Primary,
+                                                        onclick: move |_| {
+                                                            match crate::contact_export::export_contacts_with_dialog(&path)
+                                                            {
+                                                                Ok(dest) => {
+                                                                    status_note(format!(
+                                                                        "Export saved to {}",
+                                                                        dest.display()
+                                                                    ));
+                                                                    contacts_note.set(format!(
+                                                                        "Downloaded to {}",
+                                                                        dest.display()
+                                                                    ));
+                                                                }
+                                                                Err(err) => {
+                                                                    if !err.contains("cancelled") {
+                                                                        status_note(err.clone());
+                                                                        contacts_note.set(err);
+                                                                    }
+                                                                }
+                                                            }
+                                                        },
+                                                        Icon { name: IconName::Copy, size: 14 }
+                                                        "Save as…"
+                                                    }
+                                                    Button {
+                                                        kind: ButtonKind::Ghost,
+                                                        onclick: move |_| {
+                                                            match crate::contact_export::delete_contact_export(&path_del)
+                                                            {
+                                                                Ok(()) => {
+                                                                    let _ = state().db.audit(
+                                                                        "contacts_export_delete",
+                                                                        "",
+                                                                        &path_clear,
+                                                                    );
+                                                                    if contacts_import_path() == path_clear {
+                                                                        contacts_import_path.set(String::new());
+                                                                    }
+                                                                    contacts_note.set(format!("Deleted {path_clear}"));
+                                                                    status_note("Contact export deleted");
+                                                                    exports_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                                                }
+                                                                Err(err) => {
+                                                                    status_note(err.clone());
+                                                                    contacts_note.set(err);
+                                                                }
+                                                            }
+                                                        },
+                                                        Icon { name: IconName::Trash, size: 14 }
+                                                        "Delete"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -6,8 +6,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use meshcore_rs::commands::Destination;
-use meshcore_rs::events::{ContactMessage, EventPayload, EventType, MeshCoreEvent};
+use meshcore_rs::events::{Contact, ContactMessage, EventPayload, EventType, MeshCoreEvent};
 use meshcore_rs::MeshCore;
+use rand::RngCore;
 use serde_json::json;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
@@ -20,6 +21,18 @@ use crate::secrets::{Secrets, CHANNEL_NAME};
 use crate::signup::{decide, parse_command};
 
 const REPLY_GAP: Duration = Duration::from_secs(20);
+
+/// Type filter bits for `DISCOVER_REQ`: `(1 << ADV_TYPE_*)`.
+/// Repeater (2) + room server (3).
+pub const DISCOVER_FILTER_REPEATERS: u8 = (1 << 2) | (1 << 3);
+/// Sensor (4).
+pub const DISCOVER_FILTER_SENSORS: u8 = 1 << 4;
+
+#[derive(Debug, Clone)]
+pub struct DiscoverSummary {
+    pub returned: usize,
+    pub added: usize,
+}
 
 /// Lets background fetches (weather/quake) enqueue a METIS-INFO channel reply.
 static RADIO_CMD_TX: OnceLock<UnboundedSender<RadioCmd>> = OnceLock::new();
@@ -90,12 +103,18 @@ pub enum SyncPhase {
     Contacts,
     Channels,
     Messages,
+    /// Operator mesh scan (regions / nearby discover) — shows footer progress.
+    Discover,
     Ready,
 }
 
 impl SyncPhase {
     pub fn is_active(self) -> bool {
         !matches!(self, Self::Idle | Self::Ready)
+    }
+
+    pub fn is_discover(self) -> bool {
+        matches!(self, Self::Discover)
     }
 }
 
@@ -237,7 +256,17 @@ pub enum RadioCmd {
     SetPathHashMode(u8),
     /// Companion `CMD_SET_OTHER_PARAMS` (38): advert location policy 0/1/(2).
     SetAdvLocPolicy(u8),
-    SetFloodScope(Option<String>),
+    /// Persist companion default flood scope via CMD 63 (name + SHA-256 key).
+    SetDefaultFloodScope(Option<String>),
+    /// Query repeater/room contacts for region lists (CMD 57 ANON regions).
+    DiscoverRegions {
+        reply: oneshot::Sender<Result<Vec<String>, String>>,
+    },
+    /// Zero-hop node discover (CMD 55 control DISCOVER_REQ).
+    DiscoverNodes {
+        filter: u8,
+        reply: oneshot::Sender<Result<DiscoverSummary, String>>,
+    },
     SendAdvert { flood: bool },
     Reboot,
     /// Local companion CLI (CMD 66) or remote TXT_TYPE_CLI_COMMAND to a contact prefix.
@@ -257,6 +286,8 @@ pub struct RadioHandle {
     stop: Arc<watch::Sender<u64>>,
     /// When stop fires because of Reboot, send CMD_REBOOT before dropping BLE.
     reboot_pending: Arc<AtomicBool>,
+    /// Set while a region/node discover runs; `cancel_mesh_scan` requests stop.
+    scan_cancel: Arc<AtomicBool>,
     status: Arc<Mutex<RadioStatus>>,
 }
 
@@ -349,8 +380,20 @@ impl RadioHandle {
         });
     }
 
-    pub fn set_flood_scope(&self, scope: Option<String>) {
-        let _ = self.cmd.send(RadioCmd::SetFloodScope(scope));
+    pub fn set_default_flood_scope(&self, scope: Option<String>) {
+        let _ = self.cmd.send(RadioCmd::SetDefaultFloodScope(scope));
+    }
+
+    pub fn discover_regions(&self) -> oneshot::Receiver<Result<Vec<String>, String>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.cmd.send(RadioCmd::DiscoverRegions { reply: tx });
+        rx
+    }
+
+    pub fn discover_nodes(&self, filter: u8) -> oneshot::Receiver<Result<DiscoverSummary, String>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.cmd.send(RadioCmd::DiscoverNodes { filter, reply: tx });
+        rx
     }
 
     pub fn set_path_hash_mode(&self, mode: u8) {
@@ -382,6 +425,11 @@ impl RadioHandle {
         let _ = self.cmd.send(RadioCmd::ProbeNoise);
     }
 
+    pub fn cancel_mesh_scan(&self) {
+        self.scan_cancel.store(true, Ordering::SeqCst);
+        write_status(&self.status, "connected", "Stopping scan…");
+    }
+
     pub fn snapshot(&self) -> RadioStatus {
         self.status
             .lock()
@@ -395,9 +443,11 @@ pub fn spawn_radio(db: Arc<Db>, secrets: Arc<Secrets>) -> RadioHandle {
     let _ = RADIO_CMD_TX.set(cmd.clone());
     let (stop, stop_rx) = watch::channel(0u64);
     let reboot_pending = Arc::new(AtomicBool::new(false));
+    let scan_cancel = Arc::new(AtomicBool::new(false));
     let status = Arc::new(Mutex::new(RadioStatus::default()));
     let status_thread = status.clone();
     let reboot_thread = reboot_pending.clone();
+    let scan_thread = scan_cancel.clone();
     std::thread::Builder::new()
         .name("metis-radio".into())
         .spawn(move || {
@@ -412,6 +462,7 @@ pub fn spawn_radio(db: Arc<Db>, secrets: Arc<Secrets>) -> RadioHandle {
                 rx,
                 stop_rx,
                 reboot_thread,
+                scan_thread,
             ));
         })
         .expect("radio thread");
@@ -419,8 +470,15 @@ pub fn spawn_radio(db: Arc<Db>, secrets: Arc<Secrets>) -> RadioHandle {
         cmd,
         stop: Arc::new(stop),
         reboot_pending,
+        scan_cancel,
         status,
     }
+}
+
+fn end_discover_sync(status: &Mutex<RadioStatus>, detail: impl Into<String>) {
+    let detail = detail.into();
+    write_sync(status, SyncPhase::Ready, "Companion ready", None);
+    write_status(status, "connected", detail);
 }
 
 fn write_status(status: &Mutex<RadioStatus>, state: &str, detail: impl Into<String>) {
@@ -460,6 +518,7 @@ fn write_sync(
         SyncPhase::Contacts => "contacts",
         SyncPhase::Channels => "channels",
         SyncPhase::Messages => "messages",
+        SyncPhase::Discover => "discover",
         SyncPhase::Ready => "ready",
     };
     let phase_changed = {
@@ -559,6 +618,376 @@ async fn apply_path_hash_mode(
         .await
         .map_err(|err| err.to_string())?;
     Ok(())
+}
+
+/// Companion `CMD_SET_DEFAULT_FLOOD_SCOPE` (63) + clear session override (54).
+async fn apply_default_flood_scope(
+    commands: &meshcore_rs::commands::CommandHandler,
+    scope: Option<&str>,
+) -> Result<Option<String>, String> {
+    let frame = crate::mesh_regions::default_flood_scope_frame(scope)?;
+    commands
+        .send(&frame, Some(EventType::Ok))
+        .await
+        .map_err(|err| err.to_string())?;
+    if scope.is_none() {
+        let clear = crate::mesh_regions::clear_session_flood_scope_frame();
+        let _ = commands.send(&clear, Some(EventType::Ok)).await;
+        return Ok(None);
+    }
+    let name = crate::mesh_regions::validate_region_name(scope.unwrap())?;
+    Ok(Some(name))
+}
+
+const REGION_SCAN_MAX_TARGETS: usize = 12;
+const REGION_SCAN_PER_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `CMD_SEND_ANON_REQ` (57) regions subtype to one repeater/room pubkey.
+async fn request_regions_from_contact(
+    commands: &meshcore_rs::commands::CommandHandler,
+    dispatcher: &meshcore_rs::events::EventDispatcher,
+    pubkey: &[u8; 32],
+) -> Result<Vec<String>, String> {
+    let mut data = vec![57u8];
+    data.extend_from_slice(pubkey);
+    data.push(meshcore_rs::AnonReqType::Regions as u8);
+    data.push(0x00);
+
+    let mut rx = dispatcher.receiver();
+    let mut send_fut = Box::pin(commands.send_with_timeout(
+        &data,
+        Some(EventType::MsgSent),
+        REGION_SCAN_PER_TIMEOUT,
+    ));
+    let mut tag: Option<[u8; 4]> = None;
+    let deadline = Instant::now() + REGION_SCAN_PER_TIMEOUT + Duration::from_secs(2);
+
+    loop {
+        if Instant::now() > deadline {
+            return Err("Region request timed out.".into());
+        }
+        tokio::select! {
+            res = &mut send_fut, if tag.is_none() => {
+                match res {
+                    Ok(event) => match event.payload {
+                        EventPayload::MsgSent(info) => {
+                            tag = Some(info.expected_ack);
+                        }
+                        _ => return Err("Unexpected response to region request.".into()),
+                    },
+                    Err(err) => return Err(err.to_string()),
+                }
+            }
+            event = rx.recv() => {
+                match event {
+                    Ok(event) if event.event_type == EventType::MsgSent && tag.is_none() => {
+                        if let EventPayload::MsgSent(info) = event.payload {
+                            tag = Some(info.expected_ack);
+                        }
+                    }
+                    Ok(event) if event.event_type == EventType::BinaryResponse => {
+                        if let EventPayload::BinaryResponse { tag: resp_tag, data } = event.payload {
+                            if tag == Some(resp_tag) {
+                                return Ok(crate::mesh_regions::parse_regions_binary_response(&data));
+                            }
+                        }
+                    }
+                    Ok(event) if event.event_type == EventType::Error => {
+                        return Err(match event.payload {
+                            EventPayload::String(msg) => msg,
+                            _ => "Region request failed.".into(),
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(_) => return Err("Companion event stream closed.".into()),
+                }
+            }
+        }
+    }
+}
+
+/// Parse a DISCOVER_RESP control payload (firmware: `0x90|type`, snr, tag, pubkey).
+fn parse_discover_resp_payload(
+    payload: &[u8],
+    expect_tag: [u8; 4],
+) -> Option<(u8, [u8; 32])> {
+    // Direct control payload (meshcore-rs test shape / stripped push).
+    if let Some(found) = parse_discover_resp_at(payload, 0, expect_tag) {
+        return Some(found);
+    }
+    // PUSH_CODE_CONTROL_DATA body: [snr][rssi][path_len=0][payload…]
+    if payload.len() >= 3 {
+        let path_len = payload[2] as usize;
+        let start = 3 + path_len;
+        if start < payload.len() {
+            return parse_discover_resp_at(payload, start, expect_tag);
+        }
+    }
+    None
+}
+
+fn parse_discover_resp_at(
+    payload: &[u8],
+    start: usize,
+    expect_tag: [u8; 4],
+) -> Option<(u8, [u8; 32])> {
+    let body = payload.get(start..)?;
+    if body.len() < 6 + 32 {
+        return None;
+    }
+    if body[0] & 0xF0 != 0x90 {
+        return None;
+    }
+    let node_type = body[0] & 0x0F;
+    let mut tag = [0u8; 4];
+    tag.copy_from_slice(&body[2..6]);
+    if tag != expect_tag {
+        return None;
+    }
+    let mut pubkey = [0u8; 32];
+    pubkey.copy_from_slice(&body[6..38]);
+    if pubkey.iter().all(|b| *b == 0) {
+        return None;
+    }
+    Some((node_type, pubkey))
+}
+
+const NODE_DISCOVER_WINDOW: Duration = Duration::from_secs(8);
+
+async fn run_node_discover(
+    db: &Db,
+    meshcore: &MeshCore,
+    status: &Mutex<RadioStatus>,
+    filter: u8,
+    scan_cancel: &AtomicBool,
+) -> Result<DiscoverSummary, String> {
+    let label = if filter == DISCOVER_FILTER_SENSORS {
+        "sensors"
+    } else {
+        "repeaters"
+    };
+    write_sync(
+        status,
+        SyncPhase::Discover,
+        format!("Discovering nearby {label}…"),
+        Some((0, NODE_DISCOVER_WINDOW.as_secs() as u32)),
+    );
+
+    let mut tag = [0u8; 4];
+    rand::thread_rng().fill_bytes(&mut tag);
+
+    // Wiki: [55][flags=0][sub=0x80][filter][tag:4][since:4]
+    let mut frame = vec![55u8, 0x00, 0x80, filter];
+    frame.extend_from_slice(&tag);
+    frame.extend_from_slice(&0u32.to_le_bytes());
+
+    let dispatcher = meshcore.dispatcher();
+    let mut rx = dispatcher.receiver();
+    {
+        let commands = meshcore.commands().lock().await;
+        if let Err(err) = commands
+            .send_with_timeout(&frame, Some(EventType::Ok), Duration::from_secs(5))
+            .await
+        {
+            end_discover_sync(status, err.to_string());
+            return Err(err.to_string());
+        }
+    }
+
+    let started = Instant::now();
+    let deadline = started + NODE_DISCOVER_WINDOW;
+    let mut seen: HashMap<[u8; 32], u8> = HashMap::new();
+    let mut stopped = false;
+    while Instant::now() < deadline {
+        if scan_cancel.load(Ordering::SeqCst) {
+            stopped = true;
+            break;
+        }
+        let elapsed = started.elapsed().as_secs().min(NODE_DISCOVER_WINDOW.as_secs()) as u32;
+        write_sync(
+            status,
+            SyncPhase::Discover,
+            format!(
+                "Discovering {label}… {} heard",
+                seen.len()
+            ),
+            Some((elapsed, NODE_DISCOVER_WINDOW.as_secs() as u32)),
+        );
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let slice = left.min(Duration::from_millis(400));
+        match tokio::time::timeout(slice, rx.recv()).await {
+            Ok(Ok(event)) => {
+                let bytes = match event.payload {
+                    EventPayload::Bytes(b) if event.event_type == EventType::ControlData => Some(b),
+                    EventPayload::DiscoverResponse(entries) => {
+                        for entry in entries {
+                            if entry.pubkey.len() == 32 {
+                                let mut key = [0u8; 32];
+                                key.copy_from_slice(&entry.pubkey);
+                                seen.entry(key).or_insert(2);
+                            }
+                        }
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(payload) = bytes {
+                    if let Some((node_type, pubkey)) =
+                        parse_discover_resp_payload(&payload, tag)
+                    {
+                        seen.entry(pubkey).or_insert(node_type);
+                    }
+                }
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+            Ok(Err(_)) => break,
+            Err(_) => {}
+        }
+    }
+
+    let mut added = 0usize;
+    let returned = seen.len();
+    for (pubkey, node_type) in &seen {
+        if scan_cancel.load(Ordering::SeqCst) {
+            stopped = true;
+            break;
+        }
+        let ty = match *node_type {
+            1..=4 => *node_type,
+            _ if filter == DISCOVER_FILTER_SENSORS => 4,
+            _ => 2,
+        };
+        let hex = hex::encode(pubkey);
+        let prefix: String = hex.chars().take(8).collect();
+        let name = match ty {
+            3 => format!("room-{prefix}"),
+            4 => format!("sensor-{prefix}"),
+            _ => format!("repeater-{prefix}"),
+        };
+        let existed = db.get_node(&hex).ok().flatten().is_some();
+        let contact = Contact {
+            public_key: *pubkey,
+            contact_type: ty,
+            flags: 0,
+            path_len: -1,
+            out_path: Vec::new(),
+            adv_name: name.clone(),
+            last_advert: unix_now() as u32,
+            adv_lat: 0,
+            adv_lon: 0,
+            last_modification_timestamp: unix_now() as u32,
+        };
+        {
+            let commands = meshcore.commands().lock().await;
+            if let Err(err) = commands.add_contact(&contact).await {
+                hq_log!(debug, "discover add_contact failed: {err}");
+            }
+        }
+        let raw = contact_snapshot(&name, ty, 0, -1, unix_now(), 0, 0, unix_now());
+        if db
+            .upsert_contact(
+                &hex,
+                &name,
+                ty,
+                0,
+                -1,
+                &[],
+                unix_now(),
+                0,
+                0,
+                unix_now(),
+                &raw,
+            )
+            .is_ok()
+        {
+            contact_qr::enqueue_contact_qr(&hex);
+            if !existed {
+                added += 1;
+            }
+        }
+    }
+    let _ = db.audit(
+        "nodes_discover",
+        "",
+        &format!("{label}: {returned} returned, {added} new"),
+    );
+    let detail = if stopped {
+        format!("Discover stopped — {returned} returned, {added} new.")
+    } else {
+        format!("Discover finished — {returned} returned, {added} new.")
+    };
+    end_discover_sync(status, detail);
+    Ok(DiscoverSummary { returned, added })
+}
+
+async fn run_region_discover(
+    db: &Db,
+    meshcore: &MeshCore,
+    status: &Mutex<RadioStatus>,
+    scan_cancel: &AtomicBool,
+) -> Result<Vec<String>, String> {
+    let targets: Vec<[u8; 32]> = db
+        .list_nodes()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|n| n.contact_type == 2 || n.contact_type == 3)
+        .filter_map(|n| parse_pubkey_full(&n.pubkey).ok())
+        .take(REGION_SCAN_MAX_TARGETS)
+        .collect();
+    if targets.is_empty() {
+        return Err("No repeater or room contacts in the roster to query.".into());
+    }
+
+    let total = targets.len() as u32;
+    write_sync(
+        status,
+        SyncPhase::Discover,
+        "Scanning regions…",
+        Some((0, total)),
+    );
+
+    let mut found = Vec::new();
+    let mut stopped = false;
+    let dispatcher = meshcore.dispatcher();
+    for (i, pubkey) in targets.iter().enumerate() {
+        if scan_cancel.load(Ordering::SeqCst) {
+            stopped = true;
+            break;
+        }
+        let done = (i + 1) as u32;
+        write_sync(
+            status,
+            SyncPhase::Discover,
+            format!("Scanning regions… ({done}/{total})"),
+            Some((done, total)),
+        );
+        let Ok(commands) =
+            tokio::time::timeout(SEND_LOCK_WAIT, meshcore.commands().lock()).await
+        else {
+            continue;
+        };
+        match request_regions_from_contact(&commands, &dispatcher, pubkey).await {
+            Ok(names) => {
+                found = crate::mesh_regions::merge_region_lists(&found, &names);
+            }
+            Err(err) => {
+                hq_log!(debug, "region scan target failed: {err}");
+            }
+        }
+        drop(commands);
+    }
+    let n = found.len();
+    let detail = if stopped {
+        format!("Region scan stopped — {n} region{}.", if n == 1 { "" } else { "s" })
+    } else {
+        format!("Region scan finished — {n} region{}.", if n == 1 { "" } else { "s" })
+    };
+    end_discover_sync(status, detail);
+    Ok(found)
 }
 
 /// Companion `CMD_SET_OTHER_PARAMS` (38) — preserve other prefs, change advert loc policy.
@@ -751,6 +1180,7 @@ async fn radio_loop(
     mut rx: UnboundedReceiver<RadioCmd>,
     stop_rx: watch::Receiver<u64>,
     reboot_pending: Arc<AtomicBool>,
+    scan_cancel: Arc<AtomicBool>,
 ) {
     let mut desired: Option<String> = None;
     let mut backoff = Duration::from_secs(2);
@@ -769,7 +1199,15 @@ async fn radio_loop(
             stop.borrow_and_update();
             let live: Mutex<Option<Arc<MeshCore>>> = Mutex::new(None);
             let end = tokio::select! {
-                end = run_session(&db, &secrets, &status, &mut rx, &name, &live) => end,
+                end = run_session(
+                    &db,
+                    &secrets,
+                    &status,
+                    &mut rx,
+                    &name,
+                    &live,
+                    &scan_cancel,
+                ) => end,
                 _ = stop.changed() => SessionEnd::Stopped,
             };
             let want_reboot = reboot_pending.swap(false, Ordering::SeqCst);
@@ -1037,7 +1475,7 @@ async fn apply_idle_cmd(
         | Some(RadioCmd::SetRadioParams { .. })
         | Some(RadioCmd::SetPathHashMode(_))
         | Some(RadioCmd::SetAdvLocPolicy(_))
-        | Some(RadioCmd::SetFloodScope(_))
+        | Some(RadioCmd::SetDefaultFloodScope(_))
         | Some(RadioCmd::SendAdvert { .. })
         | Some(RadioCmd::Reboot)
         | Some(RadioCmd::ProbeNoise) => {
@@ -1046,6 +1484,18 @@ async fn apply_idle_cmd(
                 "disconnected",
                 "Connect the radio before changing device settings.",
             );
+            true
+        }
+        Some(RadioCmd::DiscoverRegions { reply }) => {
+            let _ = reply.send(Err(
+                "Connect the radio before scanning regions.".into(),
+            ));
+            true
+        }
+        Some(RadioCmd::DiscoverNodes { reply, .. }) => {
+            let _ = reply.send(Err(
+                "Connect the radio before discovering nodes.".into(),
+            ));
             true
         }
     }
@@ -1593,6 +2043,7 @@ async fn run_session(
     rx: &mut UnboundedReceiver<RadioCmd>,
     name: &str,
     live: &Mutex<Option<Arc<MeshCore>>>,
+    scan_cancel: &Arc<AtomicBool>,
 ) -> SessionEnd {
     let meshcore = match MeshCore::ble_connect(name).await {
         Ok(meshcore) => Arc::new(meshcore),
@@ -2128,25 +2579,35 @@ async fn run_session(
                             Err(err) => write_status(status, "connected", err),
                         }
                     }
-                    Some(RadioCmd::SetFloodScope(scope)) => {
+                    Some(RadioCmd::SetDefaultFloodScope(scope)) => {
                         let commands = meshcore.commands().lock().await;
-                        match commands.set_flood_scope(scope.as_deref()).await {
-                            Ok(()) => {
+                        match apply_default_flood_scope(&commands, scope.as_deref()).await {
+                            Ok(applied) => {
                                 {
                                     let mut guard =
                                         status.lock().unwrap_or_else(|err| err.into_inner());
-                                    guard.flood_scope = scope.clone();
+                                    guard.flood_scope = applied.clone();
                                 }
-                                let detail = match scope.as_deref() {
-                                    Some(scope) if !scope.is_empty() => {
-                                        format!("Flood scope set to {scope}.")
-                                    }
-                                    _ => "Flood scope cleared.".into(),
+                                let detail = match applied.as_deref() {
+                                    Some(name) => format!("Default flood scope set to {name}."),
+                                    None => "Default flood scope cleared.".into(),
                                 };
                                 write_status(status, "connected", detail);
                             }
-                            Err(err) => write_status(status, "connected", err.to_string()),
+                            Err(err) => write_status(status, "connected", err),
                         }
+                    }
+                    Some(RadioCmd::DiscoverRegions { reply }) => {
+                        scan_cancel.store(false, Ordering::SeqCst);
+                        let result =
+                            run_region_discover(&db, &meshcore, status, scan_cancel).await;
+                        let _ = reply.send(result);
+                    }
+                    Some(RadioCmd::DiscoverNodes { filter, reply }) => {
+                        scan_cancel.store(false, Ordering::SeqCst);
+                        let result =
+                            run_node_discover(&db, &meshcore, status, filter, scan_cancel).await;
+                        let _ = reply.send(result);
                     }
                     Some(RadioCmd::SendAdvert { flood }) => {
                         let commands = meshcore.commands().lock().await;
@@ -3561,5 +4022,23 @@ mod tests {
         assert_eq!(battery_pct_from_mv(3700), 30);
         assert_eq!(battery_pct_from_mv(3000), 0);
         assert!(battery_pct_from_mv(4024) < 100);
+    }
+
+    #[test]
+    fn parses_discover_resp_with_push_envelope() {
+        let tag = [1u8, 2, 3, 4];
+        let mut pubkey = [0u8; 32];
+        pubkey[0] = 0xAB;
+        pubkey[31] = 0xCD;
+        // PUSH body: snr, rssi, path_len=0, then 0x92|type, snr, tag, pubkey
+        let mut payload = vec![10i8 as u8, 20i8 as u8, 0];
+        payload.push(0x92); // DISCOVER_RESP | repeater
+        payload.push(10);
+        payload.extend_from_slice(&tag);
+        payload.extend_from_slice(&pubkey);
+        let (ty, key) = parse_discover_resp_payload(&payload, tag).expect("parse");
+        assert_eq!(ty, 2);
+        assert_eq!(key, pubkey);
+        assert!(parse_discover_resp_payload(&payload, [9, 9, 9, 9]).is_none());
     }
 }

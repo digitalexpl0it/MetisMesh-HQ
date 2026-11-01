@@ -3,8 +3,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::backup;
 use crate::db::{unix_now, Db};
 use crate::radio::RadioHandle;
+use crate::secrets::Secrets;
 use crate::services::{
     alerts_channel_slot, cached_zip_coords, emerg_state, fetch_active_alerts,
     fetch_emergency_alerts, fetch_quakes, fetch_weather_line, format_nws_alert, format_quake,
@@ -15,7 +17,7 @@ use crate::services::{
 use crate::signup::fit_mesh;
 
 /// Own thread + Tokio runtime (main has no reactor yet when HQ boots).
-pub fn spawn_poller(db: Arc<Db>, radio: RadioHandle) {
+pub fn spawn_poller(db: Arc<Db>, secrets: Arc<Secrets>, radio: RadioHandle) {
     std::thread::Builder::new()
         .name("metis-services".into())
         .spawn(move || {
@@ -29,12 +31,12 @@ pub fn spawn_poller(db: Arc<Db>, radio: RadioHandle) {
                     return;
                 }
             };
-            runtime.block_on(poller_loop(db, radio));
+            runtime.block_on(poller_loop(db, secrets, radio));
         })
         .ok();
 }
 
-async fn poller_loop(db: Arc<Db>, radio: RadioHandle) {
+async fn poller_loop(db: Arc<Db>, secrets: Arc<Secrets>, radio: RadioHandle) {
     // Stagger first run so BLE connect / contact sync win the first minute.
     tokio::time::sleep(Duration::from_secs(45)).await;
     let mut tick = tokio::time::interval(Duration::from_secs(60));
@@ -42,11 +44,11 @@ async fn poller_loop(db: Arc<Db>, radio: RadioHandle) {
     loop {
         tick.tick().await;
         // Dedicated services thread — blocking ureq is fine here.
-        poll_once(&db, &radio);
+        poll_once(&db, &secrets, &radio);
     }
 }
 
-fn poll_once(db: &Db, radio: &RadioHandle) {
+fn poll_once(db: &Db, secrets: &Secrets, radio: &RadioHandle) {
     if setting_bool(db, "svc_quake_enabled", false) {
         if let Err(err) = poll_quakes(db, radio) {
             hq_log!(debug, "quake poll: {err}");
@@ -74,6 +76,7 @@ fn poll_once(db: &Db, radio: &RadioHandle) {
             hq_log!(debug, "emerg poll: {err}");
         }
     }
+    backup::maybe_run_scheduled_backup(db, secrets, &crate::data_dir());
 }
 
 /// USGS: post only when a *new* quake appears. Empty / already-seen → silent.

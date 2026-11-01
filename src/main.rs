@@ -1,9 +1,12 @@
 #[macro_use]
 mod app_log;
+mod backup;
 mod ble_pair;
+mod contact_export;
 mod contact_qr;
 mod db;
 mod map_tiles;
+mod mesh_regions;
 mod path;
 mod pmtiles_path;
 mod radio;
@@ -44,7 +47,7 @@ fn main() {
     let secrets = Arc::new(Secrets::new(&data));
     contact_qr::spawn_qr_worker(db.clone(), data.clone());
     let radio = spawn_radio(db.clone(), secrets.clone());
-    services::spawn_poller(db.clone(), radio.clone());
+    services::spawn_poller(db.clone(), secrets.clone(), radio.clone());
     install(AppState { db, secrets, radio });
     hq_log!(info, "Metis Mesh HQ started · data {}", data.display());
     launch_window();
@@ -326,7 +329,7 @@ fn quiet_linux_titlebar(window: &dioxus::desktop::tao::window::Window) {
     }
 }
 
-fn data_dir() -> PathBuf {
+pub(crate) fn data_dir() -> PathBuf {
     if let Some(path) = std::env::var_os("METIS_DATA_DIR") {
         return PathBuf::from(path);
     }

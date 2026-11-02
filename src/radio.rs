@@ -4386,12 +4386,32 @@ fn handle_bot_channel(
                 .unwrap_or_else(|| "HQ".into());
             let fahrenheit = crate::services::weather_unit_f(db);
             let db = db.clone();
+            let bare_place = place
+                .as_ref()
+                .map(|p| p.trim())
+                .filter(|p| !p.is_empty())
+                .is_none();
             let zip_hint = place.as_ref().and_then(|p| {
                 let digits: String = p.chars().filter(|c| c.is_ascii_digit()).collect();
                 (digits.len() == 5).then_some(digits)
             });
             tokio::task::spawn_blocking(move || {
-                let resolved = if let Some(place) = place.as_deref() {
+                // Bare #weather / #weather+: prefer fresh local MQTT station.
+                let station_line = if bare_place {
+                    crate::services::try_station_wx_line(&db, fahrenheit)
+                } else {
+                    None
+                };
+                if !detail {
+                    if let Some(line) = station_line {
+                        let _ = db.audit("svc_wx", &rate_key, &line);
+                        enqueue_channel_frames(slot, vec![line]);
+                        return;
+                    }
+                }
+
+                let resolved = if let Some(place) = place.as_deref().filter(|p| !p.trim().is_empty())
+                {
                     match crate::map_tiles::geocode_place(place) {
                         Ok((lat, lon, label)) => {
                             let label =
@@ -4419,30 +4439,69 @@ fn handle_bot_channel(
                         (lat, lon, label)
                     })
                 };
-                let Some((lat, lon, label)) = resolved else {
-                    enqueue_channel_text(
-                        slot,
-                        crate::signup::fit_mesh(
-                            "No position. Use #weather <zip> or set HQ site pin.",
-                        ),
-                    );
-                    return;
-                };
-                let query = crate::services::WeatherQuery {
-                    lat,
-                    lon,
-                    label,
-                    fahrenheit,
-                };
+
                 let frames = if detail {
-                    match crate::services::fetch_weather_detail(&query) {
-                        Ok(frames) => frames,
-                        Err(err) => {
-                            hq_log!(warn, "wx+: {err}");
-                            vec![crate::signup::fit_mesh("Weather unavailable right now.")]
+                    match resolved {
+                        Some((lat, lon, label)) => {
+                            let query = crate::services::WeatherQuery {
+                                lat,
+                                lon,
+                                label,
+                                fahrenheit,
+                            };
+                            match crate::services::fetch_weather_detail(&query) {
+                                Ok(mut frames) => {
+                                    if let Some(station) = station_line {
+                                        if frames.is_empty() {
+                                            frames.push(station);
+                                        } else {
+                                            frames[0] = station;
+                                        }
+                                    }
+                                    frames
+                                }
+                                Err(err) => {
+                                    hq_log!(warn, "wx+: {err}");
+                                    if let Some(station) = station_line {
+                                        vec![station]
+                                    } else {
+                                        vec![crate::signup::fit_mesh(
+                                            "Weather unavailable right now.",
+                                        )]
+                                    }
+                                }
+                            }
+                        }
+                        None => {
+                            if let Some(station) = station_line {
+                                vec![station]
+                            } else {
+                                enqueue_channel_text(
+                                    slot,
+                                    crate::signup::fit_mesh(
+                                        "No position. Use #weather <zip> or set HQ site pin.",
+                                    ),
+                                );
+                                return;
+                            }
                         }
                     }
                 } else {
+                    let Some((lat, lon, label)) = resolved else {
+                        enqueue_channel_text(
+                            slot,
+                            crate::signup::fit_mesh(
+                                "No position. Use #weather <zip> or set HQ site pin.",
+                            ),
+                        );
+                        return;
+                    };
+                    let query = crate::services::WeatherQuery {
+                        lat,
+                        lon,
+                        label,
+                        fahrenheit,
+                    };
                     match crate::services::fetch_weather_line(&query) {
                         Ok(line) => vec![line],
                         Err(err) => {

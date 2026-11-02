@@ -3,11 +3,23 @@
 //! Runs beside the radio task — not a second MeshCore companion. Mesh replies
 //! are enrolled-only, rate-limited, and capped at 160 bytes.
 
+mod ecowitt;
+mod mqtt_weather;
 mod nws;
 mod poller;
 mod quake;
+mod station;
 mod weather;
 
+pub use ecowitt::{bump_ecowitt_config, ecowitt_pull_status_line, ecowitt_push_status_line};
+pub use mqtt_weather::{
+    bump_mqtt_weather_config, clear_mqtt_weather_password, default_json_template,
+    mqtt_weather_status_line, password_file_present, save_mqtt_weather_password,
+};
+pub use station::{
+    age_label, any_station_source_enabled, current_station_reading, outdoor_temp_display,
+    station_is_fresh, station_label, station_stale_secs, try_station_wx_line, StationReading,
+};
 pub use nws::{
     fetch_active_alerts, fetch_emergency_alerts, format_nws_alert, format_nws_detail,
     is_amber_event, shorten_url, AMBER_CODES, EMERG_CODES,

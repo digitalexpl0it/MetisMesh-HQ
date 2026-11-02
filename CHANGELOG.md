@@ -19,6 +19,8 @@
 - Tracker whitelist + map trails / stale styling
 - Message sonar / warp-in map presence
 - Weather, NWS/Amber alerts, earthquakes on METIS-INFO; optional METIS-NET peer channel
+- Local MQTT weather station (D1c): bare `#weather` prefers a fresh Mosquitto reading (e.g. Ecowitt GW3002 via HA/WeeWX); ZIP/sched stay Open-Meteo
+- Local Ecowitt ingest + Weather page (D1d): custom-server push and gateway `get_livedata_info` pull (GW1200 / WittBoy / GW300x); shared station cache; no cloud Ambient
 - Encrypted backup/restore; contact bulk import/export
 - Offline firmware locker + selective Manage overlay + USB flasher
 
@@ -68,4 +70,4 @@ First cut you can actually run as a headquarters.
 - Audit log for operator sends
 - Settings for HQ name, radio presets, purge, and keyring status
 
-Still ahead: HQ-to-HQ linking, local MQTT weather station, map.meshcore.dev uploader (optional), ingest tagged by `radio_id`, standalone signed installers, packaging polish.
+Still ahead: HQ-to-HQ linking, map.meshcore.dev uploader (optional), ingest tagged by `radio_id`, standalone signed installers, packaging polish.

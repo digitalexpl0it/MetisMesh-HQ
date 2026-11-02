@@ -130,6 +130,51 @@ pub fn TextInput(
     }
 }
 
+/// Labeled on/off switch for Settings (replaces bare checkboxes).
+#[component]
+pub fn ToggleSwitch(
+    checked: bool,
+    label: String,
+    #[props(default = false)] disabled: bool,
+    #[props(default)] hint: Option<String>,
+    onchange: EventHandler<bool>,
+) -> Element {
+    let row_class = if disabled {
+        "toggle-row toggle-row-disabled"
+    } else {
+        "toggle-row"
+    };
+    let track_class = if checked {
+        "toggle-track toggle-track-on"
+    } else {
+        "toggle-track"
+    };
+    rsx! {
+        div { class: "{row_class}",
+            button {
+                r#type: "button",
+                class: "{track_class}",
+                role: "switch",
+                aria_checked: checked.to_string(),
+                aria_label: "{label}",
+                disabled,
+                onclick: move |_| {
+                    if !disabled {
+                        onchange.call(!checked);
+                    }
+                },
+                span { class: "toggle-thumb" }
+            }
+            div { class: "toggle-copy min-w-0",
+                span { class: "toggle-label", "{label}" }
+                if let Some(hint) = hint {
+                    p { class: "toggle-hint", "{hint}" }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 pub fn BatteryPill(pct: Option<u8>, mv: Option<u16>, charging: bool) -> Element {
     let Some(pct) = pct else {

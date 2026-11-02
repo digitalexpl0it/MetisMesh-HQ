@@ -97,6 +97,86 @@
   background: rgba(61, 214, 140, 0.12);
 }
 
+/* Settings option switches (Services, etc.) */
+.toggle-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 0.15rem 0;
+}
+
+.toggle-row-disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.toggle-track {
+  position: relative;
+  flex: 0 0 auto;
+  width: 2.5rem;
+  height: 1.4rem;
+  margin-top: 0.1rem;
+  border-radius: 999px;
+  border: 1px solid #ffffff24;
+  background: #1a222b;
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.toggle-track:focus-visible {
+  outline: 2px solid rgba(61, 214, 140, 0.55);
+  outline-offset: 2px;
+}
+
+.toggle-track-on {
+  background: rgba(61, 214, 140, 0.35);
+  border-color: rgba(61, 214, 140, 0.65);
+}
+
+.toggle-thumb {
+  position: absolute;
+  top: 0.15rem;
+  left: 0.15rem;
+  width: 1rem;
+  height: 1rem;
+  border-radius: 999px;
+  background: #9aa3af;
+  transition: transform 0.15s ease, background 0.15s ease;
+  pointer-events: none;
+}
+
+.toggle-track-on .toggle-thumb {
+  transform: translateX(1.1rem);
+  background: #3dd68c;
+}
+
+.toggle-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding-top: 0.05rem;
+}
+
+.toggle-label {
+  font-size: 0.875rem;
+  line-height: 1.35;
+  color: #f4f4f5;
+}
+
+.toggle-hint {
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.35;
+  color: #9aa3af;
+}
+
+.services-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
 /*
  * Roster details slide-down. Kept in form.css because arbitrary Tailwind
  * max-height (e.g. max-h-[min(85vh,52rem)]) is absent from assets/tailwind.css.

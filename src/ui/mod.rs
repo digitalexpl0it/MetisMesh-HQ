@@ -4,6 +4,7 @@ mod infra_page;
 mod map_host;
 mod map_page;
 mod tracker_page;
+mod weather_page;
 mod widgets;
 
 use std::sync::{Arc, OnceLock};
@@ -32,11 +33,12 @@ use icons::{Icon, IconName};
 use infra_page::InfraPage;
 use map_page::MapPage;
 use tracker_page::TrackerPage;
+use weather_page::WeatherPage;
 use widgets::{
     append_emoji, heard_icon_class, heard_within_week, Badge, BarMix, BarMixRow, BatteryChart,
     BatteryPill, BatterySample, Button, ButtonKind, Card, ChartSeries, Dialog, EmojiPickerButton,
     LineChart, PageHeading, PinSlideDown, SelectInput, SlideDownPanel, Sparkline, TextInput,
-    ToastHost,
+    ToastHost, ToggleSwitch,
 };
 
 /// Show a transient toast (and log it). Prefer this over inline amber labels.
@@ -66,6 +68,7 @@ pub(crate) fn state() -> &'static AppState {
 enum Page {
     Dashboard,
     Map,
+    Weather,
     Tracker,
     Infrastructure,
     Roster,
@@ -172,6 +175,24 @@ const NAV_SEARCH_INDEX: &[NavSearchEntry] = &[
             "location",
             "MapLibre",
             "offline map",
+            "PMTiles",
+            "basemap",
+        ],
+    },
+    NavSearchEntry {
+        page: Page::Weather,
+        title: "Weather",
+        icon: IconName::Weather,
+        topics: &[
+            "station",
+            "Ecowitt",
+            "GW1200",
+            "WittBoy",
+            "MQTT",
+            "temperature",
+            "humidity",
+            "yard",
+            "local weather",
         ],
     },
     NavSearchEntry {
@@ -271,10 +292,17 @@ const NAV_SEARCH_INDEX: &[NavSearchEntry] = &[
             "logo",
             // Services
             "weather",
+            "MQTT",
+            "Mosquitto",
+            "Ecowitt",
+            "GW1200",
+            "WittBoy",
+            "custom server",
             "NWS",
             "quake",
             "amber",
             "ZIP",
+            "site pin",
             // Data
             "backup",
             "restore",
@@ -546,6 +574,13 @@ pub fn App() -> Element {
                                         onclick: move |_| page.set(Page::Map),
                                     }
                                     NavButton {
+                                        icon: IconName::Weather,
+                                        label: "Weather".to_string(),
+                                        expanded,
+                                        active: page() == Page::Weather,
+                                        onclick: move |_| page.set(Page::Weather),
+                                    }
+                                    NavButton {
                                         icon: IconName::Signal,
                                         label: "Infrastructure".to_string(),
                                         expanded,
@@ -612,6 +647,7 @@ pub fn App() -> Element {
                         match page() {
                             Page::Dashboard => rsx! { DashboardPage { radio: radio.clone(), on_navigate: move |next| page.set(next) } },
                             Page::Map => rsx! { MapPage {} },
+                            Page::Weather => rsx! { WeatherPage {} },
                             Page::Tracker => rsx! { TrackerPage {} },
                             Page::Infrastructure => rsx! { InfraPage { radio: radio.clone() } },
                             Page::Roster => rsx! { RosterPage {} },
@@ -4239,6 +4275,16 @@ enum ConnectLinkTab {
     Network,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ServicesTab {
+    Site,
+    Weather,
+    Ecowitt,
+    Mqtt,
+    Alerts,
+    Quake,
+}
+
 fn custom_var_label(key: &str) -> String {
     let lower = key.to_ascii_lowercase();
     if lower.contains("gps") {
@@ -4528,6 +4574,7 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
     let mut preset_query = use_signal(String::new);
     let mut settings_tab = use_signal(|| SettingsTab::Hq);
     let mut hq_tab = use_signal(|| HqTab::Connect);
+    let mut services_tab = use_signal(|| ServicesTab::Site);
     let mut usb_scanned = use_signal(|| false);
     let mut flasher_tick = use_signal(|| 0u32);
     let mut flasher_device = use_signal(String::new);
@@ -4642,6 +4689,130 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
             .ok()
             .flatten()
             .unwrap_or_else(|| "60".into())
+    });
+    let mut svc_mqtt_enabled = use_signal(|| {
+        crate::services::setting_bool(&state().db, "svc_weather_mqtt_enabled", false)
+    });
+    let mut svc_mqtt_broker = use_signal(|| {
+        state()
+            .db
+            .setting("svc_weather_mqtt_broker")
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    });
+    let mut svc_mqtt_port = use_signal(|| {
+        state()
+            .db
+            .setting("svc_weather_mqtt_port")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "1883".into())
+    });
+    let mut svc_mqtt_tls = use_signal(|| {
+        crate::services::setting_bool(&state().db, "svc_weather_mqtt_tls", false)
+    });
+    let mut svc_mqtt_user = use_signal(|| {
+        state()
+            .db
+            .setting("svc_weather_mqtt_username")
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    });
+    let mut svc_mqtt_pass = use_signal(String::new);
+    let mut svc_mqtt_topic = use_signal(|| {
+        state()
+            .db
+            .setting("svc_weather_mqtt_topic")
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    });
+    let mut svc_mqtt_mode = use_signal(|| {
+        state()
+            .db
+            .setting("svc_weather_mqtt_mode")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "json_template".into())
+    });
+    let mut svc_mqtt_template = use_signal(|| {
+        state()
+            .db
+            .setting("svc_weather_mqtt_template")
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    });
+    let mut svc_mqtt_stale = use_signal(|| {
+        state()
+            .db
+            .setting("svc_weather_station_stale_secs")
+            .ok()
+            .flatten()
+            .or_else(|| {
+                state()
+                    .db
+                    .setting("svc_weather_mqtt_stale_secs")
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or_else(|| "3600".into())
+    });
+    let mut svc_mqtt_label = use_signal(|| {
+        state()
+            .db
+            .setting("svc_weather_mqtt_label")
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    });
+    let mut svc_ecowitt_push = use_signal(|| {
+        crate::services::setting_bool(&state().db, "svc_weather_ecowitt_push_enabled", false)
+    });
+    let mut svc_ecowitt_port = use_signal(|| {
+        state()
+            .db
+            .setting("svc_weather_ecowitt_push_port")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "4199".into())
+    });
+    let mut svc_ecowitt_path = use_signal(|| {
+        state()
+            .db
+            .setting("svc_weather_ecowitt_push_path")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "/data/report".into())
+    });
+    let mut svc_ecowitt_passkey = use_signal(|| {
+        state()
+            .db
+            .setting("svc_weather_ecowitt_passkey")
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    });
+    let mut svc_ecowitt_pull = use_signal(|| {
+        crate::services::setting_bool(&state().db, "svc_weather_ecowitt_pull_enabled", false)
+    });
+    let mut svc_ecowitt_host = use_signal(|| {
+        state()
+            .db
+            .setting("svc_weather_ecowitt_pull_host")
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    });
+    let mut svc_ecowitt_interval = use_signal(|| {
+        state()
+            .db
+            .setting("svc_weather_ecowitt_pull_interval_secs")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "30".into())
     });
     let mut svc_amber = use_signal(|| {
         crate::services::setting_bool(&state().db, "svc_amber_enabled", false)
@@ -4784,6 +4955,12 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
         .cloned()
         .collect();
     let companion_count = radio.devices.iter().filter(|device| device.companion).count();
+    let mqtt_wx_status = crate::services::mqtt_weather_status_line(&state().db);
+    let ecowitt_push_status = crate::services::ecowitt_push_status_line(&state().db);
+    let ecowitt_pull_status = crate::services::ecowitt_pull_status_line(&state().db);
+    let mqtt_template_default =
+        crate::services::default_json_template(crate::services::weather_unit_f(&state().db));
+    let mqtt_pass_saved = crate::services::password_file_present(&crate::data_dir());
     let scanning = radio.state == "scanning" || radio.state == "pairing";
     let busy = matches!(
         radio.state.as_str(),
@@ -5265,257 +5442,689 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
             if hq_tab() == HqTab::Services {
             Card { title: "Info services", icon: Some(IconName::Radio),
                 p { class: "mb-3 text-sm text-muted-foreground",
-                    "Bot home is the private {channel_info_name()} channel (enrolled secret only). Send #weather [zip], #quake, #amber, or #help there. Add + for detail (#weather+ / #amber+) — multi-frame replies. Quake/NWS polls stay silent when nothing new is found. Alerts are labeled with source and time — not an official agency feed."
+                    "Commands run on the private {channel_info_name()} channel (enrolled secret only). Alerts are labeled with source and time — not an official agency feed."
                 }
-                div { class: "mb-3 grid gap-3 sm:grid-cols-2",
-                    div {
-                        label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "HQ site latitude" }
-                        TextInput {
-                            value: svc_site_lat(),
-                            placeholder: radio.hq_lat.map(|v| format!("{v:.6}")).unwrap_or_else(|| "34.050000".into()),
-                            oninput: move |event: FormEvent| svc_site_lat.set(event.value()),
+                div { class: "settings-subtabs",
+                    button {
+                        class: if services_tab() == ServicesTab::Site { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
+                        onclick: move |_| services_tab.set(ServicesTab::Site),
+                        "Site"
+                    }
+                    button {
+                        class: if services_tab() == ServicesTab::Weather { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
+                        onclick: move |_| services_tab.set(ServicesTab::Weather),
+                        "Weather"
+                    }
+                    button {
+                        class: if services_tab() == ServicesTab::Ecowitt { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
+                        onclick: move |_| services_tab.set(ServicesTab::Ecowitt),
+                        "Ecowitt"
+                    }
+                    button {
+                        class: if services_tab() == ServicesTab::Mqtt { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
+                        onclick: move |_| services_tab.set(ServicesTab::Mqtt),
+                        "MQTT"
+                    }
+                    button {
+                        class: if services_tab() == ServicesTab::Alerts { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
+                        onclick: move |_| services_tab.set(ServicesTab::Alerts),
+                        "Alerts"
+                    }
+                    button {
+                        class: if services_tab() == ServicesTab::Quake { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
+                        onclick: move |_| services_tab.set(ServicesTab::Quake),
+                        "Quake"
+                    }
+                }
+
+                if services_tab() == ServicesTab::Site {
+                    div { class: "services-panel",
+                        p { class: "text-sm text-muted-foreground",
+                            "Site pin anchors bare #weather, NWS polling, and the USGS box when a node has no GPS."
+                        }
+                        div { class: "grid gap-3 sm:grid-cols-2",
+                            div {
+                                label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "HQ site latitude" }
+                                TextInput {
+                                    value: svc_site_lat(),
+                                    placeholder: radio.hq_lat.map(|v| format!("{v:.6}")).unwrap_or_else(|| "34.050000".into()),
+                                    oninput: move |event: FormEvent| svc_site_lat.set(event.value()),
+                                }
+                            }
+                            div {
+                                label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "HQ site longitude" }
+                                TextInput {
+                                    value: svc_site_lon(),
+                                    placeholder: radio.hq_lon.map(|v| format!("{v:.6}")).unwrap_or_else(|| "-118.250000".into()),
+                                    oninput: move |event: FormEvent| svc_site_lon.set(event.value()),
+                                }
+                            }
+                        }
+                        div { class: "flex flex-wrap gap-2",
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| {
+                                    let lat = svc_site_lat().trim().to_string();
+                                    let lon = svc_site_lon().trim().to_string();
+                                    if lat.parse::<f64>().is_ok() && lon.parse::<f64>().is_ok() {
+                                        let _ = state().db.set_setting("hq_site_lat", &lat);
+                                        let _ = state().db.set_setting("hq_site_lon", &lon);
+                                        status_note("HQ site pin saved for weather and NWS.");
+                                    } else {
+                                        status_note("Enter valid decimal latitude and longitude.");
+                                    }
+                                },
+                                Icon { name: IconName::Check, size: 14 }
+                                "Save site pin"
+                            }
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| {
+                                    if let (Some(lat), Some(lon)) = (radio.hq_lat, radio.hq_lon) {
+                                        let lat_s = format!("{lat:.6}");
+                                        let lon_s = format!("{lon:.6}");
+                                        let _ = state().db.set_setting("hq_site_lat", &lat_s);
+                                        let _ = state().db.set_setting("hq_site_lon", &lon_s);
+                                        svc_site_lat.set(lat_s);
+                                        svc_site_lon.set(lon_s);
+                                        status_note("Copied companion advert coords into the site pin.");
+                                    } else {
+                                        status_note("Companion has no advert coordinates yet.");
+                                    }
+                                },
+                                "Use companion coords"
+                            }
                         }
                     }
-                    div {
-                        label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "HQ site longitude" }
-                        TextInput {
-                            value: svc_site_lon(),
-                            placeholder: radio.hq_lon.map(|v| format!("{v:.6}")).unwrap_or_else(|| "-118.250000".into()),
-                            oninput: move |event: FormEvent| svc_site_lon.set(event.value()),
-                        }
-                    }
                 }
-                div { class: "mb-3 flex flex-wrap gap-2",
-                    Button {
-                        kind: ButtonKind::Ghost,
-                        onclick: move |_| {
-                            let lat = svc_site_lat().trim().to_string();
-                            let lon = svc_site_lon().trim().to_string();
-                            if lat.parse::<f64>().is_ok() && lon.parse::<f64>().is_ok() {
-                                let _ = state().db.set_setting("hq_site_lat", &lat);
-                                let _ = state().db.set_setting("hq_site_lon", &lon);
-                                status_note("HQ site pin saved for weather and NWS.");
-                            } else {
-                                status_note("Enter valid decimal latitude and longitude.");
-                            }
-                        },
-                        Icon { name: IconName::Check, size: 14 }
-                        "Save site pin"
-                    }
-                    Button {
-                        kind: ButtonKind::Ghost,
-                        onclick: move |_| {
-                            if let (Some(lat), Some(lon)) = (radio.hq_lat, radio.hq_lon) {
-                                let lat_s = format!("{lat:.6}");
-                                let lon_s = format!("{lon:.6}");
-                                let _ = state().db.set_setting("hq_site_lat", &lat_s);
-                                let _ = state().db.set_setting("hq_site_lon", &lon_s);
-                                svc_site_lat.set(lat_s);
-                                svc_site_lon.set(lon_s);
-                                status_note("Copied companion advert coords into the site pin.");
-                            } else {
-                                status_note("Companion has no advert coordinates yet.");
-                            }
-                        },
-                        "Use companion coords"
-                    }
-                }
-                div { class: "mb-3 flex flex-col gap-2",
-                    label { class: "flex items-center gap-2 text-sm",
-                        input {
-                            r#type: "checkbox",
+
+                if services_tab() == ServicesTab::Weather {
+                    div { class: "services-panel",
+                        ToggleSwitch {
                             checked: svc_weather(),
-                            oninput: move |_| {
-                                let next = !svc_weather();
+                            label: "Weather on bot-home channel".to_string(),
+                            hint: Some("#weather [zip] and #weather+ (multi-frame). Place lookups use Open-Meteo.".to_string()),
+                            onchange: move |next| {
                                 svc_weather.set(next);
                                 crate::services::set_setting_bool(&state().db, "svc_weather_enabled", next);
                             }
                         }
-                        "Weather on bot-home channel (#weather / #weather+)"
-                    }
-                    div { class: "ml-6 w-40",
-                        SelectInput {
-                            id: "svc-weather-unit".to_string(),
-                            value: svc_weather_unit(),
-                            onchange: move |event: FormEvent| {
-                                let value = event.value();
-                                let _ = state().db.set_setting("svc_weather_unit", &value);
-                                svc_weather_unit.set(value);
-                            },
-                            option { value: "F", style: "background-color: #151a20; color: #f4f4f5;", "Fahrenheit" }
-                            option { value: "C", style: "background-color: #151a20; color: #f4f4f5;", "Celsius" }
+                        div { class: "w-40",
+                            label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "Units" }
+                            SelectInput {
+                                id: "svc-weather-unit".to_string(),
+                                value: svc_weather_unit(),
+                                onchange: move |event: FormEvent| {
+                                    let value = event.value();
+                                    let _ = state().db.set_setting("svc_weather_unit", &value);
+                                    svc_weather_unit.set(value);
+                                },
+                                option { value: "F", style: "background-color: #151a20; color: #f4f4f5;", "Fahrenheit" }
+                                option { value: "C", style: "background-color: #151a20; color: #f4f4f5;", "Celsius" }
+                            }
                         }
-                    }
-                    label { class: "ml-6 flex items-center gap-2 text-sm text-muted-foreground",
-                        input {
-                            r#type: "checkbox",
+                        ToggleSwitch {
                             checked: svc_weather_hourly(),
                             disabled: !svc_weather(),
-                            oninput: move |_| {
-                                let next = !svc_weather_hourly();
+                            label: "Auto-post weather for ZIP list".to_string(),
+                            hint: Some("Posts one ZIP per minute when due. Silent otherwise.".to_string()),
+                            onchange: move |next| {
                                 svc_weather_hourly.set(next);
                                 crate::services::set_setting_bool(&state().db, "svc_weather_hourly", next);
                             }
                         }
-                        "Auto-post weather for ZIP list (below)"
+                        div { class: "flex flex-col gap-2",
+                            label { class: "block text-xs uppercase tracking-[0.16em] text-muted-foreground",
+                                "Area ZIP codes (comma or space separated)"
+                            }
+                            TextInput {
+                                value: svc_weather_zips(),
+                                placeholder: "92345 92344 91709",
+                                oninput: move |event: FormEvent| {
+                                    let value = event.value();
+                                    svc_weather_zips.set(value.clone());
+                                    let _ = state().db.set_setting("svc_weather_zips", value.trim());
+                                },
+                            }
+                            div { class: "flex items-center gap-2",
+                                label { class: "text-xs text-muted-foreground shrink-0", "Every" }
+                                div { class: "w-24",
+                                    TextInput {
+                                        value: svc_weather_interval(),
+                                        placeholder: "60",
+                                        oninput: move |event: FormEvent| {
+                                            let value = event.value();
+                                            svc_weather_interval.set(value.clone());
+                                            if let Ok(mins) = value.parse::<i64>() {
+                                                if (15..=24 * 60).contains(&mins) {
+                                                    let _ = state().db.set_setting(
+                                                        "svc_weather_interval_mins",
+                                                        &mins.to_string(),
+                                                    );
+                                                }
+                                            }
+                                        },
+                                    }
+                                }
+                                span { class: "text-xs text-muted-foreground", "minutes" }
+                            }
+                        }
                     }
-                    div { class: "ml-6 flex flex-col gap-2",
-                        label { class: "block text-xs uppercase tracking-[0.16em] text-muted-foreground",
-                            "Area ZIP codes (comma or space separated)"
+                }
+
+                if services_tab() == ServicesTab::Ecowitt {
+                    div { class: "services-panel",
+                        p { class: "text-sm text-muted-foreground",
+                            "Local-only Ecowitt / Fine Offset gateways (GW1200, WittBoy/GW2001, GW300x). No cloud Ambient support. Push = Customized upload to this HQ. Pull = poll the gateway’s get_livedata_info. See the Weather page for the live dashboard."
                         }
-                        TextInput {
-                            value: svc_weather_zips(),
-                            placeholder: "92345 92344 91709",
-                            oninput: move |event: FormEvent| {
-                                let value = event.value();
-                                svc_weather_zips.set(value.clone());
-                                let _ = state().db.set_setting("svc_weather_zips", value.trim());
-                            },
+                        p { class: "text-xs text-muted-foreground", "{ecowitt_push_status}" }
+                        p { class: "text-xs text-muted-foreground", "{ecowitt_pull_status}" }
+                        ToggleSwitch {
+                            checked: svc_ecowitt_push(),
+                            label: "Ecowitt custom-server push".to_string(),
+                            hint: Some("Gateway Customized → protocol Ecowitt → this machine’s LAN IP, path, and port (HTTP only).".to_string()),
+                            onchange: move |next| {
+                                svc_ecowitt_push.set(next);
+                                crate::services::set_setting_bool(
+                                    &state().db,
+                                    "svc_weather_ecowitt_push_enabled",
+                                    next,
+                                );
+                                crate::services::bump_ecowitt_config();
+                            }
                         }
-                        div { class: "flex items-center gap-2",
-                            label { class: "text-xs text-muted-foreground shrink-0", "Every" }
-                            div { class: "w-24",
+                        div { class: "grid gap-2 sm:grid-cols-2",
+                            div { class: "flex flex-col gap-1",
+                                label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Listen port" }
                                 TextInput {
-                                    value: svc_weather_interval(),
-                                    placeholder: "60",
+                                    value: svc_ecowitt_port(),
+                                    placeholder: "4199".to_string(),
                                     oninput: move |event: FormEvent| {
                                         let value = event.value();
-                                        svc_weather_interval.set(value.clone());
-                                        if let Ok(mins) = value.parse::<i64>() {
-                                            if (15..=24 * 60).contains(&mins) {
+                                        svc_ecowitt_port.set(value.clone());
+                                        if value.trim().parse::<u16>().is_ok() {
+                                            let _ = state().db.set_setting(
+                                                "svc_weather_ecowitt_push_port",
+                                                value.trim(),
+                                            );
+                                            crate::services::bump_ecowitt_config();
+                                        }
+                                    },
+                                }
+                            }
+                            div { class: "flex flex-col gap-1",
+                                label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Path" }
+                                TextInput {
+                                    value: svc_ecowitt_path(),
+                                    placeholder: "/data/report".to_string(),
+                                    oninput: move |event: FormEvent| {
+                                        let value = event.value();
+                                        svc_ecowitt_path.set(value.clone());
+                                        let _ = state().db.set_setting(
+                                            "svc_weather_ecowitt_push_path",
+                                            value.trim(),
+                                        );
+                                        crate::services::bump_ecowitt_config();
+                                    },
+                                }
+                            }
+                        }
+                        div { class: "flex flex-col gap-1",
+                            label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "PASSKEY (optional)" }
+                            TextInput {
+                                value: svc_ecowitt_passkey(),
+                                placeholder: "Leave blank to accept any".to_string(),
+                                kind: "password".to_string(),
+                                oninput: move |event: FormEvent| {
+                                    let value = event.value();
+                                    svc_ecowitt_passkey.set(value.clone());
+                                    let _ = state().db.set_setting(
+                                        "svc_weather_ecowitt_passkey",
+                                        value.trim(),
+                                    );
+                                    crate::services::bump_ecowitt_config();
+                                },
+                            }
+                        }
+                        ToggleSwitch {
+                            checked: svc_ecowitt_pull(),
+                            label: "Poll gateway livedata API".to_string(),
+                            hint: Some("GET http://gateway/get_livedata_info — IoT gateways GW1200 / GW2000 / GW3000.".to_string()),
+                            onchange: move |next| {
+                                svc_ecowitt_pull.set(next);
+                                crate::services::set_setting_bool(
+                                    &state().db,
+                                    "svc_weather_ecowitt_pull_enabled",
+                                    next,
+                                );
+                                crate::services::bump_ecowitt_config();
+                            }
+                        }
+                        div { class: "grid gap-2 sm:grid-cols-2",
+                            div { class: "flex flex-col gap-1",
+                                label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Gateway host / IP" }
+                                TextInput {
+                                    value: svc_ecowitt_host(),
+                                    placeholder: "192.168.1.50".to_string(),
+                                    oninput: move |event: FormEvent| {
+                                        let value = event.value();
+                                        svc_ecowitt_host.set(value.clone());
+                                        let _ = state().db.set_setting(
+                                            "svc_weather_ecowitt_pull_host",
+                                            value.trim(),
+                                        );
+                                        crate::services::bump_ecowitt_config();
+                                    },
+                                }
+                            }
+                            div { class: "flex flex-col gap-1",
+                                label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Interval (seconds)" }
+                                TextInput {
+                                    value: svc_ecowitt_interval(),
+                                    placeholder: "30".to_string(),
+                                    oninput: move |event: FormEvent| {
+                                        let value = event.value();
+                                        svc_ecowitt_interval.set(value.clone());
+                                        if let Ok(secs) = value.parse::<i64>() {
+                                            if (5..=300).contains(&secs) {
                                                 let _ = state().db.set_setting(
-                                                    "svc_weather_interval_mins",
-                                                    &mins.to_string(),
+                                                    "svc_weather_ecowitt_pull_interval_secs",
+                                                    &secs.to_string(),
                                                 );
+                                                crate::services::bump_ecowitt_config();
                                             }
                                         }
                                     },
                                 }
                             }
-                            span { class: "text-xs text-muted-foreground", "minutes (one ZIP per minute when due)" }
+                        }
+                        div { class: "flex flex-col gap-1",
+                            label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Station label (shared)" }
+                            TextInput {
+                                value: svc_mqtt_label(),
+                                placeholder: "Yard".to_string(),
+                                oninput: move |event: FormEvent| {
+                                    let value = event.value();
+                                    svc_mqtt_label.set(value.clone());
+                                    let _ = state().db.set_setting(
+                                        "svc_weather_mqtt_label",
+                                        value.trim(),
+                                    );
+                                    crate::services::bump_mqtt_weather_config();
+                                    crate::services::bump_ecowitt_config();
+                                },
+                            }
+                        }
+                        div { class: "flex items-center gap-2",
+                            label { class: "text-xs text-muted-foreground shrink-0", "Stale after" }
+                            div { class: "w-28",
+                                TextInput {
+                                    value: svc_mqtt_stale(),
+                                    placeholder: "3600".to_string(),
+                                    oninput: move |event: FormEvent| {
+                                        let value = event.value();
+                                        svc_mqtt_stale.set(value.clone());
+                                        if let Ok(secs) = value.parse::<i64>() {
+                                            if (60..=7 * 24 * 3600).contains(&secs) {
+                                                let _ = state().db.set_setting(
+                                                    "svc_weather_station_stale_secs",
+                                                    &secs.to_string(),
+                                                );
+                                                let _ = state().db.set_setting(
+                                                    "svc_weather_mqtt_stale_secs",
+                                                    &secs.to_string(),
+                                                );
+                                                crate::services::bump_mqtt_weather_config();
+                                                crate::services::bump_ecowitt_config();
+                                            }
+                                        }
+                                    },
+                                }
+                            }
+                            span { class: "text-xs text-muted-foreground", "seconds (shared with MQTT)" }
                         }
                     }
-                    label { class: "flex items-center gap-2 text-sm",
-                        input {
-                            r#type: "checkbox",
+                }
+
+                if services_tab() == ServicesTab::Mqtt {
+                    div { class: "services-panel",
+                        p { class: "text-sm text-muted-foreground",
+                            "Optional LAN MQTT bridge (Home Assistant / WeeWX → Mosquitto). Prefer the Ecowitt tab for direct gateway support. Bare #weather uses the freshest local station reading."
+                        }
+                        ToggleSwitch {
+                            checked: svc_mqtt_enabled(),
+                            disabled: !svc_weather(),
+                            label: "Subscribe to local MQTT weather".to_string(),
+                            hint: Some(if svc_weather() {
+                                mqtt_wx_status.clone()
+                            } else {
+                                "Turn on Weather first.".to_string()
+                            }),
+                            onchange: move |next| {
+                                svc_mqtt_enabled.set(next);
+                                crate::services::set_setting_bool(
+                                    &state().db,
+                                    "svc_weather_mqtt_enabled",
+                                    next,
+                                );
+                                crate::services::bump_mqtt_weather_config();
+                            }
+                        }
+                        div { class: "grid gap-2 sm:grid-cols-2",
+                            div { class: "flex flex-col gap-1",
+                                label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Broker host" }
+                                TextInput {
+                                    value: svc_mqtt_broker(),
+                                    placeholder: "127.0.0.1".to_string(),
+                                    oninput: move |event: FormEvent| {
+                                        let value = event.value();
+                                        svc_mqtt_broker.set(value.clone());
+                                        let _ = state().db.set_setting(
+                                            "svc_weather_mqtt_broker",
+                                            value.trim(),
+                                        );
+                                        crate::services::bump_mqtt_weather_config();
+                                    },
+                                }
+                            }
+                            div { class: "flex flex-col gap-1",
+                                label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Port" }
+                                TextInput {
+                                    value: svc_mqtt_port(),
+                                    placeholder: "1883".to_string(),
+                                    oninput: move |event: FormEvent| {
+                                        let value = event.value();
+                                        svc_mqtt_port.set(value.clone());
+                                        if value.trim().parse::<u16>().is_ok() {
+                                            let _ = state().db.set_setting(
+                                                "svc_weather_mqtt_port",
+                                                value.trim(),
+                                            );
+                                            crate::services::bump_mqtt_weather_config();
+                                        }
+                                    },
+                                }
+                            }
+                        }
+                        ToggleSwitch {
+                            checked: svc_mqtt_tls(),
+                            disabled: !svc_mqtt_enabled(),
+                            label: "TLS".to_string(),
+                            onchange: move |next| {
+                                svc_mqtt_tls.set(next);
+                                crate::services::set_setting_bool(
+                                    &state().db,
+                                    "svc_weather_mqtt_tls",
+                                    next,
+                                );
+                                crate::services::bump_mqtt_weather_config();
+                            }
+                        }
+                        div { class: "grid gap-2 sm:grid-cols-2",
+                            div { class: "flex flex-col gap-1",
+                                label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Username (optional)" }
+                                TextInput {
+                                    value: svc_mqtt_user(),
+                                    placeholder: "".to_string(),
+                                    oninput: move |event: FormEvent| {
+                                        let value = event.value();
+                                        svc_mqtt_user.set(value.clone());
+                                        let _ = state().db.set_setting(
+                                            "svc_weather_mqtt_username",
+                                            value.trim(),
+                                        );
+                                        crate::services::bump_mqtt_weather_config();
+                                    },
+                                }
+                            }
+                            div { class: "flex flex-col gap-1",
+                                label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground",
+                                    if mqtt_pass_saved {
+                                        "Password (saved under data/ · leave blank to keep)"
+                                    } else {
+                                        "Password (saved under data/mqtt-weather.pass · 0600)"
+                                    }
+                                }
+                                TextInput {
+                                    value: svc_mqtt_pass(),
+                                    placeholder: "Broker password".to_string(),
+                                    kind: "password".to_string(),
+                                    oninput: move |event: FormEvent| svc_mqtt_pass.set(event.value()),
+                                }
+                                div { class: "flex gap-2",
+                                    Button {
+                                        kind: ButtonKind::Ghost,
+                                        onclick: move |_| {
+                                            let pass = svc_mqtt_pass();
+                                            match crate::services::save_mqtt_weather_password(
+                                                &crate::data_dir(),
+                                                &pass,
+                                            ) {
+                                                Ok(()) => {
+                                                    svc_mqtt_pass.set(String::new());
+                                                    status_note(if pass.trim().is_empty() {
+                                                        "MQTT weather password cleared."
+                                                    } else {
+                                                        "MQTT weather password saved."
+                                                    });
+                                                }
+                                                Err(err) => status_note(format!("Password save failed: {err}")),
+                                            }
+                                        },
+                                        "Save password"
+                                    }
+                                    Button {
+                                        kind: ButtonKind::Ghost,
+                                        onclick: move |_| {
+                                            crate::services::clear_mqtt_weather_password(&crate::data_dir());
+                                            svc_mqtt_pass.set(String::new());
+                                            status_note("MQTT weather password cleared.");
+                                        },
+                                        "Clear"
+                                    }
+                                }
+                            }
+                        }
+                        div { class: "flex flex-col gap-1",
+                            label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Topic" }
+                            TextInput {
+                                value: svc_mqtt_topic(),
+                                placeholder: "homeassistant/sensor/gw3002/state".to_string(),
+                                oninput: move |event: FormEvent| {
+                                    let value = event.value();
+                                    svc_mqtt_topic.set(value.clone());
+                                    let _ = state().db.set_setting(
+                                        "svc_weather_mqtt_topic",
+                                        value.trim(),
+                                    );
+                                    crate::services::bump_mqtt_weather_config();
+                                },
+                            }
+                        }
+                        div { class: "grid gap-2 sm:grid-cols-2",
+                            div { class: "flex flex-col gap-1",
+                                label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Payload mode" }
+                                SelectInput {
+                                    id: "svc-mqtt-mode".to_string(),
+                                    value: svc_mqtt_mode(),
+                                    onchange: move |event: FormEvent| {
+                                        let value = event.value();
+                                        let _ = state().db.set_setting("svc_weather_mqtt_mode", &value);
+                                        svc_mqtt_mode.set(value);
+                                        crate::services::bump_mqtt_weather_config();
+                                    },
+                                    option { value: "json_template", style: "background-color: #151a20; color: #f4f4f5;", "JSON template" }
+                                    option { value: "passthrough", style: "background-color: #151a20; color: #f4f4f5;", "Passthrough text" }
+                                }
+                            }
+                            div { class: "flex flex-col gap-1",
+                                label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Station label" }
+                                TextInput {
+                                    value: svc_mqtt_label(),
+                                    placeholder: "Yard".to_string(),
+                                    oninput: move |event: FormEvent| {
+                                        let value = event.value();
+                                        svc_mqtt_label.set(value.clone());
+                                        let _ = state().db.set_setting(
+                                            "svc_weather_mqtt_label",
+                                            value.trim(),
+                                        );
+                                        crate::services::bump_mqtt_weather_config();
+                                    },
+                                }
+                            }
+                        }
+                        div { class: "flex flex-col gap-1",
+                            label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground",
+                                "JSON template (blank = {mqtt_template_default})"
+                            }
+                            TextInput {
+                                value: svc_mqtt_template(),
+                                placeholder: mqtt_template_default.clone(),
+                                oninput: move |event: FormEvent| {
+                                    let value = event.value();
+                                    svc_mqtt_template.set(value.clone());
+                                    let _ = state().db.set_setting(
+                                        "svc_weather_mqtt_template",
+                                        value.trim(),
+                                    );
+                                    crate::services::bump_mqtt_weather_config();
+                                },
+                            }
+                        }
+                        div { class: "flex items-center gap-2",
+                            label { class: "text-xs text-muted-foreground shrink-0", "Stale after" }
+                            div { class: "w-28",
+                                TextInput {
+                                    value: svc_mqtt_stale(),
+                                    placeholder: "3600".to_string(),
+                                    oninput: move |event: FormEvent| {
+                                        let value = event.value();
+                                        svc_mqtt_stale.set(value.clone());
+                                        if let Ok(secs) = value.parse::<i64>() {
+                                            if (60..=7 * 24 * 3600).contains(&secs) {
+                                                let _ = state().db.set_setting(
+                                                    "svc_weather_station_stale_secs",
+                                                    &secs.to_string(),
+                                                );
+                                                let _ = state().db.set_setting(
+                                                    "svc_weather_mqtt_stale_secs",
+                                                    &secs.to_string(),
+                                                );
+                                                crate::services::bump_mqtt_weather_config();
+                                            }
+                                        }
+                                    },
+                                }
+                            }
+                            span { class: "text-xs text-muted-foreground", "seconds (shared; then bare #weather falls back to Open-Meteo)" }
+                        }
+                    }
+                }
+
+                if services_tab() == ServicesTab::Alerts {
+                    div { class: "services-panel",
+                        p { class: "text-sm text-muted-foreground",
+                            "Relays post on {channel_info_name()}. Sourced from NWS CAP / IPAWS-style codes — labeled with time. Not a law-enforcement feed. Silent when nothing new."
+                        }
+                        ToggleSwitch {
                             checked: svc_nws(),
-                            oninput: move |_| {
-                                let next = !svc_nws();
+                            label: "Poll NWS alerts near site pin".to_string(),
+                            hint: Some("US weather alerts. Silent if none new.".to_string()),
+                            onchange: move |next| {
                                 svc_nws.set(next);
                                 crate::services::set_setting_bool(&state().db, "svc_nws_enabled", next);
                             }
                         }
-                        "Poll NWS alerts near site pin (US) — silent if none new"
-                    }
-                    label { class: "ml-6 flex items-center gap-2 text-sm text-muted-foreground",
-                        input {
-                            r#type: "checkbox",
+                        ToggleSwitch {
                             checked: svc_nws_auto(),
                             disabled: !svc_nws(),
-                            oninput: move |_| {
-                                let next = !svc_nws_auto();
+                            label: "Auto-relay NWS to channel".to_string(),
+                            hint: Some("Otherwise Inbox confirms before airtime.".to_string()),
+                            onchange: move |next| {
                                 svc_nws_auto.set(next);
                                 crate::services::set_setting_bool(&state().db, "svc_nws_auto_relay", next);
                             }
                         }
-                        "Auto-relay NWS to channel (otherwise Inbox confirms)"
-                    }
-                    label { class: "flex items-center gap-2 text-sm",
-                        input {
-                            r#type: "checkbox",
-                            checked: svc_quake(),
-                            oninput: move |_| {
-                                let next = !svc_quake();
-                                svc_quake.set(next);
-                                crate::services::set_setting_bool(&state().db, "svc_quake_enabled", next);
-                            }
-                        }
-                        "Poll USGS quakes in HQ box — post only when a new one is found"
-                    }
-                    label { class: "flex items-center gap-2 text-sm",
-                        input {
-                            r#type: "checkbox",
+                        ToggleSwitch {
                             checked: svc_amber(),
-                            oninput: move |_| {
-                                let next = !svc_amber();
+                            label: "Amber alerts".to_string(),
+                            hint: Some("NWS CAP CAE for the alert state — #amber / #amber+.".to_string()),
+                            onchange: move |next| {
                                 svc_amber.set(next);
                                 crate::services::set_setting_bool(&state().db, "svc_amber_enabled", next);
                             }
                         }
-                        "Amber alerts (NWS CAP CAE) for state — #amber"
-                    }
-                    label { class: "ml-6 flex items-center gap-2 text-sm text-muted-foreground",
-                        input {
-                            r#type: "checkbox",
+                        ToggleSwitch {
                             checked: svc_amber_auto(),
                             disabled: !svc_amber(),
-                            oninput: move |_| {
-                                let next = !svc_amber_auto();
+                            label: "Auto-relay Amber to channel".to_string(),
+                            hint: Some("Otherwise Inbox.".to_string()),
+                            onchange: move |next| {
                                 svc_amber_auto.set(next);
                                 crate::services::set_setting_bool(&state().db, "svc_amber_auto_relay", next);
                             }
                         }
-                        "Auto-relay Amber to channel (otherwise Inbox)"
-                    }
-                    label { class: "flex items-center gap-2 text-sm",
-                        input {
-                            r#type: "checkbox",
+                        ToggleSwitch {
                             checked: svc_emerg(),
-                            oninput: move |_| {
-                                let next = !svc_emerg();
+                            label: "Civil emergencies".to_string(),
+                            hint: Some("Evac, hazmat, LE, blue… — #alert / #alert+.".to_string()),
+                            onchange: move |next| {
                                 svc_emerg.set(next);
                                 crate::services::set_setting_bool(&state().db, "svc_emerg_enabled", next);
                             }
                         }
-                        "Civil emergencies (evac, hazmat, LE, blue…) — #alert"
-                    }
-                    label { class: "ml-6 flex items-center gap-2 text-sm text-muted-foreground",
-                        input {
-                            r#type: "checkbox",
+                        ToggleSwitch {
                             checked: svc_emerg_auto(),
                             disabled: !svc_emerg(),
-                            oninput: move |_| {
-                                let next = !svc_emerg_auto();
+                            label: "Auto-relay civil emergencies to channel".to_string(),
+                            hint: Some("Otherwise Inbox.".to_string()),
+                            onchange: move |next| {
                                 svc_emerg_auto.set(next);
                                 crate::services::set_setting_bool(&state().db, "svc_emerg_auto_relay", next);
                             }
                         }
-                        "Auto-relay civil emergencies to channel (otherwise Inbox)"
-                    }
-                    p { class: "ml-6 text-xs text-muted-foreground",
-                        "Sourced from NWS CAP / IPAWS-style codes — labeled ALERT/AMBER with time. Not a law-enforcement feed."
-                    }
-                }
-                p { class: "mb-3 text-sm text-muted-foreground",
-                    "Alert relays post on the bot-home channel ({channel_info_name()})."
-                }
-                div { class: "grid gap-3 sm:grid-cols-2",
-                    div {
-                        label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "Min magnitude" }
-                        TextInput {
-                            value: svc_quake_mag(),
-                            placeholder: "3.0",
-                            oninput: move |event: FormEvent| {
-                                let value = event.value();
-                                svc_quake_mag.set(value.clone());
-                                if value.parse::<f64>().is_ok() {
-                                    let _ = state().db.set_setting("svc_quake_min_mag", &value);
-                                }
-                            },
+                        div { class: "w-28",
+                            label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "Alert state (US)" }
+                            TextInput {
+                                value: svc_emerg_state(),
+                                placeholder: "CA",
+                                oninput: move |event: FormEvent| {
+                                    let value = event.value().trim().to_ascii_uppercase();
+                                    svc_emerg_state.set(value.clone());
+                                    if value.len() == 2 && value.chars().all(|c| c.is_ascii_alphabetic()) {
+                                        let _ = state().db.set_setting("svc_emerg_state", &value);
+                                    }
+                                },
+                            }
                         }
                     }
-                    div {
-                        label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "Alert state (US)" }
-                        TextInput {
-                            value: svc_emerg_state(),
-                            placeholder: "CA",
-                            oninput: move |event: FormEvent| {
-                                let value = event.value().trim().to_ascii_uppercase();
-                                svc_emerg_state.set(value.clone());
-                                if value.len() == 2 && value.chars().all(|c| c.is_ascii_alphabetic()) {
-                                    let _ = state().db.set_setting("svc_emerg_state", &value);
-                                }
-                            },
+                }
+
+                if services_tab() == ServicesTab::Quake {
+                    div { class: "services-panel",
+                        ToggleSwitch {
+                            checked: svc_quake(),
+                            label: "Poll USGS quakes in HQ box".to_string(),
+                            hint: Some("Posts only when a new quake is found. #quake on demand.".to_string()),
+                            onchange: move |next| {
+                                svc_quake.set(next);
+                                crate::services::set_setting_bool(&state().db, "svc_quake_enabled", next);
+                            }
+                        }
+                        div { class: "w-40",
+                            label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "Min magnitude" }
+                            TextInput {
+                                value: svc_quake_mag(),
+                                placeholder: "3.0",
+                                oninput: move |event: FormEvent| {
+                                    let value = event.value();
+                                    svc_quake_mag.set(value.clone());
+                                    if value.parse::<f64>().is_ok() {
+                                        let _ = state().db.set_setting("svc_quake_min_mag", &value);
+                                    }
+                                },
+                            }
                         }
                     }
                 }

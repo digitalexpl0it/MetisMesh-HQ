@@ -781,6 +781,64 @@ impl Db {
         if self.setting("svc_weather_interval_mins")?.is_none() {
             self.set_setting("svc_weather_interval_mins", "60")?;
         }
+        if self.setting("svc_weather_mqtt_enabled")?.is_none() {
+            self.set_setting("svc_weather_mqtt_enabled", "0")?;
+        }
+        if self.setting("svc_weather_mqtt_broker")?.is_none() {
+            self.set_setting("svc_weather_mqtt_broker", "")?;
+        }
+        if self.setting("svc_weather_mqtt_port")?.is_none() {
+            self.set_setting("svc_weather_mqtt_port", "1883")?;
+        }
+        if self.setting("svc_weather_mqtt_tls")?.is_none() {
+            self.set_setting("svc_weather_mqtt_tls", "0")?;
+        }
+        if self.setting("svc_weather_mqtt_username")?.is_none() {
+            self.set_setting("svc_weather_mqtt_username", "")?;
+        }
+        if self.setting("svc_weather_mqtt_topic")?.is_none() {
+            self.set_setting("svc_weather_mqtt_topic", "")?;
+        }
+        if self.setting("svc_weather_mqtt_mode")?.is_none() {
+            self.set_setting("svc_weather_mqtt_mode", "json_template")?;
+        }
+        if self.setting("svc_weather_mqtt_template")?.is_none() {
+            self.set_setting("svc_weather_mqtt_template", "")?;
+        }
+        if self.setting("svc_weather_mqtt_stale_secs")?.is_none() {
+            self.set_setting("svc_weather_mqtt_stale_secs", "3600")?;
+        }
+        if self.setting("svc_weather_mqtt_label")?.is_none() {
+            self.set_setting("svc_weather_mqtt_label", "")?;
+        }
+        if self.setting("svc_weather_station_stale_secs")?.is_none() {
+            // Prefer shared stale; seed from MQTT key when present.
+            let seed = self
+                .setting("svc_weather_mqtt_stale_secs")?
+                .unwrap_or_else(|| "3600".into());
+            self.set_setting("svc_weather_station_stale_secs", &seed)?;
+        }
+        if self.setting("svc_weather_ecowitt_push_enabled")?.is_none() {
+            self.set_setting("svc_weather_ecowitt_push_enabled", "0")?;
+        }
+        if self.setting("svc_weather_ecowitt_push_port")?.is_none() {
+            self.set_setting("svc_weather_ecowitt_push_port", "4199")?;
+        }
+        if self.setting("svc_weather_ecowitt_push_path")?.is_none() {
+            self.set_setting("svc_weather_ecowitt_push_path", "/data/report")?;
+        }
+        if self.setting("svc_weather_ecowitt_passkey")?.is_none() {
+            self.set_setting("svc_weather_ecowitt_passkey", "")?;
+        }
+        if self.setting("svc_weather_ecowitt_pull_enabled")?.is_none() {
+            self.set_setting("svc_weather_ecowitt_pull_enabled", "0")?;
+        }
+        if self.setting("svc_weather_ecowitt_pull_host")?.is_none() {
+            self.set_setting("svc_weather_ecowitt_pull_host", "")?;
+        }
+        if self.setting("svc_weather_ecowitt_pull_interval_secs")?.is_none() {
+            self.set_setting("svc_weather_ecowitt_pull_interval_secs", "30")?;
+        }
         if self.setting("svc_amber_enabled")?.is_none() {
             self.set_setting("svc_amber_enabled", "0")?;
         }

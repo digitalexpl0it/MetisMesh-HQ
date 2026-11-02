@@ -46,7 +46,8 @@ Cookbook: [agessaman/meshcore-bot](https://github.com/agessaman/meshcore-bot/) �
 
 - [x] **D1** Weather: Open-Meteo on **METIS-INFO** (`#weather [zip]`); clean `WX City ZIP:` lines; humidity; ≤160 bytes; `#weather+` multi-frame detail (no source stamp on air)
 - [x] **D1b** Scheduled ZIP weather: Settings ZIP list + interval (default 60m); one ZIP/min when due; silent otherwise
-- [ ] **D1c** Local MQTT weather station: subscribe to custom topics (meshcore-bot–style `MqttWeather` + Weather mapping); prefer station readings for HQ/`#weather` when fresh; fall back to Open-Meteo when MQTT is off/stale/missing fields; Settings for broker, topics, unit labels; same ≤160 mesh line shape
+- [x] **D1c** Local MQTT weather station: subscribe to custom topics (meshcore-bot–style `MqttWeather` + Weather mapping); prefer station readings for HQ/`#weather` when fresh; fall back to Open-Meteo when MQTT is off/stale/missing fields; Settings for broker, topics, unit labels; same ≤160 mesh line shape; Ecowitt GW3002 via HA/WeeWX→Mosquitto (no native Ecowitt HTTP)
+- [x] **D1d** Local Ecowitt stations + Weather page: custom-server push + `get_livedata_info` pull (GW1200 / WittBoy / GW300x); unified station cache with MQTT; operator Weather nav page; no cloud Ambient
 - [x] **D2** NWS weather alerts: poll near HQ site pin; Inbox confirm unless auto-relay → METIS-INFO
 - [x] **D2b** Amber (CAE) + civil emergencies (CAP codes): `#amber` / `#alert`; `#amber+` / `#alert+` multi-frame CAP description; poll + auto toggles; state setting
 - [x] **D3** Earthquakes: USGS bbox + magnitude + dedupe; post **only when new**; `#quake` on demand
@@ -124,7 +125,8 @@ Heard nodes stay on Roster/Map. **Claimed** nodes are HQ-owned mesh infrastructu
 3. A3 → B5  
 4. C  
 5. D1 → D3  
-6. D4 · D1c (local MQTT station vs Open-Meteo)  
+6. D4 · D1c (local MQTT station vs Open-Meteo) — done  
+
 7. F1 → F3 (USB + multi-radio; primary companion owns bot)  
 8. E1 → E3 (backup first), then E4 / F4–F5b polish  
 9. G1 → G4 (offline firmware locker + selective Manage overlay + USB flasher)  
@@ -139,7 +141,8 @@ Heard nodes stay on Roster/Map. **Claimed** nodes are HQ-owned mesh infrastructu
 - [x] Message from mapped node: two rings, no pan jank
 - [x] First-seen coords: warp-in once (not every refresh)
 - [x] Weather/quake: compact, sourced, enrolled-only, audited
-- [ ] MQTT station fresh → mesh WX uses it; stale/down → Open-Meteo fallback
+- [x] MQTT station fresh → mesh WX uses it; stale/down → Open-Meteo fallback
+- [x] Ecowitt push/pull → Weather page + bare #weather; no cloud station APIs
 - [x] USB companion + BLE/USB/TCP second radio both live under one HQ; bot TX from primary only
 - [x] Backup restores roster + secrets on a fresh machine; import does not flood radio contacts
 - [ ] Map uploader (if on): only infra GPS adverts; companions/tracks stay local

@@ -273,6 +273,9 @@ pub fn SlideDownPanel(
     title: String,
     #[props(default)] subtitle: String,
     #[props(default)] icon: Option<IconName>,
+    /// Wider sheet for dense tables (firmware Manage, etc.).
+    #[props(default)]
+    wide: bool,
     on_close: EventHandler<()>,
     children: Element,
 ) -> Element {
@@ -282,7 +285,13 @@ pub fn SlideDownPanel(
         "slide-down-shell"
     };
     let panel_class = if open {
-        "slide-down-panel slide-down-panel-open"
+        if wide {
+            "slide-down-panel slide-down-panel-wide slide-down-panel-open"
+        } else {
+            "slide-down-panel slide-down-panel-open"
+        }
+    } else if wide {
+        "slide-down-panel slide-down-panel-wide"
     } else {
         "slide-down-panel"
     };

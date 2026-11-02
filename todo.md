@@ -79,6 +79,7 @@ Mirror MeshCore community firmware while online; flash over USB when the interne
 - [x] **G1** Firmware locker: fetch flasher `config.json` + GitHub companion/repeater/room-server releases (latest + previous); store under `data/firmware/`; index + prune
 - [x] **G2** Background sync (12h / Sync now / enable toggle); offline UI still flashes from cache
 - [x] **G3** Settings → Flasher: device/role/version/port; ESP32 via esptool; nRF52 via adafruit-nrfutil or UF2 path; erase off by default
+- [x] **G4** Selective locker + Manage overlay: `selection.json`, Download-all (~1 GB), Latest/Previous, fuzzy/zebra/pills; sync downloads only the checked set and prunes orphans
 
 ## Non-goals (for now)
 
@@ -98,7 +99,7 @@ Mirror MeshCore community firmware while online; flash over USB when the interne
 6. D4 · D1c (local MQTT station vs Open-Meteo)  
 7. F1 → F3 (USB + multi-radio; primary companion owns bot)  
 8. E1 → E3 (backup first), then E4 / F4–F5 polish  
-9. G1 → G3 (offline firmware locker + USB flasher)  
+9. G1 → G4 (offline firmware locker + selective Manage overlay + USB flasher)  
 
 ## Success checks
 

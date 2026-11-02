@@ -132,13 +132,136 @@
   border: 1px solid #ffffff18;
   border-top: 0;
   border-radius: 0 0 0.85rem 0.85rem;
-  background: rgba(16, 20, 24, 0.97);
+  background: rgba(16, 20, 24, 0.99);
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
   backdrop-filter: blur(8px);
   transform: translateY(-110%);
   opacity: 0;
   transition: transform 280ms ease-out, opacity 220ms ease-out;
   pointer-events: none;
+}
+
+.slide-down-panel-wide {
+  width: min(100%, 56rem);
+}
+
+/* Firmware Manage: device cards + role rows (Tailwind arbitrary grids are not shipped). */
+.fw-manage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-height: 55vh;
+  overflow: auto;
+  padding: 0.15rem 0.1rem 0.35rem;
+}
+
+.fw-manage-card {
+  /* Must not shrink: overflow:hidden + flex defaults collapses cards into border stripes. */
+  flex: 0 0 auto;
+  border: 1px solid #ffffff14;
+  border-radius: 0.75rem;
+  background: rgba(22, 27, 33, 0.98);
+  overflow: hidden;
+}
+
+.fw-manage-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.7rem 0.9rem 0.55rem;
+  border-bottom: 1px solid #ffffff10;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.fw-manage-card-title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.fw-manage-card-maker {
+  margin: 0.15rem 0 0;
+  font-size: 0.75rem;
+  color: #a1a1aa;
+}
+
+.fw-manage-card-count {
+  flex-shrink: 0;
+  font-size: 0.7rem;
+  color: #a1a1aa;
+}
+
+.fw-manage-role-row {
+  display: grid;
+  grid-template-columns: 1.5rem minmax(4.5rem, 6rem) minmax(9rem, 1fr) 4.5rem;
+  align-items: center;
+  gap: 0.65rem 0.75rem;
+  padding: 0.55rem 0.9rem;
+  border-top: 1px solid #ffffff0a;
+}
+
+.fw-manage-role-row:first-of-type {
+  border-top: 0;
+}
+
+.fw-manage-role-row-even {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.fw-manage-role-row-odd {
+  background: transparent;
+}
+
+.fw-manage-pill {
+  display: inline-flex;
+  width: fit-content;
+  border: 1px solid #ffffff18;
+  border-radius: 0.4rem;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 0.15rem 0.5rem;
+  font-size: 0.7rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+}
+
+.fw-manage-version {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #ffffff18;
+  border-radius: 0.4rem;
+  background: #10151a;
+  color: #f4f4f5;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.75rem;
+}
+
+.fw-manage-status {
+  font-size: 0.75rem;
+}
+
+.fw-manage-status-on {
+  color: #6ee7b7;
+}
+
+.fw-manage-status-off {
+  color: #a1a1aa;
+}
+
+@media (max-width: 640px) {
+  .fw-manage-role-row {
+    grid-template-columns: 1.5rem 1fr;
+    grid-template-areas:
+      "check pill"
+      "check version"
+      "check status";
+  }
+
+  .fw-manage-role-row > *:nth-child(1) { grid-area: check; }
+  .fw-manage-role-row > *:nth-child(2) { grid-area: pill; }
+  .fw-manage-role-row > *:nth-child(3) { grid-area: version; }
+  .fw-manage-role-row > *:nth-child(4) { grid-area: status; }
 }
 
 .slide-down-panel-open {

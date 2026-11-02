@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -22,11 +22,13 @@ use crate::usb_serial;
 
 const CATALOG_URL: &str = "https://flasher.meshcore.io/config.json";
 const GITHUB_RELEASES: &str =
-    "https://api.github.com/repos/meshcore-dev/MeshCore/releases?per_page=40";
+    "https://api.github.com/repos/meshcore-dev/MeshCore/releases";
 const USER_AGENT: &str = "MetisMeshHQ/0.1 (offline firmware locker; local desktop)";
 const FAMILIES: &[&str] = &["companion", "repeater", "room-server"];
 const KEEP_PER_FAMILY: usize = 2;
 const DEFAULT_SYNC_HOURS: u64 = 12;
+/// ureq::Response::into_string caps at 10 MB; MeshCore release JSON is larger.
+const HTTP_BODY_CAP: u64 = 64 * 1024 * 1024;
 
 // ---------- Status (UI polls these) ----------
 
@@ -104,6 +106,10 @@ fn catalog_path() -> PathBuf {
 
 fn index_path() -> PathBuf {
     firmware_root().join("index.json")
+}
+
+fn selection_path() -> PathBuf {
+    firmware_root().join("selection.json")
 }
 
 fn releases_dir() -> PathBuf {
@@ -186,7 +192,15 @@ pub struct FlasherCatalog {
     #[serde(default)]
     pub role: BTreeMap<String, CatalogRoleMeta>,
     #[serde(default)]
+    pub maker: BTreeMap<String, CatalogMaker>,
+    #[serde(default)]
     pub device: Vec<CatalogDevice>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CatalogMaker {
+    #[serde(default)]
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -281,9 +295,123 @@ pub fn load_catalog() -> Result<FlasherCatalog, String> {
 }
 
 pub fn community_devices(catalog: &FlasherCatalog) -> Vec<DeviceChoice> {
+    let mut by_device: BTreeMap<String, DeviceChoice> = BTreeMap::new();
+    for offer in community_offers(catalog) {
+        let entry = by_device.entry(offer.device.clone()).or_insert_with(|| DeviceChoice {
+            name: offer.device.clone(),
+            maker: offer.maker_id.clone(),
+            platform: offer.platform.clone(),
+            roles: Vec::new(),
+        });
+        entry.roles.push(RoleChoice {
+            role: offer.role.clone(),
+            label: offer.role_label.clone(),
+            tooltip: offer.tooltip.clone(),
+            family: offer.family.clone(),
+            patterns: offer.patterns.clone(),
+            static_versions: offer.static_versions.clone(),
+        });
+    }
+    let mut out: Vec<_> = by_device.into_values().collect();
+    out.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
+    out
+}
+
+/// One catalog row: board × community role (Manage overlay / selective sync).
+#[derive(Debug, Clone)]
+pub struct FirmwareOffer {
+    pub key: String,
+    pub device: String,
+    pub maker_id: String,
+    pub maker_label: String,
+    pub platform: String,
+    pub role: String,
+    pub role_label: String,
+    pub role_pill: String,
+    pub tooltip: String,
+    pub family: String,
+    pub patterns: BTreeMap<String, String>,
+    pub static_versions: Vec<StaticVersion>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum VersionPolicy {
+    #[default]
+    Latest,
+    Previous,
+}
+
+impl VersionPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Latest => "latest",
+            Self::Previous => "previous",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Self {
+        if raw.eq_ignore_ascii_case("previous") {
+            Self::Previous
+        } else {
+            Self::Latest
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectionEntry {
+    pub key: String,
+    pub device: String,
+    #[serde(default)]
+    pub maker: String,
+    pub role: String,
+    #[serde(default)]
+    pub version: VersionPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FirmwareSelection {
+    #[serde(default)]
+    pub updated_at: i64,
+    #[serde(default)]
+    pub entries: Vec<SelectionEntry>,
+}
+
+pub fn selection_key(device: &str, role: &str) -> String {
+    format!("{device}|{role}")
+}
+
+pub fn estimate_full_set_label() -> &'static str {
+    "about 1 GB"
+}
+
+pub fn role_pill(role: &str) -> String {
+    match role {
+        "companionBle" => "BLE".into(),
+        "companionUsb" => "USB".into(),
+        "repeater" => "Repeater".into(),
+        "roomServer" => "Room".into(),
+        "kissRadio" => "KISS".into(),
+        other => other.to_string(),
+    }
+}
+
+pub fn community_offers(catalog: &FlasherCatalog) -> Vec<FirmwareOffer> {
     let mut out = Vec::new();
     for device in &catalog.device {
-        let mut roles = Vec::new();
+        let maker_label = catalog
+            .maker
+            .get(&device.maker)
+            .map(|m| m.name.clone())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| {
+                let mut s = device.maker.clone();
+                if let Some(c) = s.get_mut(0..1) {
+                    c.make_ascii_uppercase();
+                }
+                s
+            });
         for fw in &device.firmware {
             if fw.class != "community" {
                 continue;
@@ -297,10 +425,17 @@ pub fn community_devices(catalog: &FlasherCatalog) -> Vec<DeviceChoice> {
                 format!("{title} ({sub})")
             };
             let tooltip = meta.map(|m| m.tooltip.clone()).unwrap_or_default();
+            let key = selection_key(&device.name, &fw.role);
             if let Some(gh) = &fw.github {
-                roles.push(RoleChoice {
+                out.push(FirmwareOffer {
+                    key,
+                    device: device.name.clone(),
+                    maker_id: device.maker.clone(),
+                    maker_label: maker_label.clone(),
+                    platform: device.r#type.clone(),
                     role: fw.role.clone(),
-                    label,
+                    role_label: label,
+                    role_pill: role_pill(&fw.role),
                     tooltip,
                     family: gh.family.clone(),
                     patterns: gh.files.clone(),
@@ -319,9 +454,15 @@ pub fn community_devices(catalog: &FlasherCatalog) -> Vec<DeviceChoice> {
                     });
                 }
                 static_versions.sort_by(|a, b| b.version.cmp(&a.version));
-                roles.push(RoleChoice {
+                out.push(FirmwareOffer {
+                    key,
+                    device: device.name.clone(),
+                    maker_id: device.maker.clone(),
+                    maker_label: maker_label.clone(),
+                    platform: device.r#type.clone(),
                     role: fw.role.clone(),
-                    label,
+                    role_label: label,
+                    role_pill: role_pill(&fw.role),
                     tooltip,
                     family: String::new(),
                     patterns: BTreeMap::new(),
@@ -329,17 +470,142 @@ pub fn community_devices(catalog: &FlasherCatalog) -> Vec<DeviceChoice> {
                 });
             }
         }
-        if roles.is_empty() {
+    }
+    out.sort_by(|a, b| {
+        a.maker_label
+            .to_ascii_lowercase()
+            .cmp(&b.maker_label.to_ascii_lowercase())
+            .then(a.device.to_ascii_lowercase().cmp(&b.device.to_ascii_lowercase()))
+            .then(a.role.cmp(&b.role))
+    });
+    out
+}
+
+pub fn load_selection() -> FirmwareSelection {
+    let Ok(raw) = fs::read_to_string(selection_path()) else {
+        return FirmwareSelection::default();
+    };
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+pub fn selection_file_exists() -> bool {
+    selection_path().is_file()
+}
+
+pub fn save_selection(sel: &FirmwareSelection) -> Result<(), String> {
+    ensure_dirs()?;
+    let mut sel = sel.clone();
+    sel.updated_at = now_unix();
+    let raw = serde_json::to_string_pretty(&sel).map_err(|e| e.to_string())?;
+    fs::write(selection_path(), raw).map_err(|e| e.to_string())
+}
+
+/// Pick latest or previous from a newest-first tag list.
+pub fn pick_tag_for_policy(tags: &[String], policy: VersionPolicy) -> Option<String> {
+    match policy {
+        VersionPolicy::Latest => tags.first().cloned(),
+        VersionPolicy::Previous => tags.get(1).cloned().or_else(|| tags.first().cloned()),
+    }
+}
+
+/// Compile each offer pattern once, then scan the name list (UI/index hot path).
+pub fn offer_matches_any_name(offer: &FirmwareOffer, names: &[&str]) -> bool {
+    if names.is_empty() {
+        return false;
+    }
+    if !offer.patterns.is_empty() {
+        for pattern in offer.patterns.values() {
+            let Ok(re) = Regex::new(pattern) else {
+                continue;
+            };
+            if names.iter().any(|n| re.is_match(n)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    offer.static_versions.iter().any(|ver| {
+        ver.files
+            .iter()
+            .any(|(_, n)| names.iter().any(|have| *have == n.as_str()))
+    })
+}
+
+/// Offer keys that already have at least one matching asset on disk.
+pub fn local_offer_keys(offers: &[FirmwareOffer], index: &FirmwareIndex) -> BTreeSet<String> {
+    let names: Vec<&str> = index.assets.iter().map(|a| a.name.as_str()).collect();
+    let mut out = BTreeSet::new();
+    for offer in offers {
+        if offer_matches_any_name(offer, &names) {
+            out.insert(offer.key.clone());
+        }
+    }
+    out
+}
+
+/// When selection.json is missing, seed from index assets that match catalog offers.
+pub fn auto_seed_selection_from_index(
+    offers: &[FirmwareOffer],
+    index: &FirmwareIndex,
+) -> FirmwareSelection {
+    let on_disk = local_offer_keys(offers, index);
+    let mut entries = Vec::new();
+    let mut seen = BTreeSet::new();
+    for offer in offers {
+        if !on_disk.contains(&offer.key) || !seen.insert(offer.key.clone()) {
             continue;
         }
-        out.push(DeviceChoice {
-            name: device.name.clone(),
-            maker: device.maker.clone(),
-            platform: device.r#type.clone(),
-            roles,
+        entries.push(SelectionEntry {
+            key: offer.key.clone(),
+            device: offer.device.clone(),
+            maker: offer.maker_id.clone(),
+            role: offer.role.clone(),
+            version: VersionPolicy::Latest,
         });
     }
-    out.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
+    FirmwareSelection {
+        updated_at: now_unix(),
+        entries,
+    }
+}
+
+/// Load selection, auto-seeding once if the file is absent and the index has matches.
+pub fn load_or_seed_selection(offers: &[FirmwareOffer], index: &FirmwareIndex) -> FirmwareSelection {
+    if selection_file_exists() {
+        return load_selection();
+    }
+    let seeded = auto_seed_selection_from_index(offers, index);
+    if !seeded.entries.is_empty() {
+        let _ = save_selection(&seeded);
+    }
+    seeded
+}
+
+/// Patterns / static file names an offer needs on disk for its version policy.
+pub fn wanted_names_for_offer(
+    offer: &FirmwareOffer,
+    policy: VersionPolicy,
+    release_names: &[String],
+) -> Vec<String> {
+    if !offer.static_versions.is_empty() {
+        let idx = match policy {
+            VersionPolicy::Latest => 0,
+            VersionPolicy::Previous => 1.min(offer.static_versions.len().saturating_sub(1)),
+        };
+        return offer
+            .static_versions
+            .get(idx)
+            .map(|v| v.files.iter().map(|(_, n)| n.clone()).collect())
+            .unwrap_or_default();
+    }
+    let mut out = Vec::new();
+    for pattern in offer.patterns.values() {
+        if let Some(name) = match_asset_name(pattern, release_names) {
+            if !out.iter().any(|n| n == &name) {
+                out.push(name);
+            }
+        }
+    }
     out
 }
 
@@ -385,6 +651,77 @@ pub fn match_asset_name(pattern: &str, names: &[String]) -> Option<String> {
     hits.into_iter().next()
 }
 
+/// Newest-first release tags seen in the local index, grouped by family.
+pub fn family_tags_from_index(index: &FirmwareIndex) -> BTreeMap<String, Vec<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for asset in &index.assets {
+        if asset.family.is_empty() || asset.family == "static" || asset.tag == "catalog-static" {
+            continue;
+        }
+        out.entry(asset.family.clone())
+            .or_default()
+            .insert(asset.tag.clone());
+    }
+    out.into_iter()
+        .map(|(family, tags)| {
+            let mut list: Vec<String> = tags.into_iter().collect();
+            // companion-v1.18.0 sorts after companion-v1.17.x lexicographically for normal tags.
+            list.sort_by(|a, b| b.cmp(a));
+            (family, list)
+        })
+        .collect()
+}
+
+/// Short label for a release tag (`companion-v1.18.0` → `v1.18.0`).
+pub fn short_version_label(tag: &str) -> String {
+    for prefix in ["companion-", "repeater-", "room-server-"] {
+        if let Some(rest) = tag.strip_prefix(prefix) {
+            if rest.starts_with('v') || rest.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                return if rest.starts_with('v') {
+                    rest.to_string()
+                } else {
+                    format!("v{rest}")
+                };
+            }
+            return rest.to_string();
+        }
+    }
+    tag.to_string()
+}
+
+/// Select option text for Latest/Previous using known family or static version names.
+pub fn version_policy_option_label(
+    policy: VersionPolicy,
+    family_tags: &[String],
+    static_versions: &[StaticVersion],
+) -> String {
+    let resolve = |policy: VersionPolicy| -> Option<String> {
+        if !static_versions.is_empty() {
+            let idx = match policy {
+                VersionPolicy::Latest => 0,
+                VersionPolicy::Previous => 1.min(static_versions.len().saturating_sub(1)),
+            };
+            static_versions.get(idx).map(|v| v.version.clone())
+        } else {
+            pick_tag_for_policy(family_tags, policy)
+        }
+    };
+    let tag = resolve(policy);
+    let distinct_previous = match (resolve(VersionPolicy::Latest), resolve(VersionPolicy::Previous))
+    {
+        (Some(a), Some(b)) => a != b,
+        _ => false,
+    };
+    match (policy, tag) {
+        (VersionPolicy::Latest, Some(t)) => format!("Latest · {}", short_version_label(&t)),
+        (VersionPolicy::Previous, Some(t)) if distinct_previous => {
+            format!("Previous · {}", short_version_label(&t))
+        }
+        (VersionPolicy::Previous, _) => "Previous".into(),
+        (VersionPolicy::Latest, None) => "Latest".into(),
+    }
+}
+
 /// Local tags/assets that satisfy a role pattern for a family.
 pub fn local_versions_for_role(
     index: &FirmwareIndex,
@@ -419,18 +756,20 @@ pub fn find_local_asset(index: &FirmwareIndex, tag: &str, name: &str) -> Option<
 
 // ---------- GitHub releases ----------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct GhRelease {
     tag_name: String,
     #[serde(default)]
     draft: bool,
     #[serde(default)]
     prerelease: bool,
+    /// GitHub newest-first pages already order releases; kept for serde completeness.
+    #[allow(dead_code)]
     published_at: Option<String>,
     assets: Vec<GhAsset>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct GhAsset {
     name: String,
     size: u64,
@@ -467,14 +806,74 @@ fn family_of_tag(tag: &str) -> Option<&'static str> {
 }
 
 fn http_get_json(url: &str) -> Result<String, String> {
-    ureq::get(url)
+    let resp = ureq::get(url)
         .set("User-Agent", USER_AGENT)
         .set("Accept", "application/vnd.github+json")
-        .timeout(Duration::from_secs(60))
+        .timeout(Duration::from_secs(120))
         .call()
-        .map_err(|e| e.to_string())?
-        .into_string()
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let mut reader = resp.into_reader().take(HTTP_BODY_CAP + 1);
+    let mut buf = Vec::new();
+    reader
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("Read body: {e}"))?;
+    if buf.len() as u64 > HTTP_BODY_CAP {
+        return Err(format!(
+            "Response larger than {} MB",
+            HTTP_BODY_CAP / (1024 * 1024)
+        ));
+    }
+    String::from_utf8(buf).map_err(|e| format!("Body is not UTF-8: {e}"))
+}
+
+/// Walk GitHub release pages until we have latest + previous for each family.
+fn fetch_meshcore_releases() -> Result<BTreeMap<String, Vec<GhRelease>>, String> {
+    let mut by_family: BTreeMap<String, Vec<GhRelease>> = BTreeMap::new();
+    // Small pages: each MeshCore release lists hundreds of assets and is huge JSON.
+    const PER_PAGE: u32 = 5;
+    const MAX_PAGES: u32 = 12;
+    for page in 1..=MAX_PAGES {
+        set_sync(|s| {
+            s.detail = format!("Listing MeshCore GitHub releases (page {page})…");
+        });
+        let url = format!("{GITHUB_RELEASES}?per_page={PER_PAGE}&page={page}");
+        let body = http_get_json(&url).map_err(|e| format!("GitHub: {e}"))?;
+        let page_releases: Vec<GhRelease> =
+            serde_json::from_str(&body).map_err(|e| format!("GitHub parse: {e}"))?;
+        if page_releases.is_empty() {
+            break;
+        }
+        let mut any_useful = false;
+        for rel in page_releases {
+            if rel.draft || rel.prerelease {
+                continue;
+            }
+            let Some(family) = family_of_tag(&rel.tag_name) else {
+                continue;
+            };
+            any_useful = true;
+            let list = by_family.entry(family.to_string()).or_default();
+            if list.len() >= KEEP_PER_FAMILY {
+                continue;
+            }
+            // Pages are newest-first; first hits are the keep set.
+            list.push(rel);
+        }
+        let complete = FAMILIES.iter().all(|family| {
+            by_family
+                .get(*family)
+                .map(|list| list.len() >= KEEP_PER_FAMILY)
+                .unwrap_or(false)
+        });
+        if complete {
+            break;
+        }
+        if !any_useful && page > 2 {
+            // Unrelated release noise; keep scanning a bit, then stop if empty families remain.
+            continue;
+        }
+    }
+    Ok(by_family)
 }
 
 fn download_file(url: &str, dest: &Path, expected_size: Option<u64>) -> Result<String, String> {
@@ -599,146 +998,106 @@ fn run_sync(_db: &Db) -> Result<(), String> {
     let catalog: FlasherCatalog =
         serde_json::from_str(&catalog_body).map_err(|e| format!("Catalog parse: {e}"))?;
     fs::write(catalog_path(), &catalog_body).map_err(|e| e.to_string())?;
+    let offers = community_offers(&catalog);
 
     set_sync(|s| {
         s.phase = "releases".into();
         s.detail = "Listing MeshCore GitHub releases…".into();
     });
 
-    let releases_body = http_get_json(GITHUB_RELEASES).map_err(|e| format!("GitHub: {e}"))?;
-    let releases: Vec<GhRelease> =
-        serde_json::from_str(&releases_body).map_err(|e| format!("GitHub parse: {e}"))?;
-
-    let mut by_family: BTreeMap<String, Vec<GhRelease>> = BTreeMap::new();
-    for rel in releases {
-        if rel.draft || rel.prerelease {
-            continue;
-        }
-        let Some(family) = family_of_tag(&rel.tag_name) else {
-            continue;
-        };
-        by_family.entry(family.to_string()).or_default().push(rel);
-    }
-    for list in by_family.values_mut() {
-        list.sort_by(|a, b| {
-            b.published_at
-                .as_deref()
-                .unwrap_or("")
-                .cmp(a.published_at.as_deref().unwrap_or(""))
-        });
-    }
-
+    let mut by_family = fetch_meshcore_releases()?;
+    // Newest-first tag lists + full release records for asset URLs.
     let mut ordered: Vec<(String, String)> = Vec::new();
-    let mut selected: Vec<(String, GhRelease)> = Vec::new();
+    let mut releases_by_tag: BTreeMap<String, GhRelease> = BTreeMap::new();
     for family in FAMILIES {
         if let Some(list) = by_family.remove(*family) {
             for rel in list.into_iter().take(KEEP_PER_FAMILY) {
                 ordered.push((family.to_string(), rel.tag_name.clone()));
-                selected.push((family.to_string(), rel));
+                releases_by_tag.insert(rel.tag_name.clone(), rel);
             }
         }
     }
-    let keep = keep_tags_per_family(&ordered);
-    let keep_tags: BTreeSet<String> = keep.values().flatten().cloned().collect();
+    let family_tags = keep_tags_per_family(&ordered);
+    if releases_by_tag.is_empty() {
+        return Err(
+            "No companion/repeater/room-server releases found on GitHub. Check network and try Sync now."
+                .into(),
+        );
+    }
 
     let mut index = FirmwareIndex::load();
-    let mut next_assets: Vec<IndexAsset> = Vec::new();
-
-    for (family, rel) in &selected {
-        let tag = &rel.tag_name;
-        let dest_dir = release_dir(tag);
-        fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
-        let total = rel.assets.len();
-        for (i, asset) in rel.assets.iter().enumerate() {
-            set_sync(|s| {
-                s.phase = "download".into();
-                s.detail = format!(
-                    "{tag}: {} ({}/{})",
-                    asset.name,
-                    i + 1,
-                    total.max(1)
-                );
-            });
-            let dest = dest_dir.join(&asset.name);
-            if index.has_asset(tag, &asset.name, asset.size) {
-                let path = dest.to_string_lossy().into_owned();
-                let sha = index
-                    .assets
-                    .iter()
-                    .find(|a| a.tag == *tag && a.name == asset.name)
-                    .map(|a| a.sha256.clone())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| sha256_file(&dest).unwrap_or_default());
-                next_assets.push(IndexAsset {
-                    family: family.clone(),
-                    tag: tag.clone(),
-                    name: asset.name.clone(),
-                    bytes: asset.size,
-                    sha256: sha,
-                    path,
-                });
-                continue;
-            }
-            let sha = download_file(&asset.browser_download_url, &dest, Some(asset.size))?;
-            next_assets.push(IndexAsset {
-                family: family.clone(),
-                tag: tag.clone(),
-                name: asset.name.clone(),
-                bytes: asset.size,
-                sha256: sha,
-                path: dest.to_string_lossy().into_owned(),
-            });
-        }
-    }
-
-    // Static CDN files referenced by catalog (e.g. kiss modem).
-    set_sync(|s| {
-        s.phase = "cdn".into();
-        s.detail = "Fetching static catalog firmware files…".into();
-    });
-    let mut static_names: BTreeSet<String> = BTreeSet::new();
-    for device in &catalog.device {
-        for fw in &device.firmware {
-            if fw.class != "community" {
-                continue;
-            }
-            let Some(versions) = &fw.version else {
-                continue;
-            };
-            for ver in versions.values() {
-                for file in &ver.files {
-                    static_names.insert(file.name.clone());
-                }
-            }
-        }
-    }
-    let static_tag = "catalog-static";
-    let static_dir = release_dir(static_tag);
-    if !static_names.is_empty() {
-        fs::create_dir_all(&static_dir).map_err(|e| e.to_string())?;
-    }
-    for name in static_names {
-        let dest = static_dir.join(&name);
-        let url = format!("https://flasher.meshcore.io/firmware/{name}");
+    let selection = load_or_seed_selection(&offers, &index);
+    if selection.entries.is_empty() {
+        index.assets.clear();
+        index.updated_at = now_unix();
+        index.save()?;
+        prune_to_keep(&BTreeSet::new(), &BTreeSet::new())?;
+        let (count, bytes) = index.refresh_totals();
         set_sync(|s| {
-            s.detail = format!("CDN: {name}");
+            s.running = false;
+            s.phase = "ready".into();
+            s.detail =
+                "Nothing selected — open Manage firmware to choose boards and roles.".into();
+            s.last_ok_at = index.updated_at;
+            s.asset_count = count;
+            s.bytes_on_disk = bytes;
+            s.last_error.clear();
         });
-        if dest.is_file() {
-            let meta = fs::metadata(&dest).map_err(|e| e.to_string())?;
-            let sha = sha256_file(&dest).unwrap_or_default();
-            next_assets.push(IndexAsset {
-                family: "static".into(),
-                tag: static_tag.into(),
-                name: name.clone(),
-                bytes: meta.len(),
-                sha256: sha,
-                path: dest.to_string_lossy().into_owned(),
-            });
+        return Ok(());
+    }
+
+    let offer_by_key: BTreeMap<_, _> = offers.iter().map(|o| (o.key.clone(), o)).collect();
+    // (tag, name) -> (family, optional github asset for download)
+    let mut needed: BTreeMap<(String, String), (String, Option<GhAsset>)> = BTreeMap::new();
+
+    for entry in &selection.entries {
+        let Some(offer) = offer_by_key.get(&entry.key) else {
+            continue;
+        };
+        if !offer.static_versions.is_empty() {
+            let names = wanted_names_for_offer(offer, entry.version, &[]);
+            for name in names {
+                needed
+                    .entry(("catalog-static".into(), name))
+                    .or_insert_with(|| ("static".into(), None));
+            }
             continue;
         }
-        match download_file(&url, &dest, None) {
-            Ok(sha) => {
+        let tags = family_tags.get(&offer.family).cloned().unwrap_or_default();
+        let Some(tag) = pick_tag_for_policy(&tags, entry.version) else {
+            continue;
+        };
+        let Some(rel) = releases_by_tag.get(&tag) else {
+            continue;
+        };
+        let release_names: Vec<String> = rel.assets.iter().map(|a| a.name.clone()).collect();
+        let names = wanted_names_for_offer(offer, entry.version, &release_names);
+        for name in names {
+            let gh = rel.assets.iter().find(|a| a.name == name).cloned();
+            needed
+                .entry((tag.clone(), name))
+                .or_insert_with(|| (offer.family.clone(), gh));
+        }
+    }
+
+    let mut next_assets: Vec<IndexAsset> = Vec::new();
+    let total = needed.len().max(1);
+    let static_tag = "catalog-static";
+
+    for (i, ((tag, name), (family, gh))) in needed.into_iter().enumerate() {
+        set_sync(|s| {
+            s.phase = "download".into();
+            s.detail = format!("{tag}: {name} ({}/{})", i + 1, total);
+        });
+        let dest_dir = release_dir(&tag);
+        fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+        let dest = dest_dir.join(&name);
+
+        if tag == static_tag {
+            let url = format!("https://flasher.meshcore.io/firmware/{name}");
+            if dest.is_file() {
                 let meta = fs::metadata(&dest).map_err(|e| e.to_string())?;
+                let sha = sha256_file(&dest).unwrap_or_default();
                 next_assets.push(IndexAsset {
                     family: "static".into(),
                     tag: static_tag.into(),
@@ -747,47 +1106,121 @@ fn run_sync(_db: &Db) -> Result<(), String> {
                     sha256: sha,
                     path: dest.to_string_lossy().into_owned(),
                 });
+                continue;
             }
-            Err(err) => {
-                hq_log!(warn, "firmware CDN skip {name}: {err}");
+            match download_file(&url, &dest, None) {
+                Ok(sha) => {
+                    let meta = fs::metadata(&dest).map_err(|e| e.to_string())?;
+                    next_assets.push(IndexAsset {
+                        family: "static".into(),
+                        tag: static_tag.into(),
+                        name,
+                        bytes: meta.len(),
+                        sha256: sha,
+                        path: dest.to_string_lossy().into_owned(),
+                    });
+                }
+                Err(err) => hq_log!(warn, "firmware CDN skip {name}: {err}"),
             }
+            continue;
         }
+
+        let Some(asset) = gh else {
+            hq_log!(warn, "firmware: missing GitHub asset {name} on {tag}");
+            continue;
+        };
+        if index.has_asset(&tag, &asset.name, asset.size) && dest.is_file() {
+            let sha = index
+                .assets
+                .iter()
+                .find(|a| a.tag == tag && a.name == asset.name)
+                .map(|a| a.sha256.clone())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| sha256_file(&dest).unwrap_or_default());
+            next_assets.push(IndexAsset {
+                family: family.clone(),
+                tag: tag.clone(),
+                name: asset.name.clone(),
+                bytes: asset.size,
+                sha256: sha,
+                path: dest.to_string_lossy().into_owned(),
+            });
+            continue;
+        }
+        let sha = download_file(&asset.browser_download_url, &dest, Some(asset.size))?;
+        next_assets.push(IndexAsset {
+            family,
+            tag,
+            name: asset.name,
+            bytes: asset.size,
+            sha256: sha,
+            path: dest.to_string_lossy().into_owned(),
+        });
     }
 
-    // Prune release dirs not in keep set (preserve catalog-static).
     set_sync(|s| {
         s.phase = "prune".into();
-        s.detail = "Pruning old firmware tags…".into();
+        s.detail = "Pruning firmware not in your selection…".into();
     });
-    if let Ok(entries) = fs::read_dir(releases_dir()) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name == static_tag || keep_tags.contains(&name) {
-                continue;
-            }
-            // Tags may have been sanitized; also match unsanitized keep set.
-            let keep = keep_tags.iter().any(|t| sanitize_tag(t) == name);
-            if keep {
-                continue;
-            }
-            let _ = fs::remove_dir_all(entry.path());
-        }
-    }
+    let keep_files: BTreeSet<(String, String)> = next_assets
+        .iter()
+        .map(|a| (a.tag.clone(), a.name.clone()))
+        .collect();
+    let keep_tags: BTreeSet<String> = next_assets.iter().map(|a| a.tag.clone()).collect();
+    prune_to_keep(&keep_tags, &keep_files)?;
 
     index.assets = next_assets;
     index.updated_at = now_unix();
     index.save()?;
     let (count, bytes) = index.refresh_totals();
+    let n_sel = selection.entries.len();
 
     set_sync(|s| {
         s.running = false;
         s.phase = "ready".into();
-        s.detail = format!("Synced {count} assets · {}", format_bytes(bytes));
+        s.detail = format!(
+            "{n_sel} selected · {count} assets · {}",
+            format_bytes(bytes)
+        );
         s.last_ok_at = index.updated_at;
         s.asset_count = count;
         s.bytes_on_disk = bytes;
         s.last_error.clear();
     });
+    Ok(())
+}
+
+fn prune_to_keep(
+    keep_tags: &BTreeSet<String>,
+    keep_files: &BTreeSet<(String, String)>,
+) -> Result<(), String> {
+    let Ok(entries) = fs::read_dir(releases_dir()) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let tag_dir_name = entry.file_name().to_string_lossy().into_owned();
+        let tag_keep = keep_tags
+            .iter()
+            .any(|t| sanitize_tag(t) == tag_dir_name || t.as_str() == tag_dir_name);
+        if !tag_keep {
+            let _ = fs::remove_dir_all(entry.path());
+            continue;
+        }
+        let Ok(files) = fs::read_dir(entry.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let name = file.file_name().to_string_lossy().into_owned();
+            let tag_key = keep_tags
+                .iter()
+                .find(|t| sanitize_tag(t) == tag_dir_name || t.as_str() == tag_dir_name)
+                .cloned()
+                .unwrap_or_else(|| tag_dir_name.clone());
+            if !keep_files.contains(&(tag_key, name)) {
+                let _ = fs::remove_file(file.path());
+            }
+        }
+    }
     Ok(())
 }
 
@@ -866,30 +1299,93 @@ pub fn spawn_sync_loop(db: Arc<Db>) {
         .ok();
 }
 
+/// Absolute path string for the firmware locker (for UI / copy).
+pub fn firmware_root_display() -> String {
+    let _ = ensure_dirs();
+    let path = firmware_root();
+    std::fs::canonicalize(&path)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Open the firmware folder in a **detached** file manager.
+///
+/// Must not block or share stdio with the HQ WebView — spawning a modal file
+/// dialog from the UI thread made the desktop window shake/fight focus.
 pub fn open_firmware_folder() -> Result<(), String> {
     ensure_dirs()?;
-    let path = firmware_root();
+    let path = std::fs::canonicalize(firmware_root())
+        .unwrap_or_else(|_| firmware_root());
+    // Detach on a worker so the WebView event loop never waits on the FM.
+    thread::Builder::new()
+        .name("open-firmware-dir".into())
+        .spawn(move || {
+            if let Err(err) = open_folder_detached(&path) {
+                hq_log!(warn, "open firmware folder: {err}");
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn open_folder_detached(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         Command::new("explorer")
-            .arg(&path)
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|e| e.to_string())?;
+        return Ok(());
     }
     #[cfg(target_os = "macos")]
     {
         Command::new("open")
-            .arg(&path)
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|e| e.to_string())?;
+        return Ok(());
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
+        // Prefer the FreeDesktop FileManager interface (opens a normal window,
+        // not a chooser dialog tied to our GTK/WebView).
+        let uri = format!("file://{}", path.display());
+        let dbus_ok = Command::new("dbus-send")
+            .args([
+                "--session",
+                "--dest=org.freedesktop.FileManager1",
+                "--type=method_call",
+                "/org/freedesktop/FileManager1",
+                "org.freedesktop.FileManager1.ShowFolders",
+                &format!("array:string:{uri}"),
+                "string:",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if dbus_ok {
+            return Ok(());
+        }
         Command::new("xdg-open")
-            .arg(&path)
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|e| e.to_string())?;
+        return Ok(());
     }
+    #[allow(unreachable_code)]
     Ok(())
 }
 
@@ -1245,5 +1741,126 @@ mod tests {
         });
         // Path missing → has_asset false
         assert!(!index.has_asset("companion-v1.18.0", "a.bin", 10));
+    }
+
+    #[test]
+    fn selection_key_round_trip() {
+        let key = selection_key("LilyGo T-Beam Supreme (SX1262)", "companionBle");
+        assert_eq!(key, "LilyGo T-Beam Supreme (SX1262)|companionBle");
+        let (device, role) = key.split_once('|').unwrap();
+        assert_eq!(selection_key(device, role), key);
+    }
+
+    #[test]
+    fn version_policy_picks_latest_then_previous() {
+        let tags = vec![
+            "companion-v1.18.0".into(),
+            "companion-v1.17.1".into(),
+        ];
+        assert_eq!(
+            pick_tag_for_policy(&tags, VersionPolicy::Latest).as_deref(),
+            Some("companion-v1.18.0")
+        );
+        assert_eq!(
+            pick_tag_for_policy(&tags, VersionPolicy::Previous).as_deref(),
+            Some("companion-v1.17.1")
+        );
+        assert_eq!(
+            pick_tag_for_policy(&tags[..1], VersionPolicy::Previous).as_deref(),
+            Some("companion-v1.18.0")
+        );
+    }
+
+    fn tbeam_ble_offer() -> FirmwareOffer {
+        let mut patterns = BTreeMap::new();
+        patterns.insert(
+            "flash-wipe".into(),
+            "T_Beam_S3_Supreme_SX1262_companion_radio_ble.*?-merged\\.bin".into(),
+        );
+        patterns.insert(
+            "flash-update".into(),
+            "T_Beam_S3_Supreme_SX1262_companion_radio_ble.*?-[a-f0-9]{7}\\.bin".into(),
+        );
+        FirmwareOffer {
+            key: selection_key("LilyGo T-Beam Supreme (SX1262)", "companionBle"),
+            device: "LilyGo T-Beam Supreme (SX1262)".into(),
+            maker_id: "lilygo".into(),
+            maker_label: "LilyGo".into(),
+            platform: "esp32".into(),
+            role: "companionBle".into(),
+            role_label: "Companion (BLE)".into(),
+            role_pill: "BLE".into(),
+            tooltip: String::new(),
+            family: "companion".into(),
+            patterns,
+            static_versions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn selective_match_pulls_only_ble_assets() {
+        let offer = tbeam_ble_offer();
+        let names = vec![
+            "T_Beam_S3_Supreme_SX1262_companion_radio_ble-v1.18.0-81dbae5-merged.bin".into(),
+            "T_Beam_S3_Supreme_SX1262_companion_radio_ble-v1.18.0-81dbae5.bin".into(),
+            "T_Beam_S3_Supreme_SX1262_companion_radio_usb-v1.18.0-81dbae5.bin".into(),
+            "T_Beam_S3_Supreme_SX1262_companion_radio_usb-v1.18.0-81dbae5-merged.bin".into(),
+        ];
+        let wanted = wanted_names_for_offer(&offer, VersionPolicy::Latest, &names);
+        assert_eq!(wanted.len(), 2);
+        assert!(wanted.iter().all(|n| n.contains("_ble-")));
+        assert!(wanted.iter().all(|n| !n.contains("_usb-")));
+        assert!(offer_matches_any_name(&offer, &[names[0].as_str()]));
+        assert!(!offer_matches_any_name(&offer, &[names[2].as_str()]));
+    }
+
+    #[test]
+    fn auto_seed_from_matching_index_asset() {
+        let offer = tbeam_ble_offer();
+        let mut index = FirmwareIndex::default();
+        index.assets.push(IndexAsset {
+            family: "companion".into(),
+            tag: "companion-v1.18.0".into(),
+            name: "T_Beam_S3_Supreme_SX1262_companion_radio_ble-v1.18.0-81dbae5.bin".into(),
+            bytes: 100,
+            sha256: "abc".into(),
+            path: "/tmp/x.bin".into(),
+        });
+        let seeded = auto_seed_selection_from_index(&[offer.clone()], &index);
+        assert_eq!(seeded.entries.len(), 1);
+        assert_eq!(seeded.entries[0].key, offer.key);
+        assert_eq!(seeded.entries[0].version, VersionPolicy::Latest);
+
+        let empty = auto_seed_selection_from_index(
+            &[offer],
+            &FirmwareIndex::default(),
+        );
+        assert!(empty.entries.is_empty());
+    }
+
+    #[test]
+    fn estimate_full_set_is_about_one_gb() {
+        assert_eq!(estimate_full_set_label(), "about 1 GB");
+    }
+
+    #[test]
+    fn version_option_labels_include_short_tag() {
+        assert_eq!(short_version_label("companion-v1.18.0"), "v1.18.0");
+        let tags = vec![
+            "companion-v1.18.0".into(),
+            "companion-v1.17.1".into(),
+        ];
+        assert_eq!(
+            version_policy_option_label(VersionPolicy::Latest, &tags, &[]),
+            "Latest · v1.18.0"
+        );
+        assert_eq!(
+            version_policy_option_label(VersionPolicy::Previous, &tags, &[]),
+            "Previous · v1.17.1"
+        );
+        assert_eq!(
+            version_policy_option_label(VersionPolicy::Previous, &tags[..1], &[]),
+            "Previous"
+        );
     }
 }

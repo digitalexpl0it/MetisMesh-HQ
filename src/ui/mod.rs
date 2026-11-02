@@ -2231,6 +2231,29 @@ fn RosterPage() -> Element {
                             }
                             DetailField { label: "Last heard".to_string(), "{format_time(node.last_heard)}" }
                             DetailField { label: "Last advert".to_string(), "{format_time(node.last_advert)}" }
+                            {
+                                let last_via = node
+                                    .last_radio_id
+                                    .and_then(|id| state().db.radio_label(id).ok().flatten())
+                                    .unwrap_or_default();
+                                let also = details_key
+                                    .as_ref()
+                                    .and_then(|pk| state().db.list_node_radios(pk).ok())
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .filter(|(id, _)| Some(*id) != node.last_radio_id)
+                                    .filter_map(|(id, _)| state().db.radio_label(id).ok().flatten())
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                rsx! {
+                                    if !last_via.is_empty() {
+                                        DetailField { label: "Last via".to_string(), "{last_via}" }
+                                    }
+                                    if !also.is_empty() {
+                                        DetailField { label: "Also heard on".to_string(), "{also}" }
+                                    }
+                                }
+                            }
                             DetailField { label: "Path length".to_string(),
                                 if node.path_len >= 0 { "{node.path_len}" } else { "—" }
                             }

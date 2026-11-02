@@ -62,6 +62,9 @@
     var advert = props.last_advert_label
       ? escapeHtml(String(props.last_advert_label))
       : "";
+    var lastRadio = props.last_radio
+      ? escapeHtml(String(props.last_radio))
+      : "";
     var hops =
       props.hops != null && props.hops !== "" && Number(props.hops) >= 0
         ? String(Number(props.hops))
@@ -107,6 +110,13 @@
         heard +
         "</b></div>"
     );
+    if (lastRadio) {
+      bits.push(
+        '<div class="metis-map-detail-row"><span>Last via</span><b>' +
+          lastRadio +
+          "</b></div>"
+      );
+    }
     if (advert && advert !== "unknown") {
       bits.push(
         '<div class="metis-map-detail-row"><span>Last advert</span><b>' +

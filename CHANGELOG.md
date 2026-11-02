@@ -7,6 +7,8 @@
 - USB serial companions on the same pool as BLE
 - TCP companions (Wi-Fi / Ethernet firmware, default port **5000**); Settings Network card
 - Multi-radio pool with primary-radio pick; bot / enrollment TX from primary companion
+- Contact hears tagged by `radio_id` (F4): `node_radios` + `last_radio_id`; roster/map stay one row per pubkey; per-radio `contacts_since`
+- USB sticky identity (F5b): store VID/PID/serial; rematch open path across tty/COM renumeration without changing `radio_id`
 
 ### Infrastructure
 
@@ -71,4 +73,4 @@ First cut you can actually run as a headquarters.
 - Audit log for operator sends
 - Settings for HQ name, radio presets, purge, and keyring status
 
-Still ahead: HQ-to-HQ linking, map.meshcore.dev uploader (optional), ingest tagged by `radio_id`, standalone signed installers, packaging polish.
+Still ahead: HQ-to-HQ linking, standalone signed installers, packaging polish.

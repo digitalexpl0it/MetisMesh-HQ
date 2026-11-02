@@ -70,9 +70,9 @@ BLE, USB serial, and TCP (Wi-Fi / Ethernet companions) share one radio pool. Coo
 - [x] **F1** USB serial transport beside BLE: discover ports, connect/disconnect, same session pipeline (appstart → contacts → drain → subscribe); reuse `meshcore-rs` USB path where available; study bot USB code for quirks
 - [x] **F2** Multi-radio pool: N concurrent radio tasks (one per device); shared SQLite; UI shows each radio with transport (BLE/USB/TCP), name, battery/role, connect state
 - [x] **F3** Operator roles per radio: label as companion / room server / repeater (and similar); clarify which radio owns METIS-INFO TX, enrollment, and bot replies (default: primary companion)
-- [ ] **F4** Contact/message ingest tagged by `radio_id`; map + roster stay unified; avoid double-counting the same pubkey heard on two HQ radios
+- [x] **F4** Contact/message ingest tagged by `radio_id`; map + roster stay unified; avoid double-counting the same pubkey heard on two HQ radios
 - [x] **F5** Settings: pick primary radio (`primary_radio_id`); reconnect-with-backoff unless the operator disconnected
-- [ ] **F5b** USB prefer sticky port/serial identity when the OS renumerates (optional polish)
+- [x] **F5b** USB prefer sticky port/serial identity when the OS renumerates (optional polish)
 - [x] **F6** TCP companion (Wi-Fi / Ethernet): same session pool as BLE/USB; Settings host + port (default **5000**); Ethernet companions use this path too; no mDNS / Wi-Fi credential wizard in the first cut
 
 ## Phase G — Offline firmware locker + USB flasher

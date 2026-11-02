@@ -313,6 +313,19 @@ fn build_model(
     let hq = db.hq_position().ok().flatten();
     let rows = db.list_nodes().unwrap_or_default();
     let rf_by_key = db.latest_rf_by_pubkey().unwrap_or_default();
+    let radio_labels: std::collections::HashMap<i64, String> = db
+        .list_saved_radios()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| {
+            let label = if r.label.trim().is_empty() {
+                r.address.clone()
+            } else {
+                r.label.clone()
+            };
+            (r.id, label)
+        })
+        .collect();
     let now = unix_now();
 
     let node_features: Vec<Value> = rows
@@ -391,6 +404,10 @@ fn build_model(
                     "lon": lon,
                     "last_heard_label": relative_ago(node.last_heard),
                     "last_advert_label": relative_ago(node.last_advert),
+                    "last_radio": node
+                        .last_radio_id
+                        .and_then(|id| radio_labels.get(&id).cloned())
+                        .unwrap_or_default(),
                     "hops": hops,
                     "noise": rf.map(|s| s.0),
                     "rssi": rf.map(|s| s.1),

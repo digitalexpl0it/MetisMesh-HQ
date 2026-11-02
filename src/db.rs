@@ -83,6 +83,8 @@ pub struct NodeRow {
     pub qr_uri: Option<String>,
     /// False until the operator opens the node on Roster (live-heard only).
     pub noticed: bool,
+    /// HQ radio that most recently heard this node (`radios.id`).
+    pub last_radio_id: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -245,6 +247,8 @@ pub struct RadioRow {
     pub role: RadioRole,
     pub last_error: String,
     pub last_connected: Option<i64>,
+    /// Sticky USB identity (`vid:…:pid:…[:sn:…]`); empty for BLE/TCP or unknown USB.
+    pub usb_identity: String,
 }
 
 pub struct Db {
@@ -308,6 +312,23 @@ impl Db {
         let _ = conn.execute(
             "ALTER TABLE nodes ADD COLUMN noticed INTEGER NOT NULL DEFAULT 1",
             [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE nodes ADD COLUMN last_radio_id INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE radios ADD COLUMN usb_identity TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS node_radios (
+                pubkey TEXT NOT NULL,
+                radio_id INTEGER NOT NULL,
+                last_heard INTEGER NOT NULL,
+                PRIMARY KEY (pubkey, radio_id)
+            );
+            CREATE INDEX IF NOT EXISTS node_radios_radio ON node_radios(radio_id);",
         );
         let _ = conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS rf_samples (
@@ -482,6 +503,10 @@ impl Db {
         );
         let _ = conn.execute(
             "ALTER TABLE nodes ADD COLUMN noticed INTEGER NOT NULL DEFAULT 1",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE radios ADD COLUMN usb_identity TEXT NOT NULL DEFAULT ''",
             [],
         );
         let _ = conn.execute_batch(
@@ -1281,19 +1306,145 @@ impl Db {
     }
 
     pub fn remember_radio(&self, transport: &str, address: &str, label: &str) -> Result<i64> {
+        self.remember_radio_with_identity(transport, address, label, "")
+    }
+
+    /// Save / refresh a radio row. `usb_identity` is stored for USB sticky rematch; pass `""` for BLE/TCP.
+    pub fn remember_radio_with_identity(
+        &self,
+        transport: &str,
+        address: &str,
+        label: &str,
+        usb_identity: &str,
+    ) -> Result<i64> {
         let id = self.upsert_radio(transport, address, label)?;
+        let identity = usb_identity.trim();
         self.lock().execute(
             "UPDATE radios SET last_connected = ?2, last_error = '',
                label = CASE
                  WHEN ?3 = '' OR ?3 = 'Companion' THEN label
                  ELSE ?3
+               END,
+               usb_identity = CASE
+                 WHEN ?4 = '' THEN usb_identity
+                 ELSE ?4
                END
              WHERE id = ?1",
-            params![id, unix_now(), label],
+            params![id, unix_now(), label, identity],
         )?;
         // Keep last-used address for header picker fallback; primary_radio_id is authoritative.
         self.set_setting("radio_name", address)?;
         Ok(id)
+    }
+
+    pub fn set_radio_usb_identity(&self, id: i64, identity: &str) -> Result<()> {
+        let changed = self.lock().execute(
+            "UPDATE radios SET usb_identity = ?2 WHERE id = ?1",
+            params![id, identity.trim()],
+        )?;
+        if changed == 0 {
+            return Err(Error::Msg("Radio not found.".into()));
+        }
+        Ok(())
+    }
+
+    pub fn radio_usb_identity(&self, id: i64) -> Result<String> {
+        let raw: String = self.lock().query_row(
+            "SELECT COALESCE(usb_identity, '') FROM radios WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        Ok(raw)
+    }
+
+    pub fn radio_address(&self, id: i64) -> Result<String> {
+        let raw: String = self.lock().query_row(
+            "SELECT address FROM radios WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        Ok(raw)
+    }
+
+    /// Rewrite the open path for a saved radio without changing its id (F4 radio_id stays stable).
+    ///
+    /// If another USB row already owns `new_address`, that duplicate is forgotten and this id wins.
+    pub fn remap_radio_address(&self, id: i64, new_address: &str) -> Result<()> {
+        let new_address = new_address.trim();
+        if new_address.is_empty() {
+            return Err(Error::Msg("USB address is empty.".into()));
+        }
+        let (transport, old_address): (String, String) = {
+            let conn = self.lock();
+            conn.query_row(
+                "SELECT transport, address FROM radios WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|_| Error::Msg("Radio not found.".into()))?
+        };
+        if old_address == new_address {
+            return Ok(());
+        }
+        let conflict: Option<i64> = {
+            let conn = self.lock();
+            conn.query_row(
+                "SELECT id FROM radios WHERE transport = ?1 AND address = ?2 AND id != ?3",
+                params![transport, new_address, id],
+                |row| row.get(0),
+            )
+            .optional()?
+        };
+        if let Some(dup_id) = conflict {
+            // Fold heard-on rows onto the live slot before dropping the duplicate.
+            // Do not call forget_radio: that would clear radio_name when it already
+            // matches new_address (the address we are about to claim).
+            {
+                let conn = self.lock();
+                let _ = conn.execute(
+                    "INSERT INTO node_radios (pubkey, radio_id, last_heard)
+                     SELECT pubkey, ?1, last_heard FROM node_radios WHERE radio_id = ?2
+                     ON CONFLICT(pubkey, radio_id) DO UPDATE SET
+                       last_heard = CASE
+                         WHEN excluded.last_heard > node_radios.last_heard THEN excluded.last_heard
+                         ELSE node_radios.last_heard
+                       END",
+                    params![id, dup_id],
+                );
+                let _ = conn.execute("DELETE FROM node_radios WHERE radio_id = ?1", params![dup_id]);
+                let _ = conn.execute(
+                    "UPDATE nodes SET last_radio_id = ?1 WHERE last_radio_id = ?2",
+                    params![id, dup_id],
+                );
+                conn.execute("DELETE FROM radios WHERE id = ?1", params![dup_id])?;
+            }
+            if self.primary_radio_id()? == Some(dup_id) {
+                if self.radio_role(id)? == RadioRole::Companion {
+                    let _ = self.set_primary_radio_id(id);
+                } else {
+                    let _ = self.clear_primary_radio_id();
+                }
+            }
+        }
+        {
+            let conn = self.lock();
+            conn.execute(
+                "UPDATE radios SET address = ?2 WHERE id = ?1",
+                params![id, new_address],
+            )?;
+        }
+        // Keep the last-used picker in sync when this was the remembered address.
+        if self
+            .setting("radio_name")?
+            .is_some_and(|name| {
+                name.is_empty()
+                    || name.eq_ignore_ascii_case(&old_address)
+                    || name.eq_ignore_ascii_case(new_address)
+            })
+        {
+            self.set_setting("radio_name", new_address)?;
+        }
+        Ok(())
     }
 
     pub fn set_radio_role(&self, id: i64, role: RadioRole) -> Result<()> {
@@ -1377,7 +1528,8 @@ impl Db {
     pub fn list_saved_radios(&self) -> Result<Vec<RadioRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, transport, address, label, COALESCE(role, 'companion'), last_error, last_connected
+            "SELECT id, transport, address, label, COALESCE(role, 'companion'), last_error,
+                    last_connected, COALESCE(usb_identity, '')
              FROM radios
              ORDER BY COALESCE(last_connected, 0) DESC, id DESC",
         )?;
@@ -1392,6 +1544,7 @@ impl Db {
                     role: RadioRole::parse(&role_raw),
                     last_error: row.get(5)?,
                     last_connected: row.get(6)?,
+                    usb_identity: row.get(7)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1773,6 +1926,7 @@ impl Db {
         lastmod: i64,
         raw: &Value,
         quiet: bool,
+        radio_id: Option<i64>,
     ) -> Result<()> {
         let now = unix_now();
         let (lat, lon) = coords_from_micro(lat_micro, lon_micro);
@@ -1801,8 +1955,9 @@ impl Db {
         conn.execute(
             "INSERT INTO nodes (
                 pubkey, name, contact_type, flags, path_len, hop_bytes, last_advert,
-                lat, lon, lastmod, enrollment, prefix, last_heard, raw_json, noticed
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                lat, lon, lastmod, enrollment, prefix, last_heard, raw_json, noticed,
+                last_radio_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
              ON CONFLICT(pubkey) DO UPDATE SET
                 name = excluded.name,
                 contact_type = excluded.contact_type,
@@ -1815,7 +1970,8 @@ impl Db {
                 lastmod = excluded.lastmod,
                 prefix = excluded.prefix,
                 last_heard = excluded.last_heard,
-                raw_json = excluded.raw_json",
+                raw_json = excluded.raw_json,
+                last_radio_id = COALESCE(excluded.last_radio_id, nodes.last_radio_id)",
             params![
                 pubkey,
                 name,
@@ -1831,9 +1987,18 @@ impl Db {
                 prefix,
                 now,
                 raw.to_string(),
-                noticed
+                noticed,
+                radio_id,
             ],
         )?;
+        if let Some(rid) = radio_id {
+            conn.execute(
+                "INSERT INTO node_radios (pubkey, radio_id, last_heard)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(pubkey, radio_id) DO UPDATE SET last_heard = excluded.last_heard",
+                params![pubkey, rid, now],
+            )?;
+        }
         if let (Some(lat), Some(lon)) = (lat, lon) {
             let changed = existing
                 .as_ref()
@@ -1877,7 +2042,7 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT pubkey, name, requested_name, contact_type, enrollment, last_heard,
                     last_advert, lat, lon, prefix, hop_bytes, path_len, qr_file, qr_uri,
-                    COALESCE(noticed, 1)
+                    COALESCE(noticed, 1), last_radio_id
              FROM nodes WHERE pubkey LIKE ?1 || '%'",
         )?;
         let rows = stmt.query_map(params![prefix_hex], map_node)?;
@@ -1889,7 +2054,7 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT pubkey, name, requested_name, contact_type, enrollment, last_heard,
                     last_advert, lat, lon, prefix, hop_bytes, path_len, qr_file, qr_uri,
-                    COALESCE(noticed, 1)
+                    COALESCE(noticed, 1), last_radio_id
              FROM nodes
              ORDER BY CASE enrollment
                 WHEN 'pending' THEN 0
@@ -1907,7 +2072,7 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT pubkey, name, requested_name, contact_type, enrollment, last_heard,
                     last_advert, lat, lon, prefix, hop_bytes, path_len, qr_file, qr_uri,
-                    COALESCE(noticed, 1)
+                    COALESCE(noticed, 1), last_radio_id
              FROM nodes WHERE enrollment = 'hq' LIMIT 1",
         )?;
         Ok(stmt.query_row([], map_node).optional()?)
@@ -1918,7 +2083,7 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT pubkey, name, requested_name, contact_type, enrollment, last_heard,
                     last_advert, lat, lon, prefix, hop_bytes, path_len, qr_file, qr_uri,
-                    COALESCE(noticed, 1)
+                    COALESCE(noticed, 1), last_radio_id
              FROM nodes WHERE pubkey = ?1",
         )?;
         Ok(stmt.query_row(params![pubkey], map_node).optional()?)
@@ -2170,12 +2335,71 @@ impl Db {
         Ok(())
     }
 
-    pub fn touch_last_heard(&self, pubkey: &str) -> Result<()> {
-        self.lock().execute(
-            "UPDATE nodes SET last_heard = ?2 WHERE pubkey = ?1",
-            params![pubkey, unix_now()],
+    /// Record that `radio_id` heard `pubkey` (updates junction + last_radio_id).
+    pub fn touch_node_radio(&self, pubkey: &str, radio_id: i64) -> Result<()> {
+        let now = unix_now();
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE nodes SET last_heard = ?2, last_radio_id = ?3 WHERE pubkey = ?1",
+            params![pubkey, now, radio_id],
+        )?;
+        conn.execute(
+            "INSERT INTO node_radios (pubkey, radio_id, last_heard)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(pubkey, radio_id) DO UPDATE SET last_heard = excluded.last_heard",
+            params![pubkey, radio_id, now],
         )?;
         Ok(())
+    }
+
+    /// Radios that have heard this node, newest first: (radio_id, last_heard).
+    pub fn list_node_radios(&self, pubkey: &str) -> Result<Vec<(i64, i64)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT radio_id, last_heard FROM node_radios
+             WHERE pubkey = ?1
+             ORDER BY last_heard DESC",
+        )?;
+        let rows = stmt.query_map(params![pubkey], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::from)
+    }
+
+    pub fn radio_label(&self, radio_id: i64) -> Result<Option<String>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT CASE
+                    WHEN TRIM(COALESCE(label, '')) = '' THEN address
+                    ELSE label
+                 END
+                 FROM radios WHERE id = ?1",
+                params![radio_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
+    /// Per-radio contact sync watermark (`contacts_since_{id}`), seeded from legacy global.
+    pub fn contacts_since_for_radio(&self, radio_id: i64) -> Result<u32> {
+        let key = format!("contacts_since_{radio_id}");
+        if let Some(raw) = self.setting(&key)? {
+            return Ok(raw.parse::<u32>().unwrap_or(0));
+        }
+        let global = self
+            .setting("contacts_since")?
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0);
+        if global > 0 {
+            self.set_setting(&key, &global.to_string())?;
+        }
+        Ok(global)
+    }
+
+    pub fn set_contacts_since_for_radio(&self, radio_id: i64, since: u32) -> Result<()> {
+        self.set_setting(&format!("contacts_since_{radio_id}"), &since.to_string())
     }
 
     /// Resolve a channel/display name to exactly one known node (no guessing).
@@ -3436,6 +3660,7 @@ fn map_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRow> {
         qr_file: row.get(12)?,
         qr_uri: row.get(13)?,
         noticed: noticed_i != 0,
+        last_radio_id: row.get(15)?,
     })
 }
 
@@ -3566,6 +3791,7 @@ CREATE TABLE IF NOT EXISTS radios (
     last_error TEXT NOT NULL DEFAULT '',
     device_json TEXT NOT NULL DEFAULT '{}',
     last_connected INTEGER,
+    usb_identity TEXT NOT NULL DEFAULT '',
     UNIQUE(transport, address)
 );
 CREATE TABLE IF NOT EXISTS nodes (
@@ -3585,8 +3811,16 @@ CREATE TABLE IF NOT EXISTS nodes (
     enrollment TEXT NOT NULL DEFAULT 'heard',
     prefix TEXT NOT NULL DEFAULT '',
     last_heard INTEGER,
-    raw_json TEXT NOT NULL DEFAULT '{}'
+    raw_json TEXT NOT NULL DEFAULT '{}',
+    last_radio_id INTEGER
 );
+CREATE TABLE IF NOT EXISTS node_radios (
+    pubkey TEXT NOT NULL,
+    radio_id INTEGER NOT NULL,
+    last_heard INTEGER NOT NULL,
+    PRIMARY KEY (pubkey, radio_id)
+);
+CREATE INDEX IF NOT EXISTS node_radios_radio ON node_radios(radio_id);
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY,
     dedupe_key TEXT NOT NULL UNIQUE,
@@ -3753,7 +3987,7 @@ mod tests {
     #[test]
     fn purge_keeps_roster() {
         let (db, secrets, dir) = test_db();
-        db.upsert_contact("abcd", "Ada", 1, 0, -1, &[], 1, 37_000_000, -122_000_000, 1, &json!({}), true)
+        db.upsert_contact("abcd", "Ada", 1, 0, -1, &[], 1, 37_000_000, -122_000_000, 1, &json!({}), true, None)
             .unwrap();
         db.approve("abcd", &secrets).unwrap();
         db.insert_message(
@@ -3784,6 +4018,34 @@ mod tests {
     }
 
     #[test]
+    fn remap_radio_address_keeps_id_and_identity() {
+        let (db, _, dir) = test_db();
+        let id = db
+            .remember_radio_with_identity(
+                "usb",
+                "/dev/ttyACM0",
+                "Test USB",
+                "vid:303a:pid:1001:sn:ABC",
+            )
+            .unwrap();
+        db.set_primary_radio_id(id).unwrap();
+        // Stale row that already claimed the stable by-id path.
+        let stale = db
+            .remember_radio("usb", "/dev/serial/by-id/usb-ABC", "Stale")
+            .unwrap();
+        assert_ne!(id, stale);
+        db.remap_radio_address(id, "/dev/serial/by-id/usb-ABC")
+            .unwrap();
+        let rows = db.list_saved_radios().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id);
+        assert_eq!(rows[0].address, "/dev/serial/by-id/usb-ABC");
+        assert_eq!(rows[0].usb_identity, "vid:303a:pid:1001:sn:ABC");
+        assert_eq!(db.primary_radio_id().unwrap(), Some(id));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn zero_coordinate_is_not_a_fix() {
         assert_eq!(coords_from_micro(0, 0), (None, None));
         let (lat, lon) = coords_from_micro(37_774_900, -122_419_400);
@@ -3808,7 +4070,7 @@ mod tests {
     #[test]
     fn approve_queues_both_channel_secrets() {
         let (db, secrets, dir) = test_db();
-        db.upsert_contact("aa11", "Ada", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), true)
+        db.upsert_contact("aa11", "Ada", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), true, None)
             .unwrap();
         db.set_enrollment("aa11", Enrollment::Pending, None).unwrap();
         db.approve("aa11", &secrets).unwrap();
@@ -3826,7 +4088,7 @@ mod tests {
     fn revoke_rotates_both_and_resends_to_remaining() {
         let (db, secrets, dir) = test_db();
         for (key, name) in [("aa11", "Ada"), ("bb22", "Bob")] {
-            db.upsert_contact(key, name, 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), true)
+            db.upsert_contact(key, name, 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), true, None)
                 .unwrap();
             db.set_enrollment(key, Enrollment::Pending, None).unwrap();
             db.approve(key, &secrets).unwrap();
@@ -3850,7 +4112,7 @@ mod tests {
     #[test]
     fn rename_info_migrates_secret_and_alerts_use_bot_home() {
         let (db, secrets, dir) = test_db();
-        db.upsert_contact("aa11", "Ada", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), true)
+        db.upsert_contact("aa11", "Ada", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), true, None)
             .unwrap();
         db.set_enrollment("aa11", Enrollment::Pending, None).unwrap();
         db.approve("aa11", &secrets).unwrap();
@@ -3889,7 +4151,7 @@ mod tests {
     #[test]
     fn live_upsert_marks_unnoticed_until_opened() {
         let (db, _, dir) = test_db();
-        db.upsert_contact("aa11", "Ada", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), false)
+        db.upsert_contact("aa11", "Ada", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), false, None)
             .unwrap();
         assert_eq!(db.count_unnoticed_nodes().unwrap(), 1);
         assert!(!db.get_node("aa11").unwrap().unwrap().noticed);
@@ -3902,7 +4164,7 @@ mod tests {
     #[test]
     fn quiet_upsert_stays_noticed() {
         let (db, _, dir) = test_db();
-        db.upsert_contact("aa11", "Ada", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), true)
+        db.upsert_contact("aa11", "Ada", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), true, None)
             .unwrap();
         assert_eq!(db.count_unnoticed_nodes().unwrap(), 0);
         assert!(db.get_node("aa11").unwrap().unwrap().noticed);
@@ -3912,7 +4174,7 @@ mod tests {
     #[test]
     fn dm_thread_unread_clears_after_last_read() {
         let (db, _, dir) = test_db();
-        db.upsert_contact("aa11", "Ada", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), true)
+        db.upsert_contact("aa11", "Ada", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), true, None)
             .unwrap();
         let raw = json!({});
         let id1 = db
@@ -3946,11 +4208,11 @@ mod tests {
     fn claim_infra_verified_sets_kind_and_verified_at() {
         let (db, _, dir) = test_db();
         // contact_type 2 → repeater, 3 → room, 4 → sensor
-        db.upsert_contact("rep01", "P1", 2, 0, -1, &[], 1, 0, 0, 1, &json!({}), true)
+        db.upsert_contact("rep01", "P1", 2, 0, -1, &[], 1, 0, 0, 1, &json!({}), true, None)
             .unwrap();
-        db.upsert_contact("room1", "Room", 3, 0, -1, &[], 1, 0, 0, 1, &json!({}), true)
+        db.upsert_contact("room1", "Room", 3, 0, -1, &[], 1, 0, 0, 1, &json!({}), true, None)
             .unwrap();
-        db.upsert_contact("sens1", "Sense", 4, 0, -1, &[], 1, 0, 0, 1, &json!({}), true)
+        db.upsert_contact("sens1", "Sense", 4, 0, -1, &[], 1, 0, 0, 1, &json!({}), true, None)
             .unwrap();
         db.claim_infra_verified("rep01", None, "P1", "").unwrap();
         db.claim_infra_verified("room1", None, "Room", "").unwrap();
@@ -4022,5 +4284,67 @@ mod tests {
         assert_eq!(Db::normalize_infra_kind("Room"), "room");
         assert_eq!(Db::normalize_infra_kind("SENSOR"), "sensor");
         assert_eq!(Db::normalize_infra_kind("whatever"), "repeater");
+    }
+
+    #[test]
+    fn contact_hears_tag_by_radio_without_doubling_nodes() {
+        let (db, _, dir) = test_db();
+        let a = db.remember_radio("ble", "AA:BB:CC:DD:EE:01", "Radio A").unwrap();
+        let b = db.remember_radio("usb", "/dev/ttyACM0", "Radio B").unwrap();
+        let raw = json!({});
+        db.upsert_contact(
+            "deadbeef", "Node", 2, 0, -1, &[], 10, 37_000_000, -122_000_000, 10, &raw, true,
+            Some(a),
+        )
+        .unwrap();
+        db.upsert_contact(
+            "deadbeef", "Node", 2, 0, -1, &[], 20, 37_000_000, -122_000_000, 20, &raw, true,
+            Some(b),
+        )
+        .unwrap();
+        let nodes = db.list_nodes().unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].last_radio_id, Some(b));
+        let heard = db.list_node_radios("deadbeef").unwrap();
+        assert_eq!(heard.len(), 2);
+        assert!(heard.iter().any(|(id, _)| *id == a));
+        assert!(heard.iter().any(|(id, _)| *id == b));
+        assert_eq!(db.radio_label(a).unwrap().as_deref(), Some("Radio A"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn message_dedupe_ignores_radio_id() {
+        let (db, _, dir) = test_db();
+        let raw = json!({});
+        let first = db
+            .insert_message(
+                "direct", "rx", Some("aa"), "aa", None, Some(1), 10, "hi", "hi",
+                None, None, &raw, "received", Some(1),
+            )
+            .unwrap();
+        let second = db
+            .insert_message(
+                "direct", "rx", Some("aa"), "aa", None, Some(1), 10, "hi", "hi",
+                None, None, &raw, "received", Some(2),
+            )
+            .unwrap();
+        assert!(first.is_some());
+        assert!(second.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn contacts_since_is_per_radio() {
+        let (db, _, dir) = test_db();
+        let a = db.remember_radio("ble", "AA:BB:CC:DD:EE:01", "A").unwrap();
+        let b = db.remember_radio("usb", "/dev/ttyACM0", "B").unwrap();
+        db.set_setting("contacts_since", "42").unwrap();
+        assert_eq!(db.contacts_since_for_radio(a).unwrap(), 42);
+        assert_eq!(db.contacts_since_for_radio(b).unwrap(), 42);
+        db.set_contacts_since_for_radio(a, 99).unwrap();
+        assert_eq!(db.contacts_since_for_radio(a).unwrap(), 99);
+        assert_eq!(db.contacts_since_for_radio(b).unwrap(), 42);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

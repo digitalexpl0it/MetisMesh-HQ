@@ -462,7 +462,8 @@ struct SlotCtx {
     pool: Arc<PoolShared>,
     id: i64,
     transport: String,
-    address: String,
+    /// Live open path. USB may rewrite this when the OS renumerates the port.
+    address: Mutex<String>,
     status: Arc<Mutex<RadioStatus>>,
     is_primary: Arc<AtomicBool>,
     link_up: Arc<AtomicBool>,
@@ -834,7 +835,21 @@ impl PoolShared {
 
     /// Save the radio, then run a session for it unless one is already live.
     async fn start_slot(self: &Arc<Self>, transport: &str, address: &str, label: &str) {
-        let id = match self.db.remember_radio(transport, address, label) {
+        self.start_slot_with_identity(transport, address, label, "")
+            .await;
+    }
+
+    async fn start_slot_with_identity(
+        self: &Arc<Self>,
+        transport: &str,
+        address: &str,
+        label: &str,
+        usb_identity: &str,
+    ) {
+        let id = match self
+            .db
+            .remember_radio_with_identity(transport, address, label, usb_identity)
+        {
             Ok(id) => id,
             Err(err) => {
                 self.notify("error", format!("Could not save the radio: {err}"));
@@ -892,7 +907,7 @@ impl PoolShared {
             pool: self.clone(),
             id,
             transport: transport.to_string(),
-            address: address.to_string(),
+            address: Mutex::new(address.to_string()),
             status,
             is_primary,
             link_up,
@@ -972,6 +987,59 @@ impl PoolShared {
             })
         });
         if let Some(row) = saved_row {
+            if row.transport == "usb" {
+                self.refresh_usb_ports(false).await;
+                let ports = self
+                    .idle
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner())
+                    .usb_ports
+                    .clone();
+                let identity = row.usb_identity.trim();
+                match usb_serial::resolve_usb_target(
+                    &row.address,
+                    (!identity.is_empty()).then_some(identity),
+                    &ports,
+                ) {
+                    Ok(port) => {
+                        if port.path != row.address {
+                            if let Err(err) = self.db.remap_radio_address(row.id, &port.path) {
+                                hq_log!(warn, "usb remap on reconnect: {err}");
+                            }
+                        }
+                        if let Some(live_id) = port.identity.as_deref() {
+                            let _ = self.db.set_radio_usb_identity(row.id, live_id);
+                        }
+                        self.notify(
+                            "connecting",
+                            format!("Reconnecting to {}…", port.path),
+                        );
+                        self.start_slot_with_identity(
+                            "usb",
+                            &port.path,
+                            &port.label,
+                            port.identity.as_deref().unwrap_or(identity),
+                        )
+                        .await;
+                        return;
+                    }
+                    Err(_) => {
+                        // Device may be unplugged; start the slot so backoff can rematch.
+                        self.notify(
+                            "connecting",
+                            format!("Waiting for USB companion {}…", row.address),
+                        );
+                        self.start_slot_with_identity(
+                            "usb",
+                            &row.address,
+                            &row.label,
+                            identity,
+                        )
+                        .await;
+                        return;
+                    }
+                }
+            }
             self.notify("connecting", format!("Reconnecting to {}…", row.address));
             self.start_slot(&row.transport, &row.address, &row.label)
                 .await;
@@ -1002,16 +1070,25 @@ impl PoolShared {
             self.notify("error", "Choose a USB serial port first.");
             return;
         }
-        let (address, label) = {
+        let (address, label, identity) = {
             let idle = self.idle.lock().unwrap_or_else(|err| err.into_inner());
             idle.usb_ports
                 .iter()
                 .find(|port| port.path == normalized || port.system_path == normalized)
-                .map(|port| (port.path.clone(), port.label.clone()))
-                .unwrap_or_else(|| (normalized.clone(), usb_fallback_label(&normalized)))
+                .map(|port| {
+                    (
+                        port.path.clone(),
+                        port.label.clone(),
+                        port.identity.clone().unwrap_or_default(),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    (normalized.clone(), usb_fallback_label(&normalized), String::new())
+                })
         };
         self.notify("connecting", format!("Opening USB port {address}…"));
-        self.start_slot("usb", &address, &label).await;
+        self.start_slot_with_identity("usb", &address, &label, &identity)
+            .await;
     }
 
     async fn refresh_usb_ports(&self, announce: bool) {
@@ -1633,6 +1710,7 @@ async fn run_node_discover(
     status: &Mutex<RadioStatus>,
     filter: u8,
     scan_cancel: &AtomicBool,
+    radio_id: i64,
 ) -> Result<DiscoverSummary, String> {
     let label = if filter == DISCOVER_FILTER_SENSORS {
         "sensors"
@@ -1791,6 +1869,7 @@ async fn run_node_discover(
                 unix_now(),
                 &raw,
                 false, // live discover → Roster NEW
+                Some(radio_id),
             )
             .is_ok()
         {
@@ -2092,7 +2171,10 @@ fn clarify_usb_connect_error(raw: &str) -> String {
         || lower.contains("the system cannot find")
         || lower.contains("cannot find the file")
     {
-        return format!("{raw} Unplug and replug the companion, then Refresh ports.");
+        return format!(
+            "{raw} Waiting to rematch the same USB companion (by-id / serial). \
+Unplug and replug if needed, or Refresh ports."
+        );
     }
     if lower.contains("access is denied") || lower.contains("sharing violation") {
         return format!(
@@ -2134,16 +2216,63 @@ fn usb_permission_hint() -> &'static str {
     }
 }
 
-/// Errors that will not clear with backoff (permissions, missing device, no companion protocol).
+/// Errors that will not clear with backoff (permissions, busy port, no companion protocol).
+///
+/// Missing-device / renumeration is recoverable: the slot rematches by USB identity.
 fn is_fatal_usb_session_error(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
     is_usb_permission_error(&lower)
-        || lower.contains("no such file")
-        || lower.contains("not found")
-        || lower.contains("the system cannot find")
-        || lower.contains("cannot find the file")
         || lower.contains("sharing violation")
+        || lower.contains("access is denied")
         || (lower.contains("timeout") && (lower.contains("selfinfo") || lower.contains("self info")))
+}
+
+/// Rescan USB ports and rewrite the slot open path when the OS renumerated the device.
+async fn resolve_and_store_usb_path(ctx: &SlotCtx) -> Result<String, String> {
+    let saved = ctx
+        .pool
+        .db
+        .radio_address(ctx.id)
+        .unwrap_or_else(|_| {
+            ctx.address
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .clone()
+        });
+    let identity = ctx
+        .pool
+        .db
+        .radio_usb_identity(ctx.id)
+        .unwrap_or_default();
+    let ports = tokio::task::spawn_blocking(usb_serial::list_usb_ports)
+        .await
+        .map_err(|err| format!("USB scan join failed: {err}"))?
+        .map_err(|err| format!("USB scan failed: {err}"))?;
+    {
+        let mut idle = ctx
+            .pool
+            .idle
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        idle.usb_ports = ports.clone();
+    }
+    let identity_ref = identity.trim();
+    let port = usb_serial::resolve_usb_target(
+        &saved,
+        (!identity_ref.is_empty()).then_some(identity_ref),
+        &ports,
+    )?;
+    if port.path != saved {
+        ctx.pool
+            .db
+            .remap_radio_address(ctx.id, &port.path)
+            .map_err(|err| format!("Could not update USB address: {err}"))?;
+    }
+    if let Some(live_id) = port.identity.as_deref() {
+        let _ = ctx.pool.db.set_radio_usb_identity(ctx.id, live_id);
+    }
+    *ctx.address.lock().unwrap_or_else(|err| err.into_inner()) = port.path.clone();
+    Ok(port.path.clone())
 }
 
 /// Wait out a reconnect backoff, still honouring Disconnect. Returns false to end the slot.
@@ -2180,14 +2309,52 @@ async fn slot_loop(
     let status = &ctx.status;
     let mut backoff = Duration::from_secs(2);
     loop {
-        let name = ctx.address.clone();
-        write_status(status, "connecting", format!("Connecting to {name}"));
-        write_sync(
-            status,
-            SyncPhase::Connecting,
-            format!("Connecting to {name}…"),
-            None,
-        );
+        if ctx.transport == "usb" {
+            match resolve_and_store_usb_path(&ctx).await {
+                Ok(path) => {
+                    write_status(status, "connecting", format!("Connecting to {path}"));
+                    write_sync(
+                        status,
+                        SyncPhase::Connecting,
+                        format!("Connecting to {path}…"),
+                        None,
+                    );
+                }
+                Err(err) => {
+                    let detail = if err.to_ascii_lowercase().contains("not found")
+                        || err.to_ascii_lowercase().contains("no usb")
+                    {
+                        "USB companion not found; waiting for the same device…".to_string()
+                    } else {
+                        err
+                    };
+                    clear_session_telemetry(status);
+                    write_status(status, "reconnecting", detail.clone());
+                    let _ = ctx.pool.db.set_radio_error(ctx.id, &detail);
+                    let wait = backoff;
+                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                    if !wait_or_stop(status, &mut rx, &mut stop, wait).await {
+                        clear_session_telemetry(status);
+                        write_status(status, "disconnected", "Disconnected.");
+                        return;
+                    }
+                    continue;
+                }
+            }
+        } else {
+            let name = ctx
+                .address
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .clone();
+            write_status(status, "connecting", format!("Connecting to {name}"));
+            write_sync(
+                status,
+                SyncPhase::Connecting,
+                format!("Connecting to {name}…"),
+                None,
+            );
+        }
         clear_session_telemetry(status);
         // Ignore Disconnect presses from before this session started.
         stop.borrow_and_update();
@@ -2210,6 +2377,11 @@ async fn slot_loop(
             let _ = meshcore.disconnect().await;
         }
         if ctx.transport == "ble" {
+            let name = ctx
+                .address
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .clone();
             match tokio::time::timeout(
                 Duration::from_secs(8),
                 crate::ble_pair::force_disconnect(&name),
@@ -2972,7 +3144,25 @@ async fn run_session(
     let db = &ctx.pool.db;
     let secrets: &Secrets = &ctx.pool.secrets;
     let status = &ctx.status;
-    let name = ctx.address.as_str();
+    let open_path = if ctx.transport == "usb" {
+        match resolve_and_store_usb_path(ctx).await {
+            Ok(path) => path,
+            Err(err) => {
+                let detail = if err.to_ascii_lowercase().contains("not found") {
+                    "USB companion not found; waiting for the same device…".to_string()
+                } else {
+                    err
+                };
+                return SessionEnd::Lost(detail);
+            }
+        }
+    } else {
+        ctx.address
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    };
+    let name = open_path.as_str();
     let radio = ctx.id;
     let scan_cancel = &ctx.scan_cancel;
     let meshcore = match connect_transport(&ctx.transport, name).await {
@@ -3103,7 +3293,9 @@ async fn run_session(
         );
         // Contact lists over BLE can outlast the default 5s command timeout.
         // Slow/empty dumps can retry from the live loop; a dead link must not.
-        if let Err(err) = sync_contacts(db, &commands, meshcore.dispatcher(), Some(status)).await {
+        if let Err(err) =
+            sync_contacts(db, &commands, meshcore.dispatcher(), Some(status), radio).await
+        {
             hq_log!(warn, "contact sync: {err}");
             if is_link_error(&err) {
                 return SessionEnd::Lost(err);
@@ -3229,25 +3421,13 @@ async fn run_session(
     let mut contact_retry_at = Instant::now() + Duration::from_secs(15);
     // Older builds could finish a dump and still leave contacts_since at 0,
     // which re-triggers a multi-minute BLE sync on every connect and blocks sends.
-    if db
-        .setting("contacts_since")
-        .ok()
-        .flatten()
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(0)
-        == 0
-    {
+    // Watermark is per-radio so a second companion does not inherit the primary's.
+    if db.contacts_since_for_radio(radio).unwrap_or(0) == 0 {
         if db.list_nodes().map(|n| n.len()).unwrap_or(0) > 0 {
-            let _ = db.set_setting("contacts_since", "1");
+            let _ = db.set_contacts_since_for_radio(radio, 1);
         }
     }
-    let mut need_contact_retry = db
-        .setting("contacts_since")
-        .ok()
-        .flatten()
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(0)
-        == 0;
+    let mut need_contact_retry = db.contacts_since_for_radio(radio).unwrap_or(0) == 0;
     // Persistent interval — recreating `sleep(1s)` inside select! starves battery
     // polls whenever mesh events keep arriving (auto-fetch / advertisements).
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -3530,8 +3710,15 @@ async fn run_session(
                     }
                     Some(RadioCmd::DiscoverNodes { filter, reply }) => {
                         scan_cancel.store(false, Ordering::SeqCst);
-                        let result =
-                            run_node_discover(&db, &meshcore, status, filter, scan_cancel).await;
+                        let result = run_node_discover(
+                            &db,
+                            &meshcore,
+                            status,
+                            filter,
+                            scan_cancel,
+                            radio,
+                        )
+                        .await;
                         let _ = reply.send(result);
                     }
                     Some(RadioCmd::SendAdvert { flood }) => {
@@ -3794,7 +3981,13 @@ async fn run_session(
                         );
                         let sync = tokio::time::timeout(
                             Duration::from_secs(25),
-                            sync_contacts(db, &commands, meshcore.dispatcher(), Some(status)),
+                            sync_contacts(
+                                db,
+                                &commands,
+                                meshcore.dispatcher(),
+                                Some(status),
+                                radio,
+                            ),
                         )
                         .await;
                         match sync {
@@ -3842,12 +4035,11 @@ async fn sync_contacts(
     commands: &meshcore_rs::commands::CommandHandler,
     dispatcher: &meshcore_rs::events::EventDispatcher,
     status: Option<&Mutex<RadioStatus>>,
+    radio_id: i64,
 ) -> Result<(), String> {
     let since: u32 = db
-        .setting("contacts_since")
-        .map_err(|err| err.to_string())?
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0);
+        .contacts_since_for_radio(radio_id)
+        .map_err(|err| err.to_string())?;
     // Full dumps of hundreds of contacts over BLE can take a minute or two;
     // incremental replies are small and arrive almost immediately.
     let timeout = if since == 0 {
@@ -3924,6 +4116,7 @@ async fn sync_contacts(
             contact.last_modification_timestamp as i64,
             &raw,
             true, // bootstrap contact sync → stay noticed
+            Some(radio_id),
         )
         .map_err(|err| err.to_string())?;
         contact_qr::enqueue_contact_qr(&pubkey);
@@ -3953,7 +4146,7 @@ async fn sync_contacts(
     // hold the command lock for minutes — channel sends sit in the queue and
     // look dead in the UI. Advance at least to 1 so the next pass is incremental.
     let marker = newest.max(since).max(1);
-    db.set_setting("contacts_since", &marker.to_string())
+    db.set_contacts_since_for_radio(radio_id, marker)
         .map_err(|err| err.to_string())?;
     Ok(())
 }
@@ -4272,7 +4465,7 @@ async fn handle_event(
                 )
                 .map_err(|err| err.to_string())?;
             if let (Some(message_id), Some(pubkey)) = (inserted, sender_pubkey.as_deref()) {
-                let _ = db.touch_last_heard(pubkey);
+                let _ = db.touch_node_radio(pubkey, radio_id);
                 remember_route(db, meshcore, pubkey, message_id).await;
             }
             // Bot commands live on METIS-INFO (private, enrolled secret), not DMs.
@@ -4392,7 +4585,7 @@ async fn on_direct(
             db.set_enrollment(pubkey, decision.enrollment, decision.requested_name.clone())
                 .map_err(|err| err.to_string())?;
         }
-        let _ = db.touch_last_heard(pubkey);
+        let _ = db.touch_node_radio(pubkey, radio_id);
         remember_route(db, meshcore, pubkey, message_id).await;
     }
     if let Some(reply) = decision.reply {
@@ -5246,6 +5439,13 @@ mod tests {
         let msg = clarify_usb_session_error("Timeout waiting for Some(SelfInfo)");
         assert!(is_fatal_usb_session_error(&msg));
         assert!(msg.to_ascii_lowercase().contains("companion"), "{msg}");
+    }
+
+    #[test]
+    fn usb_missing_device_is_recoverable_for_sticky_rematch() {
+        let msg = clarify_usb_connect_error("No such file or directory (os error 2)");
+        assert!(!is_fatal_usb_session_error(&msg), "{msg}");
+        assert!(msg.to_ascii_lowercase().contains("rematch"), "{msg}");
     }
 
     #[test]

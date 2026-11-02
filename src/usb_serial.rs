@@ -11,6 +11,8 @@ pub struct UsbPort {
     pub label: String,
     /// Raw system port name (e.g. `/dev/ttyACM0`).
     pub system_path: String,
+    /// Sticky USB identity (`vid:….pid:….sn:…`) when the OS reports USB metadata.
+    pub identity: Option<String>,
 }
 
 /// MeshCore companion serial default.
@@ -34,16 +36,122 @@ pub fn list_usb_ports() -> Result<Vec<UsbPort>, String> {
         }
         let system_path = port.port_name.clone();
         let path = prefer_stable_path(&system_path).unwrap_or_else(|| system_path.clone());
+        let identity = match &port.port_type {
+            serialport::SerialPortType::UsbPort(info) => usb_identity_key(info),
+            _ => None,
+        };
         let label = port_label(&port, &path);
         out.push(UsbPort {
             path,
             label,
             system_path,
+            identity,
         });
     }
     out.sort_by(|a, b| a.label.to_ascii_lowercase().cmp(&b.label.to_ascii_lowercase()));
     out.dedup_by(|a, b| a.path == b.path);
     Ok(out)
+}
+
+/// Build the sticky identity string from USB descriptor fields.
+///
+/// Format: `vid:xxxx:pid:yyyy:sn:<serial>` when serial is present, else `vid:xxxx:pid:yyyy`.
+pub fn usb_identity_key(info: &serialport::UsbPortInfo) -> Option<String> {
+    let vid = info.vid;
+    let pid = info.pid;
+    let sn = info
+        .serial_number
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    Some(match sn {
+        Some(serial) => format!("vid:{vid:04x}:pid:{pid:04x}:sn:{serial}"),
+        None => format!("vid:{vid:04x}:pid:{pid:04x}"),
+    })
+}
+
+/// Resolve a saved USB address (+ optional sticky identity) to a live port.
+///
+/// Match order: exact path / system_path, by-id leaf, then unique identity.
+pub fn resolve_usb_target<'a>(
+    saved_address: &str,
+    saved_identity: Option<&str>,
+    ports: &'a [UsbPort],
+) -> Result<&'a UsbPort, String> {
+    let saved = saved_address.trim();
+    if saved.is_empty() {
+        return Err("No USB address saved.".into());
+    }
+    if let Some(port) = ports
+        .iter()
+        .find(|p| p.path == saved || p.system_path == saved)
+    {
+        return Ok(port);
+    }
+    if let Some(leaf) = path_leaf(saved) {
+        let by_id: Vec<_> = ports
+            .iter()
+            .filter(|p| path_leaf(&p.path).as_deref() == Some(leaf.as_str()))
+            .collect();
+        if by_id.len() == 1 {
+            return Ok(by_id[0]);
+        }
+        if by_id.len() > 1 {
+            return Err(
+                "Multiple USB ports share that by-id name. Unplug extras or pick the port again."
+                    .into(),
+            );
+        }
+    }
+    let identity = saved_identity.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(id) = identity {
+        let matches: Vec<_> = ports
+            .iter()
+            .filter(|p| p.identity.as_deref() == Some(id))
+            .collect();
+        match matches.as_slice() {
+            [one] => return Ok(one),
+            [] => {}
+            _ => {
+                return Err(
+                    "Multiple USB ports match this companion identity. Unplug extras or pick the port again."
+                        .into(),
+                );
+            }
+        }
+        // VID/PID-only identity: also accept a unique live port with the same vid:pid
+        // prefix when the live port gained (or lost) a serial suffix.
+        if !id.contains(":sn:") {
+            let prefix = format!("{id}:");
+            let soft: Vec<_> = ports
+                .iter()
+                .filter(|p| {
+                    p.identity
+                        .as_deref()
+                        .is_some_and(|live| live == id || live.starts_with(&prefix))
+                })
+                .collect();
+            match soft.as_slice() {
+                [one] => return Ok(one),
+                [] => {}
+                _ => {
+                    return Err(
+                        "Multiple USB ports share that VID/PID. Unplug extras or pick the port again."
+                            .into(),
+                    );
+                }
+            }
+        }
+    }
+    Err("USB companion not found. Plug it in or Refresh ports.".into())
+}
+
+fn path_leaf(path: &str) -> Option<String> {
+    Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 fn is_usb_serial(port: &serialport::SerialPortInfo) -> bool {
@@ -156,6 +264,15 @@ pub fn normalize_usb_address(raw: &str) -> String {
 mod tests {
     use super::*;
 
+    fn port(path: &str, system: &str, identity: Option<&str>) -> UsbPort {
+        UsbPort {
+            path: path.to_string(),
+            label: path_leaf(path).unwrap_or_else(|| path.to_string()),
+            system_path: system.to_string(),
+            identity: identity.map(str::to_string),
+        }
+    }
+
     #[test]
     fn normalize_empty() {
         assert!(normalize_usb_address("  ").is_empty());
@@ -215,5 +332,91 @@ mod tests {
         let preferred2 = prefer_by_id_path_in(&by_id, tty.to_str().unwrap()).expect("by-id");
         assert_eq!(preferred2, link.to_string_lossy());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_exact_path() {
+        let ports = vec![port(
+            "/dev/serial/by-id/usb-A",
+            "/dev/ttyACM0",
+            Some("vid:1234:pid:5678:sn:ABC"),
+        )];
+        let hit = resolve_usb_target("/dev/ttyACM0", None, &ports).unwrap();
+        assert_eq!(hit.path, "/dev/serial/by-id/usb-A");
+    }
+
+    #[test]
+    fn resolve_by_id_leaf_after_renumeration() {
+        let ports = vec![port(
+            "/dev/serial/by-id/usb-MeshCore-Companion-if00",
+            "/dev/ttyACM1",
+            Some("vid:1234:pid:5678:sn:ABC"),
+        )];
+        let hit = resolve_usb_target(
+            "/dev/serial/by-id/usb-MeshCore-Companion-if00",
+            Some("vid:1234:pid:5678:sn:ABC"),
+            &ports,
+        )
+        .unwrap();
+        assert_eq!(hit.system_path, "/dev/ttyACM1");
+    }
+
+    #[test]
+    fn resolve_identity_remaps_com_port() {
+        let ports = vec![port(
+            "COM7",
+            "COM7",
+            Some("vid:303a:pid:1001:sn:SERIAL1"),
+        )];
+        let hit = resolve_usb_target("COM3", Some("vid:303a:pid:1001:sn:SERIAL1"), &ports).unwrap();
+        assert_eq!(hit.path, "COM7");
+    }
+
+    #[test]
+    fn resolve_ambiguous_vid_pid_refuses() {
+        let id = "vid:303a:pid:1001";
+        let ports = vec![
+            port("COM3", "COM3", Some(id)),
+            port("COM4", "COM4", Some(id)),
+        ];
+        let err = resolve_usb_target("COM9", Some(id), &ports).unwrap_err();
+        assert!(err.to_ascii_lowercase().contains("multiple"));
+    }
+
+    #[test]
+    fn resolve_unique_vid_pid_without_serial() {
+        let ports = vec![port("COM7", "COM7", Some("vid:303a:pid:1001"))];
+        let hit = resolve_usb_target("COM3", Some("vid:303a:pid:1001"), &ports).unwrap();
+        assert_eq!(hit.path, "COM7");
+    }
+
+    #[test]
+    fn resolve_missing_is_error() {
+        let ports = vec![port("COM7", "COM7", Some("vid:303a:pid:1001:sn:A"))];
+        let err = resolve_usb_target("COM3", Some("vid:303a:pid:1001:sn:B"), &ports).unwrap_err();
+        assert!(err.to_ascii_lowercase().contains("not found"));
+    }
+
+    #[test]
+    fn usb_identity_key_formats() {
+        let with_sn = serialport::UsbPortInfo {
+            vid: 0x1234,
+            pid: 0xabcd,
+            serial_number: Some("  XYZ  ".into()),
+            manufacturer: None,
+            product: None,
+        };
+        assert_eq!(
+            usb_identity_key(&with_sn).as_deref(),
+            Some("vid:1234:pid:abcd:sn:XYZ")
+        );
+        let no_sn = serialport::UsbPortInfo {
+            vid: 0x1,
+            pid: 0x2,
+            serial_number: Some("  ".into()),
+            manufacturer: None,
+            product: None,
+        };
+        assert_eq!(usb_identity_key(&no_sn).as_deref(), Some("vid:0001:pid:0002"));
     }
 }

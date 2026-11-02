@@ -8,10 +8,49 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
 use crate::path::dedupe_key;
-use crate::secrets::{SecretStoreKind, Secrets, CHANNEL_NAME};
+use crate::secrets::{
+    SecretStoreKind, Secrets, CHANNEL_NAME, MAX_CHANNEL_NAME_BYTES, NET_CHANNEL_NAME,
+};
 use crate::signup::{approval_message, Enrollment};
 
 const REDACTED_SECRET: &str = "[secret sent]";
+
+/// Which HQ-owned private channel a rename targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemChannel {
+    Info,
+    Net,
+}
+
+impl SystemChannel {
+    fn setting_key(self) -> &'static str {
+        match self {
+            Self::Info => "channel_info_name",
+            Self::Net => "channel_net_name",
+        }
+    }
+
+    fn default_name(self) -> &'static str {
+        match self {
+            Self::Info => CHANNEL_NAME,
+            Self::Net => NET_CHANNEL_NAME,
+        }
+    }
+
+    fn role(self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Net => "net",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Info => "bot home",
+            Self::Net => "peer net",
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -147,16 +186,52 @@ pub struct TelemetryPoint {
     pub value_mv: f64,
 }
 
+/// Operator-facing role for a saved HQ radio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RadioRole {
+    Companion,
+    Room,
+    Repeater,
+    Other,
+}
+
+impl RadioRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Companion => "companion",
+            Self::Room => "room",
+            Self::Repeater => "repeater",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "room" | "room_server" | "room-server" => Self::Room,
+            "repeater" => Self::Repeater,
+            "other" => Self::Other,
+            _ => Self::Companion,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Companion => "Companion",
+            Self::Room => "Room server",
+            Self::Repeater => "Repeater",
+            Self::Other => "Other",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RadioRow {
-    #[allow(dead_code)]
     pub id: i64,
-    #[allow(dead_code)]
     pub transport: String,
     pub address: String,
     pub label: String,
+    pub role: RadioRole,
     pub last_error: String,
-    #[allow(dead_code)]
     pub last_connected: Option<i64>,
 }
 
@@ -183,6 +258,10 @@ impl Db {
         // Older databases created before last_connected existed.
         let _ = conn.execute(
             "ALTER TABLE radios ADD COLUMN last_connected INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE radios ADD COLUMN role TEXT NOT NULL DEFAULT 'companion'",
             [],
         );
         let _ = conn.execute(
@@ -336,6 +415,10 @@ impl Db {
     fn apply_migrations(conn: &Connection) -> Result<()> {
         let _ = conn.execute(
             "ALTER TABLE radios ADD COLUMN last_connected INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE radios ADD COLUMN role TEXT NOT NULL DEFAULT 'companion'",
             [],
         );
         let _ = conn.execute(
@@ -619,8 +702,11 @@ impl Db {
         if self.setting("svc_quake_min_mag")?.is_none() {
             self.set_setting("svc_quake_min_mag", "3.0")?;
         }
-        if self.setting("svc_alerts_channel")?.is_none() {
-            self.set_setting("svc_alerts_channel", "METIS-INFO")?;
+        if self.setting("channel_info_name")?.is_none() {
+            self.set_setting("channel_info_name", CHANNEL_NAME)?;
+        }
+        if self.setting("channel_net_name")?.is_none() {
+            self.set_setting("channel_net_name", NET_CHANNEL_NAME)?;
         }
         if self.setting("svc_weather_hourly")?.is_none() {
             self.set_setting("svc_weather_hourly", "0")?;
@@ -705,34 +791,10 @@ impl Db {
                active = 1",
             params![now],
         )?;
-        // METIS-INFO: keep its existing slot when free of Public; else next free.
-        let metis_slot = {
-            let conn = self.lock();
-            let existing: Option<i64> = conn
-                .query_row(
-                    "SELECT slot FROM channels WHERE name = ?1 COLLATE NOCASE",
-                    params![CHANNEL_NAME],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            match existing {
-                Some(slot) if slot != 0 => slot,
-                _ => {
-                    let taken: Vec<i64> = conn
-                        .prepare("SELECT slot FROM channels WHERE COALESCE(active, 1) = 1")?
-                        .query_map([], |row| row.get(0))?
-                        .collect::<std::result::Result<Vec<_>, _>>()?;
-                    if !taken.contains(&1) {
-                        1
-                    } else {
-                        (0..32)
-                            .find(|slot| *slot != 0 && !taken.contains(slot))
-                            .unwrap_or(1)
-                    }
-                }
-            }
-        };
-        self.vacate_channel_slot(metis_slot, CHANNEL_NAME)?;
+        let info_name = self.info_channel_name()?;
+        let net_name = self.net_channel_name()?;
+        let info_slot = self.allocate_system_channel_slot(&info_name, 1)?;
+        self.vacate_channel_slot(info_slot, &info_name)?;
         self.lock().execute(
             "INSERT INTO channels (name, slot, secret_account, visibility, role, active, created_at)
              VALUES (?1, ?2, ?1, 'private', 'info', 1, ?3)
@@ -741,9 +803,78 @@ impl Db {
                visibility = 'private',
                role = 'info',
                active = 1",
-            params![CHANNEL_NAME, metis_slot, now],
+            params![info_name, info_slot, now],
+        )?;
+        let net_slot = self.allocate_system_channel_slot(&net_name, 2)?;
+        self.vacate_channel_slot(net_slot, &net_name)?;
+        self.lock().execute(
+            "INSERT INTO channels (name, slot, secret_account, visibility, role, active, created_at)
+             VALUES (?1, ?2, ?1, 'private', 'net', 1, ?3)
+             ON CONFLICT(name) DO UPDATE SET
+               slot = excluded.slot,
+               visibility = 'private',
+               role = 'net',
+               active = 1",
+            params![net_name, net_slot, now],
         )?;
         Ok(())
+    }
+
+    /// Prefer `prefer` when free and non-zero; otherwise first free private slot.
+    fn allocate_system_channel_slot(&self, name: &str, prefer: i64) -> Result<i64> {
+        let conn = self.lock();
+        let existing: Option<i64> = conn
+            .query_row(
+                "SELECT slot FROM channels WHERE name = ?1 COLLATE NOCASE",
+                params![name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(slot) = existing.filter(|s| *s != 0) {
+            return Ok(slot);
+        }
+        let taken: Vec<i64> = conn
+            .prepare("SELECT slot FROM channels WHERE COALESCE(active, 1) = 1")?
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if prefer != 0 && !taken.contains(&prefer) {
+            return Ok(prefer);
+        }
+        Ok((0..32)
+            .find(|slot| *slot != 0 && !taken.contains(slot))
+            .unwrap_or(prefer.max(1)))
+    }
+
+    pub fn info_channel_name(&self) -> Result<String> {
+        self.system_channel_name(SystemChannel::Info)
+    }
+
+    pub fn net_channel_name(&self) -> Result<String> {
+        self.system_channel_name(SystemChannel::Net)
+    }
+
+    fn system_channel_name(&self, which: SystemChannel) -> Result<String> {
+        let raw = self
+            .setting(which.setting_key())?
+            .unwrap_or_else(|| which.default_name().to_string());
+        let name = normalize_channel_name(&raw).unwrap_or_else(|| which.default_name().to_string());
+        Ok(name)
+    }
+
+    pub fn is_info_channel(&self, name: &str) -> bool {
+        self.info_channel_name()
+            .ok()
+            .is_some_and(|n| n.eq_ignore_ascii_case(name.trim()))
+    }
+
+    pub fn is_net_channel(&self, name: &str) -> bool {
+        self.net_channel_name()
+            .ok()
+            .is_some_and(|n| n.eq_ignore_ascii_case(name.trim()))
+    }
+
+    pub fn is_reserved_private(&self, name: &str) -> bool {
+        self.is_info_channel(name) || self.is_net_channel(name)
     }
 
     /// Move every active channel except `keep_name` off `slot` onto a free slot.
@@ -793,22 +924,26 @@ impl Db {
             "UPDATE channels SET slot = 0 WHERE name = 'Public' COLLATE NOCASE",
             [],
         )?;
-        let metis_slot: Option<i64> = self
-            .lock()
-            .query_row(
-                "SELECT slot FROM channels
-                 WHERE name = ?1 COLLATE NOCASE AND COALESCE(active, 1) = 1",
-                params![CHANNEL_NAME],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(current) = metis_slot {
-            let slot = if current == 0 { 1 } else { current };
-            self.vacate_channel_slot(slot, CHANNEL_NAME)?;
-            self.lock().execute(
-                "UPDATE channels SET slot = ?2 WHERE name = ?1 COLLATE NOCASE",
-                params![CHANNEL_NAME, slot],
-            )?;
+        let info_name = self.info_channel_name()?;
+        let net_name = self.net_channel_name()?;
+        for reserved in [&info_name, &net_name] {
+            let current: Option<i64> = self
+                .lock()
+                .query_row(
+                    "SELECT slot FROM channels
+                     WHERE name = ?1 COLLATE NOCASE AND COALESCE(active, 1) = 1",
+                    params![reserved],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(current) = current {
+                let slot = if current == 0 { 1 } else { current };
+                self.vacate_channel_slot(slot, reserved)?;
+                self.lock().execute(
+                    "UPDATE channels SET slot = ?2 WHERE name = ?1 COLLATE NOCASE",
+                    params![reserved, slot],
+                )?;
+            }
         }
 
         let rows = self.list_channels()?;
@@ -824,8 +959,10 @@ impl Db {
             }
             let keep = if names.iter().any(|n| n.eq_ignore_ascii_case("Public")) {
                 "Public".to_string()
-            } else if names.iter().any(|n| n.eq_ignore_ascii_case(CHANNEL_NAME)) {
-                CHANNEL_NAME.to_string()
+            } else if names.iter().any(|n| n.eq_ignore_ascii_case(&info_name)) {
+                info_name.clone()
+            } else if names.iter().any(|n| n.eq_ignore_ascii_case(&net_name)) {
+                net_name.clone()
             } else {
                 names[0].clone()
             };
@@ -974,16 +1111,26 @@ impl Db {
     }
 
     pub fn upsert_radio(&self, transport: &str, address: &str, label: &str) -> Result<i64> {
+        self.upsert_radio_with_role(transport, address, label, RadioRole::Companion)
+    }
+
+    pub fn upsert_radio_with_role(
+        &self,
+        transport: &str,
+        address: &str,
+        label: &str,
+        role: RadioRole,
+    ) -> Result<i64> {
         let conn = self.lock();
         conn.execute(
-            "INSERT INTO radios (transport, address, label, last_error, last_connected)
-             VALUES (?1, ?2, ?3, '', NULL)
+            "INSERT INTO radios (transport, address, label, role, last_error, last_connected)
+             VALUES (?1, ?2, ?3, ?4, '', NULL)
              ON CONFLICT(transport, address) DO UPDATE SET
                label = CASE
                  WHEN excluded.label = '' OR excluded.label = 'Companion' THEN radios.label
                  ELSE excluded.label
                END",
-            params![transport, address, label],
+            params![transport, address, label, role.as_str()],
         )?;
         let id = conn.query_row(
             "SELECT id FROM radios WHERE transport = ?1 AND address = ?2",
@@ -1004,26 +1151,107 @@ impl Db {
              WHERE id = ?1",
             params![id, unix_now(), label],
         )?;
+        // Keep last-used address for header picker fallback; primary_radio_id is authoritative.
         self.set_setting("radio_name", address)?;
         Ok(id)
+    }
+
+    pub fn set_radio_role(&self, id: i64, role: RadioRole) -> Result<()> {
+        let changed = self.lock().execute(
+            "UPDATE radios SET role = ?2 WHERE id = ?1",
+            params![id, role.as_str()],
+        )?;
+        if changed == 0 {
+            return Err(Error::Msg("Radio not found.".into()));
+        }
+        if role != RadioRole::Companion {
+            if self.primary_radio_id()? == Some(id) {
+                self.clear_primary_radio_id()?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn radio_role(&self, id: i64) -> Result<RadioRole> {
+        let raw: String = self.lock().query_row(
+            "SELECT COALESCE(role, 'companion') FROM radios WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        Ok(RadioRole::parse(&raw))
+    }
+
+    pub fn primary_radio_id(&self) -> Result<Option<i64>> {
+        Ok(self
+            .setting("primary_radio_id")?
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|id| *id > 0))
+    }
+
+    pub fn set_primary_radio_id(&self, id: i64) -> Result<()> {
+        let role = self.radio_role(id)?;
+        if role != RadioRole::Companion {
+            return Err(Error::Msg(
+                "Only a companion radio can be the primary HQ radio.".into(),
+            ));
+        }
+        self.set_setting("primary_radio_id", &id.to_string())
+    }
+
+    pub fn clear_primary_radio_id(&self) -> Result<()> {
+        self.set_setting("primary_radio_id", "")
+    }
+
+    /// Remove a saved radio from the pool. Clears primary / last-used if they pointed here.
+    pub fn forget_radio(&self, id: i64) -> Result<()> {
+        let row = {
+            let conn = self.lock();
+            conn.query_row(
+                "SELECT address FROM radios WHERE id = ?1",
+                params![id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        };
+        let Some(address) = row else {
+            return Err(Error::Msg("Radio not found.".into()));
+        };
+        if self.primary_radio_id()? == Some(id) {
+            self.clear_primary_radio_id()?;
+        }
+        if self
+            .setting("radio_name")?
+            .is_some_and(|name| name.eq_ignore_ascii_case(&address))
+        {
+            self.set_setting("radio_name", "")?;
+        }
+        let changed = self
+            .lock()
+            .execute("DELETE FROM radios WHERE id = ?1", params![id])?;
+        if changed == 0 {
+            return Err(Error::Msg("Radio not found.".into()));
+        }
+        Ok(())
     }
 
     pub fn list_saved_radios(&self) -> Result<Vec<RadioRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, transport, address, label, last_error, last_connected
+            "SELECT id, transport, address, label, COALESCE(role, 'companion'), last_error, last_connected
              FROM radios
              ORDER BY COALESCE(last_connected, 0) DESC, id DESC",
         )?;
         let rows = stmt
             .query_map([], |row| {
+                let role_raw: String = row.get(4)?;
                 Ok(RadioRow {
                     id: row.get(0)?,
                     transport: row.get(1)?,
                     address: row.get(2)?,
                     label: row.get(3)?,
-                    last_error: row.get(4)?,
-                    last_connected: row.get(5)?,
+                    role: RadioRole::parse(&role_raw),
+                    last_error: row.get(5)?,
+                    last_connected: row.get(6)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1116,8 +1344,10 @@ impl Db {
              ORDER BY
                CASE
                  WHEN c.name = 'Public' COLLATE NOCASE THEN 0
-                 WHEN c.name = 'METIS-INFO' COLLATE NOCASE THEN 1
-                 ELSE 2
+                 WHEN lower(COALESCE(c.role, '')) = 'info' THEN 1
+                 WHEN lower(COALESCE(c.role, '')) = 'net' THEN 2
+                 WHEN lower(COALESCE(c.role, '')) = 'emergency' THEN 1
+                 ELSE 3
                END,
                c.name COLLATE NOCASE",
         )?;
@@ -1154,10 +1384,10 @@ impl Db {
         visibility: &str,
         role: &str,
     ) -> Result<()> {
-        // Public is immovable from mesh slot 0.
+        // Public is immovable from mesh slot 0; reserved private stay off 0.
         let slot = if name.eq_ignore_ascii_case("Public") {
             0
-        } else if name.eq_ignore_ascii_case(CHANNEL_NAME) && slot == 0 {
+        } else if self.is_reserved_private(name) && slot == 0 {
             1
         } else {
             slot
@@ -1204,8 +1434,13 @@ impl Db {
         if name.is_empty() {
             return Err(Error::Msg("Channel name is required.".into()));
         }
-        if name.eq_ignore_ascii_case("Public") || name.eq_ignore_ascii_case(CHANNEL_NAME) {
+        if name.eq_ignore_ascii_case("Public") || self.is_reserved_private(name) {
             return Err(Error::Msg("That channel name is reserved.".into()));
+        }
+        if name.len() > MAX_CHANNEL_NAME_BYTES {
+            return Err(Error::Msg(format!(
+                "Channel name is limited to {MAX_CHANNEL_NAME_BYTES} characters."
+            )));
         }
         let visibility = if visibility == "public" {
             "public"
@@ -1229,8 +1464,16 @@ impl Db {
         if name.eq_ignore_ascii_case("Public") {
             return Err(Error::Msg("Public is the default channel and stays public.".into()));
         }
-        if name.eq_ignore_ascii_case(CHANNEL_NAME) {
-            return Err(Error::Msg("METIS-INFO stays private.".into()));
+        if self.is_reserved_private(name) {
+            return Err(Error::Msg(format!(
+                "{} stays private.",
+                if self.is_info_channel(name) {
+                    self.info_channel_name().unwrap_or_else(|_| CHANNEL_NAME.into())
+                } else {
+                    self.net_channel_name()
+                        .unwrap_or_else(|_| NET_CHANNEL_NAME.into())
+                }
+            )));
         }
         let visibility = if visibility == "public" {
             "public"
@@ -1248,7 +1491,7 @@ impl Db {
     }
 
     pub fn soft_delete_channel(&self, name: &str) -> Result<i64> {
-        if name.eq_ignore_ascii_case("Public") || name.eq_ignore_ascii_case(CHANNEL_NAME) {
+        if name.eq_ignore_ascii_case("Public") || self.is_reserved_private(name) {
             return Err(Error::Msg("System channels cannot be deleted.".into()));
         }
         let conn = self.lock();
@@ -1306,7 +1549,8 @@ impl Db {
         .map_err(Error::from)
     }
 
-    /// Import a channel discovered on the companion radio without clobbering METIS-INFO.
+    /// Import a channel discovered on the companion radio without clobbering
+    /// the HQ bot-home / peer-net private channels.
     /// Returns `Ok(false)` when the operator soft-deleted this name — caller should
     /// clear the radio slot instead of resurrecting the row.
     pub fn upsert_channel_from_radio(
@@ -1323,8 +1567,14 @@ impl Db {
         if self.is_channel_soft_deleted(name)? {
             return Ok(false);
         }
-        if name.eq_ignore_ascii_case(CHANNEL_NAME) {
-            self.ensure_channel_row(CHANNEL_NAME, slot, "private", "info")?;
+        if self.is_info_channel(name) {
+            let info = self.info_channel_name()?;
+            self.ensure_channel_row(&info, slot, "private", "info")?;
+            return Ok(true);
+        }
+        if self.is_net_channel(name) {
+            let net = self.net_channel_name()?;
+            self.ensure_channel_row(&net, slot, "private", "net")?;
             return Ok(true);
         }
         let visibility = if name.eq_ignore_ascii_case("Public") || secret.iter().all(|b| *b == 0) {
@@ -1981,8 +2231,13 @@ impl Db {
     }
 
     pub fn approve(&self, pubkey: &str, secrets: &Secrets) -> Result<()> {
-        let secret = self.ensure_channel_secret(secrets)?;
-        let body = approval_message(CHANNEL_NAME, &hex::encode(secret));
+        let info = self.info_channel_name()?;
+        let net = self.net_channel_name()?;
+        let info_secret = self.ensure_named_channel_secret(&info, secrets)?;
+        let net_secret = self.ensure_named_channel_secret(&net, secrets)?;
+        let info_body = approval_message(&info, &hex::encode(info_secret));
+        let net_body = approval_message(&net, &hex::encode(net_secret));
+        let now = unix_now();
         let conn = self.lock();
         let tx = conn.unchecked_transaction()?;
         let changed = tx.execute(
@@ -1995,11 +2250,16 @@ impl Db {
         tx.execute(
             "INSERT INTO outbound (pubkey, body, display_text, created_at, delivery)
              VALUES (?1, ?2, ?3, ?4, 'queued')",
-            params![pubkey, body, REDACTED_SECRET, unix_now()],
+            params![pubkey, info_body, REDACTED_SECRET, now],
+        )?;
+        tx.execute(
+            "INSERT INTO outbound (pubkey, body, display_text, created_at, delivery)
+             VALUES (?1, ?2, ?3, ?4, 'queued')",
+            params![pubkey, net_body, REDACTED_SECRET, now],
         )?;
         tx.execute(
             "INSERT INTO audit (at, action, pubkey, detail) VALUES (?1, 'approve', ?2, ?3)",
-            params![unix_now(), pubkey, CHANNEL_NAME],
+            params![now, pubkey, format!("{info}+{net}")],
         )?;
         tx.commit()?;
         Ok(())
@@ -2013,12 +2273,14 @@ impl Db {
         self.audit("deny", pubkey, "")
     }
 
-    /// Removing an enrolled node rotates the secret and re-sends it to the rest.
+    /// Removing an enrolled node rotates both private secrets and re-sends them.
     pub fn revoke(&self, pubkey: &str, secrets: &Secrets) -> Result<usize> {
-        let secret = Secrets::generate();
-        let kind = secrets
-            .store(CHANNEL_NAME, &secret)
-            .map_err(Error::Msg)?;
+        let info = self.info_channel_name()?;
+        let net = self.net_channel_name()?;
+        let info_secret = Secrets::generate();
+        let net_secret = Secrets::generate();
+        let kind = secrets.store(&info, &info_secret).map_err(Error::Msg)?;
+        let _ = secrets.store(&net, &net_secret).map_err(Error::Msg)?;
         let generation = self
             .setting("channel_generation")?
             .and_then(|value| value.parse::<i64>().ok())
@@ -2037,24 +2299,41 @@ impl Db {
             .query_map([], |row| row.get(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         drop(stmt);
-        let body = approval_message(CHANNEL_NAME, &hex::encode(secret));
+        let info_body = approval_message(&info, &hex::encode(info_secret));
+        let net_body = approval_message(&net, &hex::encode(net_secret));
+        let now = unix_now();
         for key in &enrolled {
             tx.execute(
                 "INSERT INTO outbound (pubkey, body, display_text, created_at, delivery)
                  VALUES (?1, ?2, ?3, ?4, 'queued')",
-                params![key, body, REDACTED_SECRET, unix_now()],
+                params![key, info_body, REDACTED_SECRET, now],
+            )?;
+            tx.execute(
+                "INSERT INTO outbound (pubkey, body, display_text, created_at, delivery)
+                 VALUES (?1, ?2, ?3, ?4, 'queued')",
+                params![key, net_body, REDACTED_SECRET, now],
             )?;
         }
         tx.execute(
-            "INSERT INTO audit (at, action, pubkey, detail) VALUES (?1, 'revoke', ?2, 'rotated channel secret')",
-            params![unix_now(), pubkey],
+            "INSERT INTO audit (at, action, pubkey, detail) VALUES (?1, 'revoke', ?2, ?3)",
+            params![
+                now,
+                pubkey,
+                format!("rotated {info} and {net} secrets")
+            ],
         )?;
         tx.commit()?;
         Ok(enrolled.len())
     }
 
     pub fn ensure_channel_secret(&self, secrets: &Secrets) -> Result<[u8; 16]> {
-        self.ensure_named_channel_secret(CHANNEL_NAME, secrets)
+        let info = self.info_channel_name()?;
+        self.ensure_named_channel_secret(&info, secrets)
+    }
+
+    pub fn ensure_net_channel_secret(&self, secrets: &Secrets) -> Result<[u8; 16]> {
+        let net = self.net_channel_name()?;
+        self.ensure_named_channel_secret(&net, secrets)
     }
 
     pub fn ensure_named_channel_secret(
@@ -2072,20 +2351,128 @@ impl Db {
         let secret = Secrets::generate();
         let kind = secrets.store(channel_name, &secret).map_err(Error::Msg)?;
         self.set_setting("secret_store", kind.as_str())?;
-        if channel_name == CHANNEL_NAME {
+        if self.is_reserved_private(channel_name) {
             let generation = self
                 .setting("channel_generation")?
                 .and_then(|value| value.parse::<i64>().ok())
                 .unwrap_or(0)
                 + 1;
             self.set_setting("channel_generation", &generation.to_string())?;
-            self.lock().execute(
-                "INSERT INTO channels (name, slot, secret_account) VALUES (?1, 1, ?1)
-                 ON CONFLICT(name) DO NOTHING",
-                params![CHANNEL_NAME],
-            )?;
+            let role = if self.is_info_channel(channel_name) {
+                "info"
+            } else {
+                "net"
+            };
+            let prefer = if role == "info" { 1 } else { 2 };
+            let slot = self.allocate_system_channel_slot(channel_name, prefer)?;
+            self.ensure_channel_row(channel_name, slot, "private", role)?;
         }
         Ok(secret)
+    }
+
+    /// Rename bot-home or peer-net: migrate secret + DB row, re-send name to enrolled.
+    /// Returns `(new_name, slot)` so the UI can push the companion.
+    pub fn rename_system_channel(
+        &self,
+        which: SystemChannel,
+        new_name: &str,
+        secrets: &Secrets,
+    ) -> Result<(String, i64)> {
+        let new_name = normalize_channel_name(new_name).ok_or_else(|| {
+            Error::Msg(format!(
+                "Enter a valid {} channel name (1–{MAX_CHANNEL_NAME_BYTES} chars, not Public).",
+                which.label()
+            ))
+        })?;
+        let old_name = self.system_channel_name(which)?;
+        let other = match which {
+            SystemChannel::Info => self.net_channel_name()?,
+            SystemChannel::Net => self.info_channel_name()?,
+        };
+        if new_name.eq_ignore_ascii_case(&other) {
+            return Err(Error::Msg(
+                "Bot home and peer net must use different names.".into(),
+            ));
+        }
+        if new_name == old_name {
+            let slot = self
+                .list_channels()?
+                .into_iter()
+                .find(|row| row.name.eq_ignore_ascii_case(&old_name))
+                .map(|row| row.slot)
+                .unwrap_or(1);
+            return Ok((new_name, slot));
+        }
+        let conflict = self
+            .list_channels()?
+            .into_iter()
+            .any(|row| row.name.eq_ignore_ascii_case(&new_name) && !row.name.eq_ignore_ascii_case(&old_name));
+        if conflict {
+            return Err(Error::Msg(format!(
+                "Channel {new_name} already exists."
+            )));
+        }
+
+        let secret = self.ensure_named_channel_secret(&old_name, secrets)?;
+        let kind = secrets.store(&new_name, &secret).map_err(Error::Msg)?;
+        self.set_setting("secret_store", kind.as_str())?;
+        if !old_name.eq_ignore_ascii_case(&new_name) {
+            let _ = secrets.forget(&old_name);
+        }
+
+        let prefer = match which {
+            SystemChannel::Info => 1,
+            SystemChannel::Net => 2,
+        };
+        let slot = self
+            .list_channels()?
+            .into_iter()
+            .find(|row| row.name.eq_ignore_ascii_case(&old_name))
+            .map(|row| row.slot)
+            .unwrap_or(prefer);
+        let role = which.role();
+        self.lock().execute(
+            "UPDATE channels SET name = ?2, secret_account = ?2, visibility = 'private', role = ?3, active = 1
+             WHERE name = ?1 COLLATE NOCASE",
+            params![old_name, new_name, role],
+        )?;
+        // If the row was missing (legacy DB), ensure it.
+        self.ensure_channel_row(&new_name, slot, "private", role)?;
+        self.set_setting(which.setting_key(), &new_name)?;
+
+        let body = approval_message(&new_name, &hex::encode(secret));
+        let now = unix_now();
+        let enrolled: Vec<String> = {
+            let conn = self.lock();
+            let mut stmt =
+                conn.prepare("SELECT pubkey FROM nodes WHERE enrollment = 'enrolled'")?;
+            let rows = stmt
+                .query_map([], |row| row.get(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+        {
+            let conn = self.lock();
+            for key in &enrolled {
+                conn.execute(
+                    "INSERT INTO outbound (pubkey, body, display_text, created_at, delivery)
+                     VALUES (?1, ?2, ?3, ?4, 'queued')",
+                    params![key, body, REDACTED_SECRET, now],
+                )?;
+            }
+        }
+        self.audit(
+            "channel_rename",
+            "",
+            &format!("{}: {old_name} → {new_name}", which.label()),
+        )?;
+        let generation = self
+            .setting("channel_generation")?
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0)
+            + 1;
+        self.set_setting("channel_generation", &generation.to_string())?;
+        Ok((new_name, slot))
     }
 
     /// Manually send a private-channel secret to a node (same style as signup approval).
@@ -2103,7 +2490,7 @@ impl Db {
             .list_channels()?
             .into_iter()
             .any(|row| row.name.eq_ignore_ascii_case(channel_name) && row.visibility == "private");
-        if !exists && channel_name != CHANNEL_NAME {
+        if !exists && !self.is_reserved_private(channel_name) {
             return Err(Error::Msg(format!(
                 "Private channel {channel_name} is not in the channel list."
             )));
@@ -2668,6 +3055,21 @@ fn fill_hourly_f32(starts: &[i64], map: std::collections::HashMap<i64, i64>) -> 
         .collect()
 }
 
+/// Trim and validate a MeshCore channel name for HQ settings / create.
+pub fn normalize_channel_name(raw: &str) -> Option<String> {
+    let name = raw.trim();
+    if name.is_empty() || name.eq_ignore_ascii_case("Public") {
+        return None;
+    }
+    if name.len() > MAX_CHANNEL_NAME_BYTES {
+        return None;
+    }
+    if name.chars().any(|c| c.is_control() || c == '\n' || c == '\r') {
+        return None;
+    }
+    Some(name.to_string())
+}
+
 pub fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2736,6 +3138,7 @@ CREATE TABLE IF NOT EXISTS radios (
     transport TEXT NOT NULL,
     address TEXT NOT NULL,
     label TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'companion',
     last_error TEXT NOT NULL DEFAULT '',
     device_json TEXT NOT NULL DEFAULT '{}',
     last_connected INTEGER,
@@ -2859,19 +3262,44 @@ CREATE TABLE IF NOT EXISTS bot_handled (
 mod tests {
     use super::*;
     use crate::secrets::Secrets;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    fn test_db() -> (Db, Secrets) {
+    static TEST_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    fn test_db() -> (Db, Secrets, std::path::PathBuf) {
         let conn = Connection::open_in_memory().unwrap();
         let db = Db::from_conn(conn).unwrap();
         db.ensure_defaults().unwrap();
-        let dir = std::env::temp_dir().join(format!("metis-db-{}", std::process::id()));
+        let seq = TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "metis-db-{}-{}-{}",
+            std::process::id(),
+            unix_now(),
+            seq
+        ));
         let _ = std::fs::remove_dir_all(&dir);
-        (db, Secrets::file_only(dir))
+        let secrets = Secrets::file_only(&dir);
+        (db, secrets, dir)
+    }
+
+    fn queued_bodies(db: &Db, pubkey: &str) -> Vec<(String, String)> {
+        let conn = db.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT body, display_text FROM outbound
+                 WHERE pubkey = ?1 AND delivery = 'queued'
+                 ORDER BY id ASC",
+            )
+            .unwrap();
+        stmt.query_map(params![pubkey], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
     }
 
     #[test]
     fn duplicate_message_is_ignored() {
-        let (db, _) = test_db();
+        let (db, _, dir) = test_db();
         let raw = serde_json::json!({});
         let first = db
             .insert_message(
@@ -2887,11 +3315,12 @@ mod tests {
             .unwrap();
         assert!(first.is_some());
         assert!(second.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn purge_keeps_roster() {
-        let (db, secrets) = test_db();
+        let (db, secrets, dir) = test_db();
         db.upsert_contact("abcd", "Ada", 1, 0, -1, &[], 1, 37_000_000, -122_000_000, 1, &json!({}))
             .unwrap();
         db.approve("abcd", &secrets).unwrap();
@@ -2905,6 +3334,21 @@ mod tests {
         let nodes = db.list_nodes().unwrap();
         assert_eq!(nodes[0].enrollment, Enrollment::Enrolled);
         assert!(db.list_messages(10).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn forget_radio_clears_primary_and_list() {
+        let (db, _, dir) = test_db();
+        let id = db
+            .remember_radio("usb", "/dev/ttyACM0", "Test USB")
+            .unwrap();
+        db.set_primary_radio_id(id).unwrap();
+        assert_eq!(db.primary_radio_id().unwrap(), Some(id));
+        db.forget_radio(id).unwrap();
+        assert!(db.list_saved_radios().unwrap().is_empty());
+        assert_eq!(db.primary_radio_id().unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2913,5 +3357,100 @@ mod tests {
         let (lat, lon) = coords_from_micro(37_774_900, -122_419_400);
         assert!(lat.unwrap() > 37.0);
         assert!(lon.unwrap() < -122.0);
+    }
+
+    #[test]
+    fn default_channels_include_info_and_net() {
+        let (db, _, dir) = test_db();
+        let names: Vec<_> = db
+            .list_channels()
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert!(names.iter().any(|n| n == CHANNEL_NAME));
+        assert!(names.iter().any(|n| n == NET_CHANNEL_NAME));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn approve_queues_both_channel_secrets() {
+        let (db, secrets, dir) = test_db();
+        db.upsert_contact("aa11", "Ada", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}))
+            .unwrap();
+        db.set_enrollment("aa11", Enrollment::Pending, None).unwrap();
+        db.approve("aa11", &secrets).unwrap();
+        let queued = queued_bodies(&db, "aa11");
+        assert_eq!(queued.len(), 2);
+        assert!(queued.iter().all(|(_, display)| display == REDACTED_SECRET));
+        assert!(queued[0].0.contains(CHANNEL_NAME));
+        assert!(queued[1].0.contains(NET_CHANNEL_NAME));
+        assert!(secrets.load(CHANNEL_NAME).unwrap().is_some());
+        assert!(secrets.load(NET_CHANNEL_NAME).unwrap().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn revoke_rotates_both_and_resends_to_remaining() {
+        let (db, secrets, dir) = test_db();
+        for (key, name) in [("aa11", "Ada"), ("bb22", "Bob")] {
+            db.upsert_contact(key, name, 1, 0, -1, &[], 1, 0, 0, 1, &json!({}))
+                .unwrap();
+            db.set_enrollment(key, Enrollment::Pending, None).unwrap();
+            db.approve(key, &secrets).unwrap();
+        }
+        let info_before = secrets.load(CHANNEL_NAME).unwrap().unwrap();
+        let net_before = secrets.load(NET_CHANNEL_NAME).unwrap().unwrap();
+        // Clear outbound so we can count revoke re-sends alone.
+        db.lock()
+            .execute("DELETE FROM outbound", [])
+            .unwrap();
+        let remaining = db.revoke("aa11", &secrets).unwrap();
+        assert_eq!(remaining, 1);
+        assert_ne!(secrets.load(CHANNEL_NAME).unwrap().unwrap(), info_before);
+        assert_ne!(secrets.load(NET_CHANNEL_NAME).unwrap().unwrap(), net_before);
+        let bob = queued_bodies(&db, "bb22");
+        assert_eq!(bob.len(), 2);
+        assert!(queued_bodies(&db, "aa11").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_info_migrates_secret_and_alerts_use_bot_home() {
+        let (db, secrets, dir) = test_db();
+        db.upsert_contact("aa11", "Ada", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}))
+            .unwrap();
+        db.set_enrollment("aa11", Enrollment::Pending, None).unwrap();
+        db.approve("aa11", &secrets).unwrap();
+        let secret = secrets.load(CHANNEL_NAME).unwrap().unwrap();
+        db.lock()
+            .execute("DELETE FROM outbound", [])
+            .unwrap();
+        let (new_name, _slot) = db
+            .rename_system_channel(SystemChannel::Info, "HQ-BOT", &secrets)
+            .unwrap();
+        assert_eq!(new_name, "HQ-BOT");
+        assert_eq!(db.info_channel_name().unwrap(), "HQ-BOT");
+        assert_eq!(secrets.load("HQ-BOT").unwrap(), Some(secret));
+        assert!(secrets.load(CHANNEL_NAME).unwrap().is_none());
+        assert!(db
+            .list_channels()
+            .unwrap()
+            .iter()
+            .any(|c| c.name == "HQ-BOT" && c.role == "info"));
+        assert_eq!(
+            crate::services::alerts_channel_slot(&db),
+            db.list_channels()
+                .unwrap()
+                .into_iter()
+                .find(|c| c.name == "HQ-BOT")
+                .unwrap()
+                .slot as u8
+        );
+        let queued = queued_bodies(&db, "aa11");
+        assert_eq!(queued.len(), 1);
+        assert!(queued[0].0.contains("HQ-BOT"));
+        assert_eq!(queued[0].1, REDACTED_SECRET);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

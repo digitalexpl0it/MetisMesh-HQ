@@ -122,12 +122,13 @@ pub fn emerg_state(db: &Db) -> String {
         .unwrap_or_else(|| "CA".into())
 }
 
-/// Slot for METIS-INFO, or None if the channel row is missing.
+/// Slot for the bot-home channel (default METIS-INFO), or None if missing.
 pub fn metis_info_slot(db: &Db) -> Option<u8> {
+    let info = db.info_channel_name().ok()?;
     db.list_channels()
         .ok()?
         .into_iter()
-        .find(|c| c.name.eq_ignore_ascii_case(crate::secrets::CHANNEL_NAME))
+        .find(|c| c.name.eq_ignore_ascii_case(&info))
         .map(|c| c.slot.clamp(0, 255) as u8)
 }
 
@@ -212,32 +213,9 @@ pub fn weather_unit_f(db: &Db) -> bool {
     }
 }
 
+/// NWS / quake / amber / emergency relays always use the bot-home channel.
 pub fn alerts_channel_slot(db: &Db) -> u8 {
-    let named = db
-        .setting("svc_alerts_channel")
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    if !named.is_empty() {
-        if let Ok(channels) = db.list_channels() {
-            if let Some(ch) = channels
-                .iter()
-                .find(|c| c.name.eq_ignore_ascii_case(named.trim()))
-            {
-                return ch.slot.clamp(0, 255) as u8;
-            }
-        }
-    }
-    // Prefer METIS-INFO when present.
-    if let Ok(channels) = db.list_channels() {
-        if let Some(ch) = channels
-            .iter()
-            .find(|c| c.name.eq_ignore_ascii_case("METIS-INFO"))
-        {
-            return ch.slot.clamp(0, 255) as u8;
-        }
-    }
-    setting_i64(db, "svc_alerts_slot", 1).clamp(0, 255) as u8
+    metis_info_slot(db).unwrap_or_else(|| setting_i64(db, "svc_alerts_slot", 1).clamp(0, 255) as u8)
 }
 
 pub fn quake_bbox(db: &Db) -> (f64, f64, f64, f64) {

@@ -15,7 +15,7 @@ use dioxus::prelude::*;
 use crate::contact_qr::{
     contact_add_uri, enqueue_contact_qr, qr_data_url_from_file, qr_public_url,
 };
-use crate::db::{unix_now, Db, TelemetryPoint};
+use crate::db::{unix_now, Db, SystemChannel, TelemetryPoint};
 use crate::radio::{
     channel_sender_and_body, prefix_channel_sender, BleRadio, RadioHandle, RadioStatus,
 };
@@ -104,16 +104,7 @@ pub fn App() -> Element {
     let pending = state().db.pending_nodes().unwrap_or_default().len();
     let expanded = nav_open();
     let nav_width = if expanded { "w-56" } else { "w-[4.5rem]" };
-    let page_title = match page() {
-        Page::Dashboard => "Overview",
-        Page::Map => "Map",
-        Page::Tracker => "Tracker",
-        Page::Roster => "Roster",
-        Page::Inbox => "Inbox",
-        Page::Messages => "Messages",
-        Page::Cli => "CLI",
-        Page::Settings => "Settings",
-    };
+    let brand_logo = crate::brand::custom_logo_url(&state().db);
 
     rsx! {
         document::Title { "Metis Mesh HQ" }
@@ -227,9 +218,20 @@ pub fn App() -> Element {
                 }
                 div { class: "flex min-w-0 flex-1 flex-col",
                     header { class: "flex h-14 shrink-0 items-center justify-between border-b border-border px-5",
-                        div {
-                            p { class: "text-[0.65rem] uppercase tracking-[0.18em] text-muted-foreground", "Metis Mesh HQ" }
-                            h2 { class: "text-lg font-semibold leading-tight", "{page_title}" }
+                        div { class: "flex min-w-0 items-center",
+                            if let Some(src) = brand_logo.as_ref() {
+                                img {
+                                    class: "h-9 max-w-[14rem] object-contain object-left",
+                                    src: "{src}",
+                                    alt: "HQ brand",
+                                }
+                            } else {
+                                img {
+                                    class: "h-9 max-w-[14rem] object-contain object-left",
+                                    src: asset!("/assets/emerghq_logo.png"),
+                                    alt: "EmergHQ",
+                                }
+                            }
                         }
                         HeaderRadioControls { radio: radio.clone() }
                     }
@@ -510,6 +512,11 @@ fn HeaderRadioControls(radio: RadioStatus) -> Element {
                         if !label.is_empty() {
                             span { class: "max-w-[9rem] truncate text-muted-foreground", "· {label}" }
                         }
+                        if radio.transport == "usb" {
+                            span { class: "text-muted-foreground", "USB" }
+                        } else if radio.transport == "ble" {
+                            span { class: "text-muted-foreground", "BLE" }
+                        }
                     }
                     if linked || radio.battery_pct.is_some() {
                         span { class: "h-4 w-px bg-border" }
@@ -518,6 +525,10 @@ fn HeaderRadioControls(radio: RadioStatus) -> Element {
                             mv: radio.battery_mv,
                             charging: radio.battery_charging,
                         }
+                    }
+                    if radio.others_connected > 0 {
+                        span { class: "h-4 w-px bg-border" }
+                        span { class: "text-muted-foreground", "+{radio.others_connected}" }
                     }
                 }
                 Button {
@@ -1381,7 +1392,12 @@ fn RosterPage() -> Element {
         private_channels
             .first()
             .map(|row| row.name.clone())
-            .unwrap_or_else(|| crate::secrets::CHANNEL_NAME.to_string())
+            .unwrap_or_else(|| {
+                state()
+                    .db
+                    .info_channel_name()
+                    .unwrap_or_else(|_| crate::secrets::CHANNEL_NAME.to_string())
+            })
     });
     let needle = query();
     let mut ranked: Vec<_> = nodes
@@ -1686,7 +1702,10 @@ fn RosterPage() -> Element {
                                                     let secrets = secrets.clone();
                                                     move |_| {
                                                         match state().db.revoke(&pubkey, &secrets) {
-                                                            Ok(_) => note.set("Revoked and rotated METIS-INFO.".into()),
+                                                            Ok(_) => note.set(
+                                                                "Revoked and rotated private channel secrets."
+                                                                    .into(),
+                                                            ),
                                                             Err(err) => note.set(err.to_string()),
                                                         }
                                                     }
@@ -1766,7 +1785,7 @@ fn RosterPage() -> Element {
                 on_close: move |_| invite_target.set(None),
                 div { class: "flex flex-col gap-3",
                     p { class: "text-sm text-muted-foreground",
-                        "Sends the channel secret by direct message, the same way signup approval does for METIS-INFO."
+                        "Sends the channel secret by direct message, the same way signup approval does for the bot-home channel."
                     }
                     if private_channels.is_empty() {
                         p { class: "text-sm text-amber-200", "Create a private channel under Messages first." }
@@ -1908,7 +1927,7 @@ fn InboxPage() -> Element {
     rsx! {
         div { class: "flex flex-col gap-3",
             PageHeading { icon: IconName::Inbox, title: "Signup inbox".to_string(),
-                "A direct message of signup asks to join. Approval sends the METIS-INFO channel secret once. NWS alerts wait here when auto-relay is off."
+                "A direct message of signup asks to join. Approval sends the bot-home and peer-net channel secrets. NWS alerts wait here when auto-relay is off."
             }
             if pending.is_empty() {
                 Card { title: "Waiting", icon: Some(IconName::Inbox),
@@ -2617,15 +2636,18 @@ fn MessagesPage() -> Element {
                     {
                         let name = channel.name.clone();
                         let is_public_default = channel.name.eq_ignore_ascii_case("Public");
-                        let is_metis_info =
-                            channel.name == crate::secrets::CHANNEL_NAME;
-                        let can_toggle_visibility = !is_public_default && !is_metis_info;
-                        let can_delete = !is_public_default && !is_metis_info;
-                        let emergency = channel.role == "emergency";
+                        let is_system_private =
+                            state().db.is_reserved_private(&channel.name);
+                        let can_toggle_visibility = !is_public_default && !is_system_private;
+                        let can_delete = !is_public_default && !is_system_private;
+                        let system_private = is_system_private
+                            || channel.role == "emergency"
+                            || channel.role == "info"
+                            || channel.role == "net";
                         rsx! {
                             div {
                                 key: "{channel.name}-{channel.slot}",
-                                class: if emergency {
+                                class: if system_private {
                                     "flex flex-col rounded-lg border border-signal/40 bg-accent/50 p-4"
                                 } else {
                                     "flex flex-col rounded-lg border border-border bg-card p-4"
@@ -2639,9 +2661,9 @@ fn MessagesPage() -> Element {
                                     div { class: "flex w-full items-start justify-between gap-2",
                                         div { class: "flex min-w-0 items-center gap-2",
                                             span {
-                                                class: if emergency { "text-signal" } else { "text-muted-foreground" },
+                                                class: if system_private { "text-signal" } else { "text-muted-foreground" },
                                                 Icon {
-                                                    name: if emergency { IconName::Radio } else { IconName::Messages },
+                                                    name: if system_private { IconName::Radio } else { IconName::Messages },
                                                     size: 18,
                                                 }
                                             }
@@ -2666,8 +2688,10 @@ fn MessagesPage() -> Element {
                                             if channel.visibility == "public" { "Public" } else { "Private" }
                                         }
                                     }
-                                    if emergency {
-                                        Badge { tone: "signal".to_string(), "HQ emergency" }
+                                    if channel.role == "info" || channel.role == "emergency" {
+                                        Badge { tone: "signal".to_string(), "Bot home" }
+                                    } else if channel.role == "net" {
+                                        Badge { tone: "signal".to_string(), "Peer net" }
                                     }
                                     p { class: "line-clamp-2 text-sm text-muted-foreground",
                                         if let Some(text) = channel.last_text.as_ref() {
@@ -3087,6 +3111,7 @@ fn linkify_text(input: &str) -> Vec<TextPart> {
 enum SettingsTab {
     Hq,
     Device,
+    Flasher,
     Diagnostics,
 }
 
@@ -3396,6 +3421,18 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
     let mut preset_query = use_signal(String::new);
     let mut settings_tab = use_signal(|| SettingsTab::Hq);
     let mut hq_tab = use_signal(|| HqTab::Connect);
+    let mut usb_scanned = use_signal(|| false);
+    let mut flasher_tick = use_signal(|| 0u32);
+    let mut flasher_device = use_signal(String::new);
+    let mut flasher_role = use_signal(String::new);
+    let mut flasher_tag = use_signal(String::new);
+    let mut flasher_port = use_signal(String::new);
+    let mut flasher_erase = use_signal(|| false);
+    let mut flasher_erase_armed = use_signal(|| false);
+    let mut flasher_query = use_signal(String::new);
+    let mut flasher_sync_enabled = use_signal(|| {
+        crate::services::setting_bool(&state().db, "firmware_sync_enabled", true)
+    });
     let mut device_tab = use_signal(|| DeviceTab::Identity);
     let mut var_drafts = use_signal(std::collections::BTreeMap::<String, String>::new);
     let mut reboot_armed = use_signal(|| false);
@@ -3449,13 +3486,17 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
             .flatten()
             .unwrap_or_default()
     });
-    let mut svc_alerts_channel = use_signal(|| {
+    let mut channel_info_name = use_signal(|| {
         state()
             .db
-            .setting("svc_alerts_channel")
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "METIS-INFO".into())
+            .info_channel_name()
+            .unwrap_or_else(|_| crate::secrets::CHANNEL_NAME.into())
+    });
+    let mut channel_net_name = use_signal(|| {
+        state()
+            .db
+            .net_channel_name()
+            .unwrap_or_else(|_| crate::secrets::NET_CHANNEL_NAME.into())
     });
     let mut svc_weather_hourly = use_signal(|| {
         crate::services::setting_bool(&state().db, "svc_weather_hourly", false)
@@ -3562,6 +3603,17 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
         });
     });
 
+    use_effect(move || {
+        if settings_tab() != SettingsTab::Hq || hq_tab() != HqTab::Connect {
+            return;
+        }
+        if usb_scanned() {
+            return;
+        }
+        usb_scanned.set(true);
+        state().radio.scan_usb();
+    });
+
     let _log_refresh = log_tick();
     let log_rows = if settings_tab() == SettingsTab::Diagnostics {
         crate::app_log::filtered(
@@ -3589,7 +3641,6 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
     });
 
     let query = device_query().to_lowercase();
-    let saved_radios = state().db.list_saved_radios().unwrap_or_default();
     let devices: Vec<BleRadio> = radio
         .devices
         .iter()
@@ -3639,6 +3690,12 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                     "Device"
                 }
                 button {
+                    class: if settings_tab() == SettingsTab::Flasher { "settings-tab settings-tab-active" } else { "settings-tab" },
+                    onclick: move |_| settings_tab.set(SettingsTab::Flasher),
+                    Icon { name: IconName::Radio, size: 14 }
+                    "Flasher"
+                }
+                button {
                     class: if settings_tab() == SettingsTab::Diagnostics { "settings-tab settings-tab-active" } else { "settings-tab" },
                     onclick: move |_| settings_tab.set(SettingsTab::Diagnostics),
                     Icon { name: IconName::Messages, size: 14 }
@@ -3674,51 +3731,109 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
             }
             div { class: "hq-settings-panel",
             if hq_tab() == HqTab::Connect {
-            Card { title: "Saved companions", icon: Some(IconName::Radio),
+            {
+                let pool = state().radio.pool_snapshot();
+                let usb_ports = radio.usb_ports.clone();
+                rsx! {
+            Card { title: "Radio pool", icon: Some(IconName::Radio),
                 p { class: "mb-3 text-sm text-muted-foreground",
-                    "Radios you have already paired stay here. Connect reconnects without asking for the PIN again."
+                    "Several companions can stay linked at once. Only the primary companion sends enrollment secrets, bot replies, and operator messages. Secondaries still ingest contacts and traffic."
                 }
-                if saved_radios.is_empty() {
+                if pool.is_empty() {
                     p { class: "text-sm text-muted-foreground",
-                        "None yet. Scan below and use Pair on a MeshCore radio once."
+                        "None yet. Connect USB below, or scan Bluetooth and Pair once."
                     }
                 } else {
                     div { class: "flex flex-col gap-2",
-                        for row in saved_radios {
-                            div {
-                                key: "{row.address}",
-                                class: "flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-background px-3 py-3",
-                                div { class: "min-w-0",
-                                    p { class: "truncate font-medium",
-                                        "{companion_display_name(&row, &radio.devices)}"
-                                    }
-                                    p { class: "font-mono text-xs text-muted-foreground", "{row.address}" }
-                                    if !row.last_error.is_empty() {
-                                        p { class: "mt-1 text-xs text-amber-200", "{row.last_error}" }
-                                    }
-                                }
-                                div { class: "flex gap-2",
-                                    if radio.state == "connected"
-                                        && (radio.connected_name == row.address || radio.connected_name == row.label)
-                                    {
-                                        Button {
-                                            kind: ButtonKind::Ghost,
-                                            onclick: move |_| state().radio.disconnect(),
-                                            Icon { name: IconName::Unlink, size: 14 }
-                                            "Disconnect"
-                                        }
-                                    } else {
-                                        Button {
-                                            disabled: busy,
-                                            onclick: {
-                                                let address = row.address.clone();
-                                                move |_| {
-                                                    radio_name.set(address.clone());
-                                                    state().radio.reconnect(address.clone());
+                        for slot in pool {
+                            {
+                                let slot_id = slot.id;
+                                let slot_addr = slot.address.clone();
+                                let slot_connected = slot.connected;
+                                let slot_primary = slot.is_primary;
+                                let transport_badge = if slot.transport == "usb" { "USB" } else { "BLE" };
+                                rsx! {
+                                    div {
+                                        key: "{slot.id}",
+                                        class: "flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-background px-3 py-3",
+                                        div { class: "min-w-0 flex-1",
+                                            div { class: "mb-1 flex flex-wrap items-center gap-2",
+                                                p { class: "truncate font-medium", "{slot.label}" }
+                                                Badge {
+                                                    tone: if slot_connected {
+                                                        "enrolled".to_string()
+                                                    } else {
+                                                        "pending".to_string()
+                                                    },
+                                                    "{transport_badge}"
                                                 }
-                                            },
-                                            Icon { name: IconName::Bluetooth, size: 14 }
-                                            "Connect"
+                                                if slot_primary {
+                                                    Badge { tone: "signal".to_string(), "Primary" }
+                                                }
+                                                if slot_connected {
+                                                    Badge { tone: "ok".to_string(), "{slot.state}" }
+                                                }
+                                            }
+                                            p { class: "font-mono text-xs text-muted-foreground", "{slot.address}" }
+                                            if !slot.detail.is_empty() {
+                                                p { class: "mt-1 text-xs text-muted-foreground", "{slot.detail}" }
+                                            }
+                                            if let Some(pct) = slot.battery_pct {
+                                                p { class: "mt-1 text-xs text-muted-foreground", "Battery {pct}%" }
+                                            }
+                                        }
+                                        div { class: "flex flex-wrap items-center gap-2",
+                                            div { class: "w-36",
+                                                SelectInput {
+                                                    id: format!("radio-role-{slot_id}"),
+                                                    value: slot.role.clone(),
+                                                    onchange: move |event: FormEvent| {
+                                                        state().radio.set_role(slot_id, event.value());
+                                                    },
+                                                    option { value: "companion", style: "background-color: #151a20; color: #f4f4f5;", "Companion" }
+                                                    option { value: "room", style: "background-color: #151a20; color: #f4f4f5;", "Room server" }
+                                                    option { value: "repeater", style: "background-color: #151a20; color: #f4f4f5;", "Repeater" }
+                                                    option { value: "other", style: "background-color: #151a20; color: #f4f4f5;", "Other" }
+                                                }
+                                            }
+                                            if slot_connected && slot.role == "companion" && !slot_primary {
+                                                Button {
+                                                    kind: ButtonKind::Ghost,
+                                                    onclick: move |_| state().radio.set_primary(slot_id),
+                                                    "Make primary"
+                                                }
+                                            }
+                                            if slot_connected {
+                                                Button {
+                                                    kind: ButtonKind::Ghost,
+                                                    onclick: move |_| state().radio.disconnect_radio(slot_id),
+                                                    Icon { name: IconName::Unlink, size: 14 }
+                                                    "Disconnect"
+                                                }
+                                            } else {
+                                                Button {
+                                                    disabled: busy,
+                                                    onclick: move |_| {
+                                                        radio_name.set(slot_addr.clone());
+                                                        state().radio.reconnect(slot_addr.clone());
+                                                    },
+                                                    Icon {
+                                                        name: if slot.transport == "usb" {
+                                                            IconName::Radio
+                                                        } else {
+                                                            IconName::Bluetooth
+                                                        },
+                                                        size: 14
+                                                    }
+                                                    "Connect"
+                                                }
+                                            }
+                                            Button {
+                                                kind: ButtonKind::Ghost,
+                                                onclick: move |_| state().radio.forget_radio(slot_id),
+                                                Icon { name: IconName::Trash, size: 14 }
+                                                "Remove"
+                                            }
                                         }
                                     }
                                 }
@@ -3727,9 +3842,52 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                     }
                 }
             }
-            Card { title: "Companion radio", icon: Some(IconName::Bluetooth),
+            Card { title: "USB serial", icon: Some(IconName::Radio),
                 p { class: "mb-3 text-sm text-muted-foreground",
-                    "Scan for nearby Bluetooth devices. Use Connect for a radio already on the saved list. Use Pair only for a new radio; that asks for the six-digit PIN. Disconnect the phone app first."
+                    "Plug in a MeshCore companion over USB (CDC). Needs USB companion firmware (BLE companion builds usually leave this port as console only). Linux prefers by-id paths; Windows uses COM ports; macOS uses cu.usbmodem. No Bluetooth PIN."
+                }
+                div { class: "mb-3 flex flex-wrap gap-2",
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        onclick: move |_| state().radio.scan_usb(),
+                        Icon { name: IconName::Scan, size: 14 }
+                        "Refresh ports"
+                    }
+                }
+                if usb_ports.is_empty() {
+                    p { class: "text-sm text-muted-foreground",
+                        "No USB serial ports found. Refresh after plugging in a companion."
+                    }
+                } else {
+                    div { class: "flex flex-col gap-2",
+                        for port in usb_ports {
+                            div {
+                                key: "{port.path}",
+                                class: "flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-background px-3 py-3",
+                                div { class: "min-w-0",
+                                    p { class: "truncate font-medium", "{port.label}" }
+                                    p { class: "font-mono text-xs text-muted-foreground", "{port.path}" }
+                                    if port.system_path != port.path {
+                                        p { class: "font-mono text-[0.65rem] text-muted-foreground", "also {port.system_path}" }
+                                    }
+                                }
+                                Button {
+                                    disabled: busy,
+                                    onclick: {
+                                        let path = port.path.clone();
+                                        move |_| state().radio.connect_usb(path.clone())
+                                    },
+                                    Icon { name: IconName::Radio, size: 14 }
+                                    "Connect USB"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Card { title: "Bluetooth", icon: Some(IconName::Bluetooth),
+                p { class: "mb-3 text-sm text-muted-foreground",
+                    "Scan for nearby Bluetooth devices. Use Connect for a radio already on the saved list. Use Pair only for a new radio; that asks for the six-digit PIN. Disconnect the phone app first. Multiple BLE companions can stay linked alongside USB."
                 }
                 div { class: "mb-3 flex gap-2",
                     TextInput {
@@ -3762,7 +3920,7 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                         kind: ButtonKind::Ghost,
                         onclick: move |_| state().radio.disconnect(),
                         Icon { name: IconName::Unlink, size: 14 }
-                        "Disconnect"
+                        "Disconnect primary"
                     }
                 }
                 if !radio.devices.is_empty() {
@@ -3810,6 +3968,8 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                     }
                 }
             }
+                } // end connect rsx
+            } // end connect block
             } // end HqTab::Connect
 
             if hq_tab() == HqTab::Preferences {
@@ -3892,7 +4052,7 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
             if hq_tab() == HqTab::Services {
             Card { title: "Info services", icon: Some(IconName::Radio),
                 p { class: "mb-3 text-sm text-muted-foreground",
-                    "Bot home is the private METIS-INFO channel (enrolled secret only). Send #weather [zip], #quake, #amber, or #help there. Add + for detail (#weather+ / #amber+) — multi-frame replies. Quake/NWS polls stay silent when nothing new is found. Alerts are labeled with source and time — not an official agency feed."
+                    "Bot home is the private {channel_info_name()} channel (enrolled secret only). Send #weather [zip], #quake, #amber, or #help there. Add + for detail (#weather+ / #amber+) — multi-frame replies. Quake/NWS polls stay silent when nothing new is found. Alerts are labeled with source and time — not an official agency feed."
                 }
                 div { class: "mb-3 grid gap-3 sm:grid-cols-2",
                     div {
@@ -3958,7 +4118,7 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                                 crate::services::set_setting_bool(&state().db, "svc_weather_enabled", next);
                             }
                         }
-                        "Weather on METIS-INFO (#weather / #weather+)"
+                        "Weather on bot-home channel (#weather / #weather+)"
                     }
                     div { class: "ml-6 w-40",
                         SelectInput {
@@ -4113,6 +4273,9 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                         "Sourced from NWS CAP / IPAWS-style codes — labeled ALERT/AMBER with time. Not a law-enforcement feed."
                     }
                 }
+                p { class: "mb-3 text-sm text-muted-foreground",
+                    "Alert relays post on the bot-home channel ({channel_info_name()})."
+                }
                 div { class: "grid gap-3 sm:grid-cols-2",
                     div {
                         label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "Min magnitude" }
@@ -4125,18 +4288,6 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                                 if value.parse::<f64>().is_ok() {
                                     let _ = state().db.set_setting("svc_quake_min_mag", &value);
                                 }
-                            },
-                        }
-                    }
-                    div {
-                        label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "Alerts channel" }
-                        TextInput {
-                            value: svc_alerts_channel(),
-                            placeholder: "METIS-INFO",
-                            oninput: move |event: FormEvent| {
-                                let value = event.value();
-                                svc_alerts_channel.set(value.clone());
-                                let _ = state().db.set_setting("svc_alerts_channel", value.trim());
                             },
                         }
                     }
@@ -4159,9 +4310,141 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
             } // end HqTab::Services
 
             if hq_tab() == HqTab::Preferences {
-            Card { title: "Channel secret", icon: Some(IconName::Key),
-                p { class: "text-sm text-muted-foreground",
-                    "Storage: {secret_label}. The secret is sent only after approval, and the message list shows [secret sent]. Revoke on the roster rotates it."
+            Card { title: "Brand mark", icon: Some(IconName::Radio),
+                p { class: "mb-3 text-sm text-muted-foreground",
+                    "Top header logo (sidebar stays Metis Mesh HQ). Default is EmergHQ; upload PNG/JPG/WebP/GIF/SVG up to 2 MB to replace it. Clear restores the default."
+                }
+                {
+                    let custom = crate::brand::custom_logo_url(&state().db);
+                    rsx! {
+                        if let Some(src) = custom {
+                            img {
+                                class: "mb-3 h-12 max-w-xs object-contain object-left rounded border border-border bg-background p-2",
+                                src: "{src}",
+                                alt: "Current brand logo",
+                            }
+                        } else {
+                            img {
+                                class: "mb-3 h-12 max-w-xs object-contain object-left rounded border border-border bg-background p-2",
+                                src: asset!("/assets/emerghq_logo.png"),
+                                alt: "Default EmergHQ logo",
+                            }
+                        }
+                    }
+                }
+                div { class: "flex flex-wrap gap-2",
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        onclick: move |_| {
+                            match crate::brand::pick_and_install_logo(&state().db) {
+                                Ok(_) => status_note("Brand logo saved."),
+                                Err(err) => status_note(err),
+                            }
+                        },
+                        Icon { name: IconName::Check, size: 14 }
+                        "Upload logo"
+                    }
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        disabled: !crate::brand::has_custom_logo(&state().db),
+                        onclick: move |_| {
+                            match crate::brand::clear_logo(&state().db) {
+                                Ok(()) => status_note("Restored default EmergHQ logo."),
+                                Err(err) => status_note(err),
+                            }
+                        },
+                        "Restore default"
+                    }
+                }
+            }
+            Card { title: "Private channels", icon: Some(IconName::Key),
+                p { class: "mb-3 text-sm text-muted-foreground",
+                    "Storage: {secret_label}. Approval sends both secrets; the message list shows [secret sent]. Revoke rotates both. Renaming keeps the same secret and re-sends the new name to enrolled nodes."
+                }
+                div { class: "mb-3 grid gap-3 sm:grid-cols-2",
+                    div {
+                        label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "Bot home (INFO)" }
+                        TextInput {
+                            value: channel_info_name(),
+                            placeholder: crate::secrets::CHANNEL_NAME,
+                            oninput: move |event: FormEvent| channel_info_name.set(event.value()),
+                        }
+                    }
+                    div {
+                        label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "Peer net (NET)" }
+                        TextInput {
+                            value: channel_net_name(),
+                            placeholder: crate::secrets::NET_CHANNEL_NAME,
+                            oninput: move |event: FormEvent| channel_net_name.set(event.value()),
+                        }
+                    }
+                }
+                div { class: "flex flex-wrap gap-2",
+                    {
+                        let radio_connected = radio.state == "connected";
+                        rsx! {
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| {
+                                    let desired = channel_info_name();
+                                    match state().db.rename_system_channel(
+                                        SystemChannel::Info,
+                                        &desired,
+                                        &state().secrets,
+                                    ) {
+                                        Ok((name, slot)) => {
+                                            channel_info_name.set(name.clone());
+                                            if radio_connected {
+                                                state().radio.push_channel(slot as u8, name.clone());
+                                            }
+                                            status_note(format!("Bot home channel is now {name}."));
+                                        }
+                                        Err(err) => {
+                                            channel_info_name.set(
+                                                state()
+                                                    .db
+                                                    .info_channel_name()
+                                                    .unwrap_or_else(|_| crate::secrets::CHANNEL_NAME.into()),
+                                            );
+                                            status_note(err.to_string());
+                                        }
+                                    }
+                                },
+                                Icon { name: IconName::Check, size: 14 }
+                                "Save bot home"
+                            }
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| {
+                                    let desired = channel_net_name();
+                                    match state().db.rename_system_channel(
+                                        SystemChannel::Net,
+                                        &desired,
+                                        &state().secrets,
+                                    ) {
+                                        Ok((name, slot)) => {
+                                            channel_net_name.set(name.clone());
+                                            if radio_connected {
+                                                state().radio.push_channel(slot as u8, name.clone());
+                                            }
+                                            status_note(format!("Peer net channel is now {name}."));
+                                        }
+                                        Err(err) => {
+                                            channel_net_name.set(
+                                                state()
+                                                    .db
+                                                    .net_channel_name()
+                                                    .unwrap_or_else(|_| crate::secrets::NET_CHANNEL_NAME.into()),
+                                            );
+                                            status_note(err.to_string());
+                                        }
+                                    }
+                                },
+                                Icon { name: IconName::Check, size: 14 }
+                                "Save peer net"
+                            }
+                        }
+                    }
                 }
             }
             Card { title: "History", icon: Some(IconName::Clock),
@@ -5842,6 +6125,364 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                         }
                     }
                 }
+            }
+
+            if settings_tab() == SettingsTab::Flasher {
+            {
+                let flasher_poll = log_tick();
+                let flasher_bump = flasher_tick();
+                let _flasher_refresh = (flasher_poll, flasher_bump);
+                let sync = crate::firmware::sync_status();
+                let flash = crate::firmware::flash_status();
+                let index = crate::firmware::load_index();
+                let catalog = crate::firmware::load_catalog().ok();
+                let devices = catalog
+                    .as_ref()
+                    .map(crate::firmware::community_devices)
+                    .unwrap_or_default();
+                let query = flasher_query().trim().to_ascii_lowercase();
+                let filtered: Vec<_> = devices
+                    .iter()
+                    .filter(|d| {
+                        query.is_empty()
+                            || d.name.to_ascii_lowercase().contains(&query)
+                            || d.maker.to_ascii_lowercase().contains(&query)
+                    })
+                    .cloned()
+                    .collect();
+                let selected_device = devices
+                    .iter()
+                    .find(|d| d.name == flasher_device())
+                    .cloned()
+                    .or_else(|| filtered.first().cloned());
+                if let Some(dev) = selected_device.as_ref() {
+                    if flasher_device() != dev.name {
+                        flasher_device.set(dev.name.clone());
+                    }
+                }
+                let selected_role = selected_device.as_ref().and_then(|d| {
+                    d.roles
+                        .iter()
+                        .find(|r| r.role == flasher_role())
+                        .cloned()
+                        .or_else(|| d.roles.first().cloned())
+                });
+                if let Some(role) = selected_role.as_ref() {
+                    if flasher_role() != role.role {
+                        flasher_role.set(role.role.clone());
+                    }
+                }
+                let version_options: Vec<(String, String)> = if let Some(role) = selected_role.as_ref() {
+                    if !role.static_versions.is_empty() {
+                        role.static_versions
+                            .iter()
+                            .map(|v| (v.version.clone(), v.version.clone()))
+                            .collect()
+                    } else {
+                        let key = crate::firmware::flash_kind_key(flasher_erase(), &role.patterns);
+                        let pattern = role.patterns.get(key).cloned().unwrap_or_default();
+                        if pattern.is_empty() {
+                            Vec::new()
+                        } else {
+                            crate::firmware::local_versions_for_role(&index, &role.family, &pattern)
+                        }
+                    }
+                } else {
+                    Vec::new()
+                };
+                if !version_options.is_empty()
+                    && version_options
+                        .iter()
+                        .all(|(tag, _name)| tag != &flasher_tag())
+                {
+                    flasher_tag.set(version_options[0].0.clone());
+                }
+                let ports = crate::firmware::list_usb_ports_for_flash();
+                if flasher_port().is_empty() {
+                    if let Some(port) = ports.first() {
+                        flasher_port.set(port.path.clone());
+                    }
+                }
+                let asset_ready = selected_role.as_ref().and_then(|role| {
+                    crate::firmware::resolve_flash_asset(
+                        &index,
+                        role,
+                        &flasher_tag(),
+                        flasher_erase(),
+                    )
+                    .ok()
+                });
+                let sync_busy = sync.running;
+                let flash_busy = flash.running;
+                let last_sync_label = if sync.last_ok_at > 0 {
+                    crate::timefmt::format_stamp(&state().db, sync.last_ok_at)
+                } else {
+                    String::new()
+                };
+                rsx! {
+                    Card { title: "Firmware library".to_string(), icon: Some(IconName::Radio),
+                        p { class: "mb-3 text-sm text-muted-foreground",
+                            "Offline mirror of MeshCore community firmware (companion, repeater, room server) from GitHub, using the official flasher catalog. MIT-licensed firmware; HQ only stores and flashes it. Sync while you have internet so you can flash later with none."
+                        }
+                        p { class: "mb-2 text-sm",
+                            if sync_busy {
+                                "Syncing · {sync.detail}"
+                            } else if !sync.last_error.is_empty() {
+                                "Last error · {sync.last_error}"
+                            } else if sync.asset_count == 0 {
+                                "No firmware cached yet. Press Sync now while online (first pull can be 1–3 GB)."
+                            } else {
+                                "{sync.detail}"
+                            }
+                        }
+                        if !last_sync_label.is_empty() {
+                            p { class: "mb-3 text-xs text-muted-foreground",
+                                "Last successful sync: {last_sync_label}"
+                            }
+                        }
+                        div { class: "mb-3 flex flex-wrap gap-2",
+                            Button {
+                                disabled: sync_busy,
+                                onclick: move |_| {
+                                    crate::firmware::start_sync(state().db.clone());
+                                    flasher_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                },
+                                Icon { name: IconName::Scan, size: 14 }
+                                if sync_busy { "Syncing…" } else { "Sync now" }
+                            }
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| {
+                                    if let Err(err) = crate::firmware::open_firmware_folder() {
+                                        hq_log!(warn, "open firmware folder: {err}");
+                                    }
+                                },
+                                "Open folder"
+                            }
+                        }
+                        label { class: "flex items-center gap-2 text-sm",
+                            input {
+                                r#type: "checkbox",
+                                checked: flasher_sync_enabled(),
+                                oninput: move |_| {
+                                    let next = !flasher_sync_enabled();
+                                    flasher_sync_enabled.set(next);
+                                    crate::services::set_setting_bool(
+                                        &state().db,
+                                        "firmware_sync_enabled",
+                                        next,
+                                    );
+                                }
+                            }
+                            "Background sync every 12 hours when online"
+                        }
+                    }
+                    Card { title: "USB flash".to_string(), icon: Some(IconName::Radio),
+                        p { class: "mb-3 text-sm text-muted-foreground",
+                            "Flash from the local cache only. ESP32 needs esptool on PATH; nRF52 needs adafruit-nrfutil or a manual UF2 copy. Disconnect the phone MeshCore app. Leave Erase off to keep the device identity."
+                        }
+                        div { class: "mb-3",
+                            TextInput {
+                                value: flasher_query(),
+                                placeholder: "Filter devices…",
+                                oninput: move |event: FormEvent| flasher_query.set(event.value()),
+                            }
+                        }
+                        div { class: "mb-3 grid gap-3 sm:grid-cols-2",
+                            div {
+                                label { class: "mb-1 block text-xs text-muted-foreground", "Device" }
+                                SelectInput {
+                                    id: "flasher-device".to_string(),
+                                    value: flasher_device(),
+                                    onchange: move |event: FormEvent| {
+                                        flasher_device.set(event.value());
+                                        flasher_role.set(String::new());
+                                        flasher_tag.set(String::new());
+                                    },
+                                    if filtered.is_empty() {
+                                        option {
+                                            value: "",
+                                            style: "background-color:#151a20;color:#f4f4f5;",
+                                            "Sync catalog first"
+                                        }
+                                    }
+                                    for device in filtered.iter() {
+                                        option {
+                                            key: "{device.name}",
+                                            value: "{device.name}",
+                                            style: "background-color:#151a20;color:#f4f4f5;",
+                                            "{device.name}"
+                                        }
+                                    }
+                                }
+                            }
+                            div {
+                                label { class: "mb-1 block text-xs text-muted-foreground", "Role" }
+                                SelectInput {
+                                    id: "flasher-role".to_string(),
+                                    value: flasher_role(),
+                                    onchange: move |event: FormEvent| {
+                                        flasher_role.set(event.value());
+                                        flasher_tag.set(String::new());
+                                    },
+                                    if let Some(dev) = selected_device.as_ref() {
+                                        for role in dev.roles.iter() {
+                                            option {
+                                                key: "{role.role}",
+                                                value: "{role.role}",
+                                                style: "background-color:#151a20;color:#f4f4f5;",
+                                                "{role.label}"
+                                            }
+                                        }
+                                    } else {
+                                        option {
+                                            value: "",
+                                            style: "background-color:#151a20;color:#f4f4f5;",
+                                            "—"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(role) = selected_role.as_ref() {
+                            if !role.tooltip.is_empty() {
+                                p { class: "mb-3 text-xs text-muted-foreground", "{role.tooltip}" }
+                            }
+                        }
+                        div { class: "mb-3 grid gap-3 sm:grid-cols-2",
+                            div {
+                                label { class: "mb-1 block text-xs text-muted-foreground", "Version (local)" }
+                                SelectInput {
+                                    id: "flasher-tag".to_string(),
+                                    value: flasher_tag(),
+                                    onchange: move |event: FormEvent| flasher_tag.set(event.value()),
+                                    if version_options.is_empty() {
+                                        option {
+                                            value: "",
+                                            style: "background-color:#151a20;color:#f4f4f5;",
+                                            "No matching local file"
+                                        }
+                                    }
+                                    for pair in version_options.iter() {
+                                        option {
+                                            key: "{pair.0}-{pair.1}",
+                                            value: "{pair.0}",
+                                            style: "background-color:#151a20;color:#f4f4f5;",
+                                            "{pair.0}"
+                                        }
+                                    }
+                                }
+                            }
+                            div {
+                                label { class: "mb-1 block text-xs text-muted-foreground", "USB port" }
+                                div { class: "flex gap-2",
+                                    SelectInput {
+                                        id: "flasher-port".to_string(),
+                                        value: flasher_port(),
+                                        onchange: move |event: FormEvent| flasher_port.set(event.value()),
+                                        if ports.is_empty() {
+                                            option {
+                                                value: "",
+                                                style: "background-color:#151a20;color:#f4f4f5;",
+                                                "No USB serial ports"
+                                            }
+                                        }
+                                        for port in ports.iter() {
+                                            option {
+                                                key: "{port.path}",
+                                                value: "{port.path}",
+                                                style: "background-color:#151a20;color:#f4f4f5;",
+                                                "{port.label}"
+                                            }
+                                        }
+                                    }
+                                    Button {
+                                        kind: ButtonKind::Ghost,
+                                        onclick: move |_| {
+                                            state().radio.scan_usb();
+                                            flasher_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                        },
+                                        Icon { name: IconName::Scan, size: 14 }
+                                        "Refresh"
+                                    }
+                                }
+                            }
+                        }
+                        label { class: "mb-3 flex items-center gap-2 text-sm",
+                            input {
+                                r#type: "checkbox",
+                                checked: flasher_erase(),
+                                oninput: move |_| {
+                                    let next = !flasher_erase();
+                                    flasher_erase.set(next);
+                                    if !next {
+                                        flasher_erase_armed.set(false);
+                                    }
+                                }
+                            }
+                            "Erase device (full wipe — new MeshCore identity)"
+                        }
+                        if flasher_erase() && !flasher_erase_armed() {
+                            p { class: "mb-3 text-xs text-amber-200",
+                                "Erase replaces the public key. Contacts must re-add this node. Tick Confirm erase below before flashing."
+                            }
+                            label { class: "mb-3 flex items-center gap-2 text-sm",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: flasher_erase_armed(),
+                                    oninput: move |_| flasher_erase_armed.set(!flasher_erase_armed())
+                                }
+                                "Confirm erase"
+                            }
+                        }
+                        div { class: "flex flex-wrap gap-2",
+                            Button {
+                                disabled: flash_busy
+                                    || sync_busy
+                                    || asset_ready.is_none()
+                                    || flasher_port().trim().is_empty()
+                                    || (flasher_erase() && !flasher_erase_armed()),
+                                onclick: move |_| {
+                                    let Some(role) = selected_role.clone() else { return; };
+                                    let Ok((path, uf2)) = crate::firmware::resolve_flash_asset(
+                                        &crate::firmware::load_index(),
+                                        &role,
+                                        &flasher_tag(),
+                                        flasher_erase(),
+                                    ) else {
+                                        return;
+                                    };
+                                    let platform = selected_device
+                                        .as_ref()
+                                        .map(|d| d.platform.clone())
+                                        .unwrap_or_else(|| "esp32".into());
+                                    crate::firmware::start_flash(
+                                        state().radio.clone(),
+                                        crate::firmware::FlashRequest {
+                                            platform,
+                                            port: flasher_port(),
+                                            asset_path: path,
+                                            erase: flasher_erase(),
+                                            uf2,
+                                        },
+                                    );
+                                    flasher_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                },
+                                Icon { name: IconName::Radio, size: 14 }
+                                if flash_busy { "Flashing…" } else { "Flash" }
+                            }
+                        }
+                        if !flash.detail.is_empty() {
+                            p { class: "mt-3 text-sm text-muted-foreground", "{flash.detail}" }
+                        }
+                        if !flash.log.is_empty() {
+                            pre { class: "mt-2 max-h-48 overflow-auto rounded-lg border border-border bg-background p-3 font-mono text-xs whitespace-pre-wrap",
+                                "{flash.log}"
+                            }
+                        }
+                    }
+                }
+            }
             }
 
             if settings_tab() == SettingsTab::Diagnostics {

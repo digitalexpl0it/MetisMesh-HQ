@@ -84,7 +84,14 @@ pub async fn map_init(style: &Value, lng: f64, lat: f64, zoom: f64) -> Result<()
 pub async fn map_destroy() {
     let js = format!(
         r#"(() => {{
-  if (window.MetisMap) window.MetisMap.destroyIfDetached({id});
+  if (!window.MetisMap) return true;
+  // Prefer soft detach (SPA remount). If the document is already hiding
+  // (window close), force-destroy so WebKitGTK does not epoxy-assert.
+  if (document.hidden && window.MetisMap.destroyAll) {{
+    window.MetisMap.destroyAll();
+  }} else {{
+    window.MetisMap.destroyIfDetached({id});
+  }}
   return true;
 }})()"#,
         id = escape_js_string(MAP_ID)

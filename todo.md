@@ -51,7 +51,7 @@ Cookbook: [agessaman/meshcore-bot](https://github.com/agessaman/meshcore-bot/) �
 - [x] **D2b** Amber (CAE) + civil emergencies (CAP codes): `#amber` / `#alert`; `#amber+` / `#alert+` multi-frame CAP description; poll + auto toggles; state setting
 - [x] **D3** Earthquakes: USGS bbox + magnitude + dedupe; post **only when new**; `#quake` on demand
 - [x] HQ-owned `services` module + poller (not a second companion). DMs stay signup/status only.
-- [ ] **D4** Separate private peer channel (e.g. METIS-NET) for human emergency traffic (METIS-INFO = bot/info)
+- [x] **D4** Separate private peer channel (e.g. METIS-NET) for human emergency traffic (METIS-INFO = bot/info); both names settings-renameable; approve sends both secrets
 
 ## Phase E — Backup, contacts, optional public map
 
@@ -66,11 +66,19 @@ HQ durability and sharing. One-off contact QR already exists (`meshcore://contac
 
 Stack already says BLE now, USB on the same radio pool later. Cookbook USB/serial patterns: [agessaman/meshcore-bot](https://github.com/agessaman/meshcore-bot). One HQ, several attached MeshCore devices (e.g. companion + room server + repeater).
 
-- [ ] **F1** USB serial transport beside BLE: discover ports, connect/disconnect, same session pipeline (appstart → contacts → drain → subscribe); reuse `meshcore-rs` USB path where available; study bot USB code for quirks
-- [ ] **F2** Multi-radio pool: N concurrent radio tasks (one per device); shared SQLite; UI shows each radio with transport (BLE/USB), name, battery/role, connect state
-- [ ] **F3** Operator roles per radio: label as companion / room server / repeater (and similar); clarify which radio owns METIS-INFO TX, enrollment, and bot replies (default: primary companion)
+- [x] **F1** USB serial transport beside BLE: discover ports, connect/disconnect, same session pipeline (appstart → contacts → drain → subscribe); reuse `meshcore-rs` USB path where available; study bot USB code for quirks
+- [x] **F2** Multi-radio pool: N concurrent radio tasks (one per device); shared SQLite; UI shows each radio with transport (BLE/USB), name, battery/role, connect state
+- [x] **F3** Operator roles per radio: label as companion / room server / repeater (and similar); clarify which radio owns METIS-INFO TX, enrollment, and bot replies (default: primary companion)
 - [ ] **F4** Contact/message ingest tagged by `radio_id`; map + roster stay unified; avoid double-counting the same pubkey heard on two HQ radios
 - [ ] **F5** Settings: pick primary radio; optional auto-reconnect per device; USB prefer sticky port/serial identity when the OS renumerates
+
+## Phase G — Offline firmware locker + USB flasher
+
+Mirror MeshCore community firmware while online; flash over USB when the internet is gone.
+
+- [x] **G1** Firmware locker: fetch flasher `config.json` + GitHub companion/repeater/room-server releases (latest + previous); store under `data/firmware/`; index + prune
+- [x] **G2** Background sync (12h / Sync now / enable toggle); offline UI still flashes from cache
+- [x] **G3** Settings → Flasher: device/role/version/port; ESP32 via esptool; nRF52 via adafruit-nrfutil or UF2 path; erase off by default
 
 ## Non-goals (for now)
 
@@ -90,6 +98,7 @@ Stack already says BLE now, USB on the same radio pool later. Cookbook USB/seria
 6. D4 · D1c (local MQTT station vs Open-Meteo)  
 7. F1 → F3 (USB + multi-radio; primary companion owns bot)  
 8. E1 → E3 (backup first), then E4 / F4–F5 polish  
+9. G1 → G3 (offline firmware locker + USB flasher)  
 
 ## Success checks
 
@@ -99,6 +108,6 @@ Stack already says BLE now, USB on the same radio pool later. Cookbook USB/seria
 - [x] First-seen coords: warp-in once (not every refresh)
 - [x] Weather/quake: compact, sourced, enrolled-only, audited
 - [ ] MQTT station fresh → mesh WX uses it; stale/down → Open-Meteo fallback
-- [ ] USB companion + BLE/USB second radio both live under one HQ; bot TX from primary only
+- [x] USB companion + BLE/USB second radio both live under one HQ; bot TX from primary only
 - [x] Backup restores roster + secrets on a fresh machine; import does not flood radio contacts
 - [ ] Map uploader (if on): only infra GPS adverts; companions/tracks stay local

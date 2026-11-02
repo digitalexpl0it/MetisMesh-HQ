@@ -2,9 +2,11 @@
 mod app_log;
 mod backup;
 mod ble_pair;
+mod brand;
 mod contact_export;
 mod contact_qr;
 mod db;
+mod firmware;
 mod map_tiles;
 mod mesh_regions;
 mod path;
@@ -17,6 +19,7 @@ mod signup;
 mod timefmt;
 mod toast;
 mod ui;
+mod usb_serial;
 
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -45,9 +48,11 @@ fn main() {
     }
     let db = Arc::new(db);
     let secrets = Arc::new(Secrets::new(&data));
+    brand::init(&data);
     contact_qr::spawn_qr_worker(db.clone(), data.clone());
     let radio = spawn_radio(db.clone(), secrets.clone());
     services::spawn_poller(db.clone(), secrets.clone(), radio.clone());
+    firmware::spawn_sync_loop(db.clone());
     install(AppState { db, secrets, radio });
     hq_log!(info, "Metis Mesh HQ started · data {}", data.display());
     launch_window();
@@ -145,6 +150,29 @@ fn serve_metis_protocol(
             .status(StatusCode::NOT_FOUND)
             .body(Cow::Borrowed(b"qr not found" as &[u8]))
             .unwrap_or_else(|_| Response::new(Cow::Borrowed(b"qr not found" as &[u8])));
+    }
+
+    // Whitelabel brand mark from data/brand/.
+    let brand_name = path
+        .strip_prefix("/brand/")
+        .or_else(|| path.rsplit_once("/brand/").map(|(_, rest)| rest))
+        .map(|s| s.trim_start_matches('/').split('?').next().unwrap_or(""))
+        .filter(|s| !s.is_empty());
+    if let Some(name) = brand_name {
+        if let Some((body, ctype)) = brand::read_brand_file(name) {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, ctype)
+                .header(header::CONTENT_LENGTH, body.len().to_string())
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .header(header::CACHE_CONTROL, "public, max-age=60")
+                .body(Cow::Owned(body))
+                .unwrap_or_else(|_| Response::new(Cow::Borrowed(b"" as &[u8])));
+        }
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Cow::Borrowed(b"brand not found" as &[u8]))
+            .unwrap_or_else(|_| Response::new(Cow::Borrowed(b"brand not found" as &[u8])));
     }
 
     // Bundled outline GeoJSON (tiny style JSON references these URLs).

@@ -790,19 +790,39 @@
     /** Page-leave cleanup. Skips a map that a remount already attached to the page. */
     destroyIfDetached: function (mapId) {
       var self = this;
-      setTimeout(function () {
+      var run = function () {
         var map = self.maps[mapId];
         if (!map) return;
         var container = map.getContainer && map.getContainer();
-        if (container && container.isConnected) return;
+        // App exit hides the document while the container is still connected —
+        // still tear down so WebKitGTK does not assert in epoxy on GL teardown.
+        if (container && container.isConnected && !document.hidden) return;
         self.destroy(mapId);
-      }, 50);
+      };
+      if (document.hidden) {
+        run();
+        return true;
+      }
+      setTimeout(run, 50);
       return true;
+    },
+
+    /** Force-drop every map (window close / pagehide). */
+    destroyAll: function () {
+      var self = this;
+      Object.keys(self.maps || {}).forEach(function (id) {
+        try {
+          self.destroy(id);
+        } catch (_) {}
+      });
     },
 
     /** Drop WebGL before map.remove — cuts WebKitGTK epoxy assert noise on exit. */
     loseWebGl: function (map) {
       if (!map) return;
+      try {
+        if (typeof map.stop === "function") map.stop();
+      } catch (_) {}
       try {
         var canvas = map.getCanvas && map.getCanvas();
         if (!canvas || typeof canvas.getContext !== "function") return;
@@ -2403,4 +2423,19 @@
   };
 
   global.MetisMap = MetisMap;
+
+  // WebKitGTK + libepoxy asserts if WebGL outlives the window. Wipe maps
+  // synchronously on exit before the web process tears down GL.
+  if (typeof global.addEventListener === "function" && !global.__metisMapExitHook) {
+    global.__metisMapExitHook = true;
+    var wipeMapsOnExit = function () {
+      try {
+        if (global.MetisMap && typeof global.MetisMap.destroyAll === "function") {
+          global.MetisMap.destroyAll();
+        }
+      } catch (_) {}
+    };
+    global.addEventListener("pagehide", wipeMapsOnExit);
+    global.addEventListener("beforeunload", wipeMapsOnExit);
+  }
 })(typeof window !== "undefined" ? window : globalThis);

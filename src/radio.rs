@@ -1,7 +1,9 @@
-//! One task owns the companion radio. The window only sends commands.
+//! A pool of companion radios (BLE and USB). One Tokio task owns each radio;
+//! the window only sends commands. Only the primary companion transmits for HQ:
+//! operator sends, bot replies, enrollment DMs, and channel pushes.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -15,10 +17,11 @@ use tokio::sync::oneshot;
 use tokio::sync::watch;
 
 use crate::contact_qr;
-use crate::db::{contact_snapshot, unix_now, Db};
+use crate::db::{contact_snapshot, unix_now, Db, RadioRole};
 use crate::path::{hop_count_from_path_len, parse_advert_path};
-use crate::secrets::{Secrets, CHANNEL_NAME};
+use crate::secrets::Secrets;
 use crate::signup::{decide, parse_command};
+use crate::usb_serial::{self, UsbPort};
 
 const REPLY_GAP: Duration = Duration::from_secs(20);
 
@@ -35,17 +38,18 @@ pub struct DiscoverSummary {
 }
 
 /// Lets background fetches (weather/quake) enqueue a METIS-INFO channel reply.
-static RADIO_CMD_TX: OnceLock<UnboundedSender<RadioCmd>> = OnceLock::new();
+/// Routes to whichever companion is primary at send time, so promotion needs no rewiring.
+static RADIO_POOL: OnceLock<Arc<PoolShared>> = OnceLock::new();
 
 fn enqueue_channel_text(slot: u8, text: String) {
-    if let Some(tx) = RADIO_CMD_TX.get() {
-        let _ = tx.send(RadioCmd::SendChannel {
+    if let Some(pool) = RADIO_POOL.get() {
+        pool.route_to_primary(RadioCmd::SendChannel {
             slot,
             text,
             reply: None,
         });
     } else {
-        hq_log!(warn, "channel bot reply dropped — radio cmd bus not ready");
+        hq_log!(warn, "channel bot reply dropped — radio pool not ready");
     }
 }
 
@@ -172,6 +176,16 @@ pub struct RadioStatus {
     /// Bumped when a channel send finishes; `send_note` is empty on success.
     pub send_seq: u64,
     pub send_note: String,
+    /// Database id of the radio this status describes (`None` when no radio is live).
+    pub radio_id: Option<i64>,
+    /// `ble`, `usb`, or empty when no radio is live.
+    pub transport: String,
+    /// `companion`, `room`, `repeater`, `other`, or empty.
+    pub role: String,
+    /// Other radios with a live link besides the one described here.
+    pub others_connected: u32,
+    /// USB serial ports seen by the last scan.
+    pub usb_ports: Vec<UsbPort>,
 }
 
 impl Default for RadioStatus {
@@ -215,16 +229,18 @@ impl Default for RadioStatus {
             cli_line: String::new(),
             send_seq: 0,
             send_note: String::new(),
+            radio_id: None,
+            transport: String::new(),
+            role: String::new(),
+            others_connected: 0,
+            usb_ports: Vec::new(),
         }
     }
 }
 
+/// Command for one radio session. Everything except `Disconnect` transmits or
+/// changes the companion, so only the primary session accepts it.
 pub enum RadioCmd {
-    Scan,
-    /// First-time Bluetooth pairing with the MeshCore PIN.
-    Pair { target: String, pin: u32 },
-    /// Reconnect to a radio that is already paired and saved.
-    Reconnect(String),
     Disconnect,
     ApplyName(String),
     /// Push a channel definition onto the companion radio.
@@ -279,99 +295,848 @@ pub enum RadioCmd {
     ProbeNoise,
 }
 
-#[derive(Clone)]
-pub struct RadioHandle {
+impl RadioCmd {
+    /// True when only the primary companion may run this command.
+    fn needs_primary(&self) -> bool {
+        !matches!(self, Self::Disconnect)
+    }
+}
+
+/// Why a secondary (non-primary) companion refuses operator or bot transmit commands.
+const NOT_PRIMARY_REASON: &str =
+    "This radio is not the primary companion. Make it primary in Settings to transmit.";
+
+/// Message when no connected companion owns TX.
+fn no_primary_reason(cmd: &RadioCmd) -> &'static str {
+    match cmd {
+        RadioCmd::SendChannel { .. } => {
+            "Connect a primary companion radio before sending. The message was not transmitted."
+        }
+        RadioCmd::ClearChannel { .. } => {
+            "Connect a primary companion radio before clearing a channel slot."
+        }
+        RadioCmd::DiscoverRegions { .. } => "Connect a primary companion radio before scanning regions.",
+        RadioCmd::DiscoverNodes { .. } => {
+            "Connect a primary companion radio before discovering nodes."
+        }
+        RadioCmd::RunCli { .. } => "Connect a primary companion radio before running CLI commands.",
+        _ => "Connect a primary companion radio before changing device settings.",
+    }
+}
+
+/// Pick the primary companion: the operator's saved choice when it is connected,
+/// otherwise the lowest-id connected companion. `None` when nothing qualifies.
+fn pick_primary(preferred: Option<i64>, connected_companions: &[i64]) -> Option<i64> {
+    if let Some(id) = preferred {
+        if connected_companions.contains(&id) {
+            return Some(id);
+        }
+    }
+    connected_companions.iter().copied().min()
+}
+
+/// Refuse a command without transmitting. Replies carry the reason so the UI can show it.
+fn reject_cmd(cmd: RadioCmd, status: &Mutex<RadioStatus>, reason: &str) {
+    if matches!(cmd, RadioCmd::Disconnect) {
+        return;
+    }
+    hq_log!(warn, "radio command refused: {reason}");
+    match cmd {
+        RadioCmd::SendChannel { reply, .. } => {
+            push_send_note(status, reason);
+            if let Some(reply) = reply {
+                let _ = reply.send(Err(reason.into()));
+            }
+        }
+        RadioCmd::ClearChannel { reply, .. } => {
+            if let Some(reply) = reply {
+                let _ = reply.send(Err(reason.into()));
+            }
+        }
+        RadioCmd::DiscoverRegions { reply } => {
+            let _ = reply.send(Err(reason.into()));
+        }
+        RadioCmd::DiscoverNodes { reply, .. } => {
+            let _ = reply.send(Err(reason.into()));
+        }
+        RadioCmd::RunCli { .. } => push_cli_line(status, format!("error: {reason}")),
+        _ => {}
+    }
+    set_detail(status, reason);
+}
+
+fn set_detail(status: &Mutex<RadioStatus>, detail: impl Into<String>) {
+    status.lock().unwrap_or_else(|err| err.into_inner()).detail = detail.into();
+}
+
+/// One radio in the pool as the operator sees it (saved radios plus live state).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PoolRadioView {
+    pub id: i64,
+    pub transport: String,
+    pub address: String,
+    pub label: String,
+    pub role: String,
+    pub state: String,
+    pub detail: String,
+    pub battery_pct: Option<u8>,
+    pub is_primary: bool,
+    pub connected: bool,
+    /// Unix seconds of the last successful connect, if any.
+    pub last_connected: Option<i64>,
+}
+
+/// Work for the pool coordinator. Slot lifecycle changes go through one task so
+/// starts, stops, and primary promotion never race each other.
+enum PoolCmd {
+    Scan,
+    ScanUsb,
+    Pair { target: String, pin: u32 },
+    Reconnect(String),
+    ConnectBle { address: String, label: String },
+    ConnectUsb(String),
+    DisconnectRadio(i64),
+    ForgetRadio(i64),
+    SetPrimary(i64),
+    SetRole { id: i64, role: RadioRole },
+}
+
+/// One radio the pool is running or reconnecting. Disconnected radios have no entry.
+struct SlotEntry {
+    id: i64,
+    /// Distinguishes a replaced slot from the one that just ended.
+    token: u64,
+    role: RadioRole,
+    status: Arc<Mutex<RadioStatus>>,
     cmd: UnboundedSender<RadioCmd>,
     /// Bumped on Disconnect/Reboot; cancels a live session wherever it is waiting.
     stop: Arc<watch::Sender<u64>>,
-    /// When stop fires because of Reboot, send CMD_REBOOT before dropping BLE.
+    /// When stop fires because of Reboot, send CMD_REBOOT before dropping the link.
     reboot_pending: Arc<AtomicBool>,
     /// Set while a region/node discover runs; `cancel_mesh_scan` requests stop.
     scan_cancel: Arc<AtomicBool>,
+    /// True only for the companion that owns TX, bot replies, and the outbound queue.
+    is_primary: Arc<AtomicBool>,
+    /// True while the session holds a live link (after the companion identified itself).
+    link_up: Arc<AtomicBool>,
+    /// Operator asked this slot to stop; a new start waits for teardown.
+    ending: Arc<AtomicBool>,
+}
+
+/// Everything one session task needs to know about its slot.
+struct SlotCtx {
+    pool: Arc<PoolShared>,
+    id: i64,
+    transport: String,
+    address: String,
     status: Arc<Mutex<RadioStatus>>,
+    is_primary: Arc<AtomicBool>,
+    link_up: Arc<AtomicBool>,
+    reboot_pending: Arc<AtomicBool>,
+    scan_cancel: Arc<AtomicBool>,
+}
+
+impl SlotCtx {
+    fn is_primary(&self) -> bool {
+        self.is_primary.load(Ordering::SeqCst)
+    }
+
+    /// Mark the link up or down and let the pool re-pick the primary companion.
+    fn set_link(&self, up: bool) {
+        self.link_up.store(up, Ordering::SeqCst);
+        self.pool.reconcile_primary();
+    }
+}
+
+/// Shared state for every radio session.
+struct PoolShared {
+    db: Arc<Db>,
+    secrets: Arc<Secrets>,
+    ctl: UnboundedSender<PoolCmd>,
+    slots: Mutex<BTreeMap<i64, SlotEntry>>,
+    /// Scan results and operator notices; also the status line when no slot is live.
+    idle: Arc<Mutex<RadioStatus>>,
+    next_token: AtomicU64,
+    ble_scan_busy: AtomicBool,
+}
+
+/// The slot the header and Settings describe: primary, else a companion, else any.
+fn view_slot(slots: &BTreeMap<i64, SlotEntry>) -> Option<&SlotEntry> {
+    slots
+        .values()
+        .find(|slot| slot.is_primary.load(Ordering::SeqCst))
+        .or_else(|| slots.values().find(|slot| slot.role == RadioRole::Companion))
+        .or_else(|| slots.values().next())
+}
+
+fn usb_fallback_label(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
+impl PoolShared {
+    fn slots(&self) -> std::sync::MutexGuard<'_, BTreeMap<i64, SlotEntry>> {
+        self.slots.lock().unwrap_or_else(|err| err.into_inner())
+    }
+
+    /// Status that operator-visible messages should land on.
+    fn view_status(&self) -> Arc<Mutex<RadioStatus>> {
+        let slots = self.slots();
+        view_slot(&slots)
+            .map(|slot| slot.status.clone())
+            .unwrap_or_else(|| self.idle.clone())
+    }
+
+    /// Write a pool-level notice. The idle line always gets it; a live slot shows it as detail.
+    fn notify(&self, state: &str, detail: impl Into<String>) {
+        let detail = detail.into();
+        write_status(&self.idle, state, detail.clone());
+        let slots = self.slots();
+        if let Some(view) = view_slot(&slots) {
+            set_detail(&view.status, detail);
+        }
+    }
+
+    fn snapshot(&self) -> RadioStatus {
+        let idle = self
+            .idle
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        let slots = self.slots();
+        let Some(view) = view_slot(&slots) else {
+            return idle;
+        };
+        let mut status = view
+            .status
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        status.role = view.role.as_str().into();
+        status.others_connected = slots
+            .values()
+            .filter(|slot| slot.id != view.id && slot.link_up.load(Ordering::SeqCst))
+            .count() as u32;
+        status.devices = idle.devices;
+        status.usb_ports = idle.usb_ports;
+        status
+    }
+
+    fn pool_snapshot(&self) -> Vec<PoolRadioView> {
+        let rows = match self.db.list_saved_radios() {
+            Ok(rows) => rows,
+            Err(err) => {
+                hq_log!(warn, "radio pool: could not list saved radios: {err}");
+                Vec::new()
+            }
+        };
+        let slots = self.slots();
+        let mut out: Vec<PoolRadioView> = rows
+            .into_iter()
+            .map(|row| match slots.get(&row.id) {
+                Some(slot) => {
+                    let status = slot.status.lock().unwrap_or_else(|err| err.into_inner());
+                    PoolRadioView {
+                        id: row.id,
+                        transport: row.transport,
+                        address: row.address,
+                        label: row.label,
+                        role: row.role.as_str().into(),
+                        state: status.state.clone(),
+                        detail: status.detail.clone(),
+                        battery_pct: status.battery_pct,
+                        is_primary: slot.is_primary.load(Ordering::SeqCst),
+                        connected: status.state == "connected",
+                        last_connected: row.last_connected,
+                    }
+                }
+                None => PoolRadioView {
+                    id: row.id,
+                    transport: row.transport,
+                    address: row.address,
+                    label: row.label,
+                    role: row.role.as_str().into(),
+                    state: "disconnected".into(),
+                    detail: if row.last_error.is_empty() {
+                        "Not connected.".into()
+                    } else {
+                        row.last_error
+                    },
+                    battery_pct: None,
+                    is_primary: false,
+                    connected: false,
+                    last_connected: row.last_connected,
+                },
+            })
+            .collect();
+        out.sort_by_key(|radio| radio.id);
+        out
+    }
+
+    /// Re-pick the primary companion after a link, role, or preference change.
+    fn reconcile_primary(&self) {
+        let preferred = match self.db.primary_radio_id() {
+            Ok(id) => id,
+            Err(err) => {
+                hq_log!(warn, "primary radio setting: {err}");
+                None
+            }
+        };
+        let next = {
+            let slots = self.slots();
+            let connected: Vec<i64> = slots
+                .values()
+                .filter(|slot| {
+                    slot.role == RadioRole::Companion && slot.link_up.load(Ordering::SeqCst)
+                })
+                .map(|slot| slot.id)
+                .collect();
+            let next = pick_primary(preferred, &connected);
+            for slot in slots.values() {
+                let want = next == Some(slot.id);
+                if slot.is_primary.swap(want, Ordering::SeqCst) != want {
+                    hq_log!(
+                        info,
+                        "radio {} is {} the primary companion",
+                        slot.id,
+                        if want { "now" } else { "no longer" }
+                    );
+                }
+            }
+            next
+        };
+        if let Some(id) = next {
+            if preferred != Some(id) {
+                if let Err(err) = self.db.set_primary_radio_id(id) {
+                    hq_log!(warn, "could not save primary radio: {err}");
+                }
+            }
+        }
+    }
+
+    /// Send a command to the primary companion, or refuse it with a reason.
+    fn route_to_primary(&self, cmd: RadioCmd) {
+        let target = {
+            let slots = self.slots();
+            slots
+                .values()
+                .find(|slot| slot.is_primary.load(Ordering::SeqCst))
+                .map(|slot| (slot.cmd.clone(), slot.status.clone()))
+        };
+        match target {
+            Some((tx, status)) => {
+                if let Err(err) = tx.send(cmd) {
+                    reject_cmd(err.0, &status, "Radio task is not running.");
+                }
+            }
+            None => {
+                let reason = no_primary_reason(&cmd);
+                reject_cmd(cmd, &self.view_status(), reason);
+            }
+        }
+    }
+
+    /// Disconnect if live, then delete the saved radio row from the pool list.
+    fn forget_radio(&self, id: i64) {
+        let label = self.radio_label(id);
+        self.disconnect_slot(id);
+        match self.db.forget_radio(id) {
+            Ok(()) => {
+                self.reconcile_primary();
+                self.notify("disconnected", format!("Removed {label} from the radio pool."));
+            }
+            Err(err) => self.notify("error", err.to_string()),
+        }
+    }
+
+    /// Stop one slot. Returns false when no such slot is running.
+    fn disconnect_slot(&self, id: i64) -> bool {
+        let target = {
+            let slots = self.slots();
+            slots.get(&id).map(|slot| {
+                (
+                    slot.status.clone(),
+                    slot.stop.clone(),
+                    slot.cmd.clone(),
+                    slot.reboot_pending.clone(),
+                    slot.ending.clone(),
+                )
+            })
+        };
+        let Some((status, stop, cmd, reboot_pending, ending)) = target else {
+            return false;
+        };
+        reboot_pending.store(false, Ordering::SeqCst);
+        ending.store(true, Ordering::SeqCst);
+        // Show progress right away; the slot task confirms with "Disconnected."
+        write_status(&status, "disconnecting", "Disconnecting…");
+        stop.send_modify(|generation| *generation = generation.wrapping_add(1));
+        let _ = cmd.send(RadioCmd::Disconnect);
+        true
+    }
+
+    /// Disconnect the radio the header describes (primary, else the first live slot).
+    fn disconnect_view(&self) {
+        let id = {
+            let slots = self.slots();
+            view_slot(&slots).map(|slot| slot.id)
+        };
+        match id {
+            Some(id) => {
+                self.disconnect_slot(id);
+            }
+            None => self.notify("disconnected", "Disconnected."),
+        }
+    }
+
+    fn reboot_primary(&self) {
+        let target = {
+            let slots = self.slots();
+            slots
+                .values()
+                .find(|slot| slot.is_primary.load(Ordering::SeqCst))
+                .map(|slot| {
+                    (
+                        slot.status.clone(),
+                        slot.stop.clone(),
+                        slot.cmd.clone(),
+                        slot.reboot_pending.clone(),
+                    )
+                })
+        };
+        let Some((status, stop, cmd, reboot_pending)) = target else {
+            self.route_to_primary(RadioCmd::Reboot);
+            return;
+        };
+        // Cancel whatever the session is doing, send CMD_REBOOT on the live
+        // link, then force-drop the transport so we do not sit "Connected".
+        reboot_pending.store(true, Ordering::SeqCst);
+        write_status(&status, "reconnecting", "Rebooting companion…");
+        stop.send_modify(|generation| *generation = generation.wrapping_add(1));
+        let _ = cmd.send(RadioCmd::Reboot);
+    }
+
+    fn cancel_primary_scan(&self) {
+        let target = {
+            let slots = self.slots();
+            slots
+                .values()
+                .find(|slot| slot.is_primary.load(Ordering::SeqCst))
+                .map(|slot| (slot.scan_cancel.clone(), slot.status.clone()))
+        };
+        if let Some((cancel, status)) = target {
+            cancel.store(true, Ordering::SeqCst);
+            write_status(&status, "connected", "Stopping scan…");
+        }
+    }
+
+    fn radio_label(&self, id: i64) -> String {
+        self.db
+            .list_saved_radios()
+            .ok()
+            .and_then(|rows| rows.into_iter().find(|row| row.id == id))
+            .map(|row| row.label)
+            .filter(|label| !label.trim().is_empty())
+            .unwrap_or_else(|| format!("Radio {id}"))
+    }
+
+    fn apply_set_primary(&self, id: i64) {
+        let label = self.radio_label(id);
+        let connected = {
+            let slots = self.slots();
+            slots
+                .get(&id)
+                .is_some_and(|slot| slot.link_up.load(Ordering::SeqCst))
+        };
+        if !connected {
+            self.notify(
+                "disconnected",
+                format!("Connect {label} before making it the primary companion."),
+            );
+            return;
+        }
+        match self.db.set_primary_radio_id(id) {
+            Ok(()) => {
+                self.reconcile_primary();
+                self.notify("disconnected", format!("{label} is now the primary companion."));
+            }
+            Err(err) => self.notify("error", err.to_string()),
+        }
+    }
+
+    fn apply_set_role(&self, id: i64, role: RadioRole) {
+        if let Err(err) = self.db.set_radio_role(id, role) {
+            self.notify("error", err.to_string());
+            return;
+        }
+        {
+            let mut slots = self.slots();
+            if let Some(slot) = slots.get_mut(&id) {
+                slot.role = role;
+            }
+        }
+        self.reconcile_primary();
+        let label = self.radio_label(id);
+        self.notify("disconnected", format!("{label} role set to {}.", role.label()));
+    }
+
+    fn remove_slot(&self, id: i64, token: u64) {
+        let empty = {
+            let mut slots = self.slots();
+            if slots.get(&id).is_some_and(|slot| slot.token == token) {
+                slots.remove(&id);
+            }
+            slots.is_empty()
+        };
+        self.reconcile_primary();
+        if empty {
+            write_status(&self.idle, "disconnected", "Disconnected.");
+        }
+    }
+
+    /// Save the radio, then run a session for it unless one is already live.
+    async fn start_slot(self: &Arc<Self>, transport: &str, address: &str, label: &str) {
+        let id = match self.db.remember_radio(transport, address, label) {
+            Ok(id) => id,
+            Err(err) => {
+                self.notify("error", format!("Could not save the radio: {err}"));
+                return;
+            }
+        };
+        // A slot the operator just stopped may still be releasing the link.
+        for _ in 0..100 {
+            let ending = self
+                .slots()
+                .get(&id)
+                .is_some_and(|slot| slot.ending.load(Ordering::SeqCst));
+            if !ending {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let running = self.slots().contains_key(&id);
+        if running {
+            self.notify(
+                "disconnected",
+                format!("{label} is already connecting or connected."),
+            );
+            return;
+        }
+        let role = self.db.radio_role(id).unwrap_or(RadioRole::Companion);
+        let token = self.next_token.fetch_add(1, Ordering::SeqCst);
+        let (cmd_tx, cmd_rx) = unbounded_channel();
+        let (stop_tx, stop_rx) = watch::channel(0u64);
+        let mut initial = RadioStatus::default();
+        initial.radio_id = Some(id);
+        initial.transport = transport.to_string();
+        initial.role = role.as_str().to_string();
+        initial.state = "connecting".into();
+        initial.detail = format!("Connecting to {label}");
+        let status = Arc::new(Mutex::new(initial));
+        let is_primary = Arc::new(AtomicBool::new(false));
+        let link_up = Arc::new(AtomicBool::new(false));
+        let reboot_pending = Arc::new(AtomicBool::new(false));
+        let scan_cancel = Arc::new(AtomicBool::new(false));
+        let entry = SlotEntry {
+            id,
+            token,
+            role,
+            status: status.clone(),
+            cmd: cmd_tx,
+            stop: Arc::new(stop_tx),
+            reboot_pending: reboot_pending.clone(),
+            scan_cancel: scan_cancel.clone(),
+            is_primary: is_primary.clone(),
+            link_up: link_up.clone(),
+            ending: Arc::new(AtomicBool::new(false)),
+        };
+        let ctx = Arc::new(SlotCtx {
+            pool: self.clone(),
+            id,
+            transport: transport.to_string(),
+            address: address.to_string(),
+            status,
+            is_primary,
+            link_up,
+            reboot_pending,
+            scan_cancel,
+        });
+        self.slots().insert(id, entry);
+        let pool = self.clone();
+        tokio::spawn(async move {
+            slot_loop(ctx, cmd_rx, stop_rx).await;
+            pool.remove_slot(id, token);
+        });
+    }
+
+    fn spawn_ble_scan(self: &Arc<Self>) {
+        if self.ble_scan_busy.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let pool = self.clone();
+        tokio::spawn(async move {
+            pool.notify("scanning", "Listening for nearby Bluetooth devices…");
+            match discover_radios(Duration::from_secs(5)).await {
+                Ok(devices) => {
+                    let companions = devices.iter().filter(|device| device.companion).count();
+                    let count = devices.len();
+                    let detail = if count == 0 {
+                        "No Bluetooth devices answered. Confirm the adapter is on and the radio is powered.".to_string()
+                    } else if companions == 0 {
+                        format!("Found {count} devices. None advertised the MeshCore companion service. Match the upstairs radio by name and address.")
+                    } else {
+                        format!("Found {count} devices, {companions} advertising the MeshCore companion service.")
+                    };
+                    pool.idle.lock().unwrap_or_else(|err| err.into_inner()).devices = devices;
+                    pool.notify("disconnected", detail);
+                }
+                Err(err) => pool.notify("error", err),
+            }
+            pool.ble_scan_busy.store(false, Ordering::SeqCst);
+        });
+    }
+
+    fn spawn_pair(self: &Arc<Self>, target: String, pin: u32) {
+        let target = target.trim().to_string();
+        if target.is_empty() {
+            self.notify("error", "Enter the Bluetooth name or address of the radio.");
+            return;
+        }
+        let pool = self.clone();
+        tokio::spawn(async move {
+            pool.notify(
+                "pairing",
+                "Pairing with the radio. Enter the PIN shown on the radio if asked by the system.",
+            );
+            match crate::ble_pair::ensure_paired(&target, pin).await {
+                Ok(()) => {
+                    let address = stable_radio_address(&pool.idle, &target);
+                    let label = scanned_label(&pool.idle, &target);
+                    let _ = pool.ctl.send(PoolCmd::ConnectBle { address, label });
+                }
+                Err(err) => pool.notify("error", err),
+            }
+        });
+    }
+
+    async fn reconnect_saved(self: &Arc<Self>, target: String) {
+        let target = target.trim().to_string();
+        if target.is_empty() {
+            self.notify("error", "Choose a saved companion radio first.");
+            return;
+        }
+        // A saved USB radio reconnects by its stored path; BLE resolves through the scan list.
+        let saved_usb = self.db.list_saved_radios().ok().and_then(|rows| {
+            rows.into_iter().find(|row| {
+                row.transport == "usb"
+                    && (row.address.eq_ignore_ascii_case(&target)
+                        || row.label.eq_ignore_ascii_case(&target))
+            })
+        });
+        if let Some(row) = saved_usb {
+            self.notify("connecting", format!("Reconnecting to {}…", row.address));
+            self.start_slot("usb", &row.address, &row.label).await;
+            return;
+        }
+        let address = stable_radio_address(&self.idle, &target);
+        let label = scanned_label(&self.idle, &target);
+        self.notify("connecting", format!("Reconnecting to {address}…"));
+        self.start_slot("ble", &address, &label).await;
+    }
+
+    async fn connect_usb_now(self: &Arc<Self>, raw: String) {
+        let normalized = usb_serial::normalize_usb_address(&raw);
+        if normalized.is_empty() {
+            self.notify("error", "Choose a USB serial port first.");
+            return;
+        }
+        let (address, label) = {
+            let idle = self.idle.lock().unwrap_or_else(|err| err.into_inner());
+            idle.usb_ports
+                .iter()
+                .find(|port| port.path == normalized || port.system_path == normalized)
+                .map(|port| (port.path.clone(), port.label.clone()))
+                .unwrap_or_else(|| (normalized.clone(), usb_fallback_label(&normalized)))
+        };
+        self.notify("connecting", format!("Opening USB port {address}…"));
+        self.start_slot("usb", &address, &label).await;
+    }
+
+    async fn refresh_usb_ports(&self, announce: bool) {
+        match tokio::task::spawn_blocking(usb_serial::list_usb_ports).await {
+            Ok(Ok(ports)) => {
+                let count = ports.len();
+                self.idle
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner())
+                    .usb_ports = ports;
+                if announce {
+                    let detail = match count {
+                        0 => "No USB serial radios found. Plug in the companion and scan again."
+                            .to_string(),
+                        1 => "Found 1 USB serial port.".to_string(),
+                        n => format!("Found {n} USB serial ports."),
+                    };
+                    self.notify("disconnected", detail);
+                }
+            }
+            Ok(Err(err)) => {
+                if announce {
+                    self.notify("error", format!("USB scan failed: {err}"));
+                } else {
+                    hq_log!(debug, "USB port list: {err}");
+                }
+            }
+            Err(err) => hq_log!(warn, "USB port scan task: {err}"),
+        }
+    }
+}
+
+/// Coordinator: owns slot starts and stops, scans, and primary changes.
+async fn pool_loop(pool: Arc<PoolShared>, mut rx: UnboundedReceiver<PoolCmd>) {
+    pool.refresh_usb_ports(false).await;
+    while let Some(cmd) = rx.recv().await {
+        match cmd {
+            PoolCmd::Scan => pool.spawn_ble_scan(),
+            PoolCmd::ScanUsb => pool.refresh_usb_ports(true).await,
+            PoolCmd::Pair { target, pin } => pool.spawn_pair(target, pin),
+            PoolCmd::Reconnect(target) => pool.reconnect_saved(target).await,
+            PoolCmd::ConnectBle { address, label } => {
+                pool.start_slot("ble", &address, &label).await;
+            }
+            PoolCmd::ConnectUsb(path) => pool.connect_usb_now(path).await,
+            PoolCmd::DisconnectRadio(id) => {
+                pool.disconnect_slot(id);
+            }
+            PoolCmd::ForgetRadio(id) => pool.forget_radio(id),
+            PoolCmd::SetPrimary(id) => pool.apply_set_primary(id),
+            PoolCmd::SetRole { id, role } => pool.apply_set_role(id, role),
+        }
+    }
+}
+
+/// Public handle used by the window. Transmit-side calls always go to the primary companion.
+#[derive(Clone)]
+pub struct RadioHandle {
+    pool: Arc<PoolShared>,
 }
 
 impl RadioHandle {
+    fn ctl(&self, cmd: PoolCmd) {
+        if self.pool.ctl.send(cmd).is_err() {
+            hq_log!(error, "radio coordinator is not running");
+        }
+    }
+
+    /// Scan for nearby Bluetooth radios.
     pub fn scan(&self) {
-        let _ = self.cmd.send(RadioCmd::Scan);
+        self.ctl(PoolCmd::Scan);
     }
 
+    /// Pair a new Bluetooth radio with its PIN, then connect it alongside any others.
     pub fn pair(&self, target: String, pin: u32) {
-        let _ = self.cmd.send(RadioCmd::Pair { target, pin });
+        self.ctl(PoolCmd::Pair { target, pin });
     }
 
+    /// Connect a saved radio (Bluetooth address or saved USB path).
     pub fn reconnect(&self, target: String) {
-        let _ = self.cmd.send(RadioCmd::Reconnect(target));
+        self.ctl(PoolCmd::Reconnect(target));
     }
 
+    /// Disconnect the primary companion (or the only live radio).
     pub fn disconnect(&self) {
-        // Show progress right away; the radio task confirms with "Disconnected."
-        self.reboot_pending.store(false, Ordering::SeqCst);
-        write_status(&self.status, "disconnecting", "Disconnecting…");
-        self.stop.send_modify(|generation| *generation = generation.wrapping_add(1));
-        // Also clears a pending reconnect when no session is running.
-        let _ = self.cmd.send(RadioCmd::Disconnect);
+        self.pool.disconnect_view();
+    }
+
+    /// Open a USB serial companion by path (prefer `/dev/serial/by-id/...`).
+    pub fn connect_usb(&self, path: String) {
+        self.ctl(PoolCmd::ConnectUsb(path));
+    }
+
+    /// Disconnect one radio in the pool by database id.
+    pub fn disconnect_radio(&self, radio_id: i64) {
+        self.ctl(PoolCmd::DisconnectRadio(radio_id));
+    }
+
+    /// Disconnect and remove a saved radio from the pool list.
+    pub fn forget_radio(&self, radio_id: i64) {
+        self.ctl(PoolCmd::ForgetRadio(radio_id));
+    }
+
+    /// Make a connected companion the primary (TX, bot, outbound queue).
+    pub fn set_primary(&self, radio_id: i64) {
+        self.ctl(PoolCmd::SetPrimary(radio_id));
+    }
+
+    /// Set a radio's role: `companion`, `room`, `repeater`, or `other`.
+    pub fn set_role(&self, radio_id: i64, role: String) {
+        self.ctl(PoolCmd::SetRole {
+            id: radio_id,
+            role: RadioRole::parse(&role),
+        });
+    }
+
+    /// Refresh the USB serial port list.
+    pub fn scan_usb(&self) {
+        self.ctl(PoolCmd::ScanUsb);
+    }
+
+    /// Saved radios merged with live session state.
+    pub fn pool_snapshot(&self) -> Vec<PoolRadioView> {
+        self.pool.pool_snapshot()
     }
 
     pub fn apply_name(&self, name: String) {
-        let _ = self.cmd.send(RadioCmd::ApplyName(name));
+        self.pool.route_to_primary(RadioCmd::ApplyName(name));
     }
 
     pub fn push_channel(&self, slot: u8, name: String) {
-        let _ = self.cmd.send(RadioCmd::PushChannel { slot, name });
+        self.pool
+            .route_to_primary(RadioCmd::PushChannel { slot, name });
     }
 
     pub fn clear_channel(&self, slot: u8) -> oneshot::Receiver<Result<(), String>> {
         let (tx, rx) = oneshot::channel();
-        if let Err(err) = self.cmd.send(RadioCmd::ClearChannel {
+        self.pool.route_to_primary(RadioCmd::ClearChannel {
             slot,
             reply: Some(tx),
-        }) {
-            if let RadioCmd::ClearChannel {
-                reply: Some(reply), ..
-            } = err.0
-            {
-                let _ = reply.send(Err("Radio command channel closed.".into()));
-            }
-        }
+        });
         rx
     }
 
     pub fn send_channel(&self, slot: u8, text: String) -> oneshot::Receiver<Result<(), String>> {
         let (tx, rx) = oneshot::channel();
-        if let Err(err) = self.cmd.send(RadioCmd::SendChannel {
+        self.pool.route_to_primary(RadioCmd::SendChannel {
             slot,
             text,
             reply: Some(tx),
-        }) {
-            if let RadioCmd::SendChannel {
-                reply: Some(reply), ..
-            } = err.0
-            {
-                let _ = reply.send(Err("Radio task is not running.".into()));
-            }
-        }
+        });
         rx
     }
 
     pub fn refresh_device_settings(&self) {
-        let _ = self.cmd.send(RadioCmd::RefreshDeviceSettings);
+        self.pool.route_to_primary(RadioCmd::RefreshDeviceSettings);
     }
 
     pub fn set_custom_var(&self, key: String, value: String) {
-        let _ = self.cmd.send(RadioCmd::SetCustomVar { key, value });
+        self.pool
+            .route_to_primary(RadioCmd::SetCustomVar { key, value });
     }
 
     pub fn set_coords(&self, lat: f64, lon: f64) {
-        let _ = self.cmd.send(RadioCmd::SetCoords { lat, lon });
+        self.pool.route_to_primary(RadioCmd::SetCoords { lat, lon });
     }
 
     pub fn set_tx_power(&self, power: u8) {
-        let _ = self.cmd.send(RadioCmd::SetTxPower(power));
+        self.pool.route_to_primary(RadioCmd::SetTxPower(power));
     }
 
     pub fn set_radio_params(&self, freq_mhz: f64, bw_khz: f64, sf: u8, cr: u8, repeat: bool) {
-        let _ = self.cmd.send(RadioCmd::SetRadioParams {
+        self.pool.route_to_primary(RadioCmd::SetRadioParams {
             freq_mhz,
             bw_khz,
             sf,
@@ -381,73 +1146,74 @@ impl RadioHandle {
     }
 
     pub fn set_default_flood_scope(&self, scope: Option<String>) {
-        let _ = self.cmd.send(RadioCmd::SetDefaultFloodScope(scope));
+        self.pool
+            .route_to_primary(RadioCmd::SetDefaultFloodScope(scope));
     }
 
     pub fn discover_regions(&self) -> oneshot::Receiver<Result<Vec<String>, String>> {
         let (tx, rx) = oneshot::channel();
-        let _ = self.cmd.send(RadioCmd::DiscoverRegions { reply: tx });
+        self.pool
+            .route_to_primary(RadioCmd::DiscoverRegions { reply: tx });
         rx
     }
 
     pub fn discover_nodes(&self, filter: u8) -> oneshot::Receiver<Result<DiscoverSummary, String>> {
         let (tx, rx) = oneshot::channel();
-        let _ = self.cmd.send(RadioCmd::DiscoverNodes { filter, reply: tx });
+        self.pool
+            .route_to_primary(RadioCmd::DiscoverNodes { filter, reply: tx });
         rx
     }
 
     pub fn set_path_hash_mode(&self, mode: u8) {
-        let _ = self.cmd.send(RadioCmd::SetPathHashMode(mode.min(2)));
+        self.pool
+            .route_to_primary(RadioCmd::SetPathHashMode(mode.min(2)));
     }
 
     pub fn set_adv_loc_policy(&self, policy: u8) {
-        let _ = self.cmd.send(RadioCmd::SetAdvLocPolicy(policy.min(2)));
+        self.pool
+            .route_to_primary(RadioCmd::SetAdvLocPolicy(policy.min(2)));
     }
 
     pub fn send_advert(&self, flood: bool) {
-        let _ = self.cmd.send(RadioCmd::SendAdvert { flood });
+        self.pool.route_to_primary(RadioCmd::SendAdvert { flood });
     }
 
     pub fn reboot(&self) {
-        // Cancel whatever the session is doing, send CMD_REBOOT on the live
-        // link, then force-drop Bluetooth so we do not sit "Connected".
-        self.reboot_pending.store(true, Ordering::SeqCst);
-        write_status(&self.status, "reconnecting", "Rebooting companion…");
-        self.stop.send_modify(|generation| *generation = generation.wrapping_add(1));
-        let _ = self.cmd.send(RadioCmd::Reboot);
+        self.pool.reboot_primary();
     }
 
     pub fn run_cli(&self, contact_hex: String, text: String) {
-        let _ = self.cmd.send(RadioCmd::RunCli { contact_hex, text });
+        self.pool
+            .route_to_primary(RadioCmd::RunCli { contact_hex, text });
     }
 
     pub fn probe_noise_samples(&self) {
-        let _ = self.cmd.send(RadioCmd::ProbeNoise);
+        self.pool.route_to_primary(RadioCmd::ProbeNoise);
     }
 
     pub fn cancel_mesh_scan(&self) {
-        self.scan_cancel.store(true, Ordering::SeqCst);
-        write_status(&self.status, "connected", "Stopping scan…");
+        self.pool.cancel_primary_scan();
     }
 
+    /// Status of the primary companion (or the first live radio), plus scan results.
     pub fn snapshot(&self) -> RadioStatus {
-        self.status
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .clone()
+        self.pool.snapshot()
     }
 }
 
 pub fn spawn_radio(db: Arc<Db>, secrets: Arc<Secrets>) -> RadioHandle {
-    let (cmd, rx) = unbounded_channel();
-    let _ = RADIO_CMD_TX.set(cmd.clone());
-    let (stop, stop_rx) = watch::channel(0u64);
-    let reboot_pending = Arc::new(AtomicBool::new(false));
-    let scan_cancel = Arc::new(AtomicBool::new(false));
-    let status = Arc::new(Mutex::new(RadioStatus::default()));
-    let status_thread = status.clone();
-    let reboot_thread = reboot_pending.clone();
-    let scan_thread = scan_cancel.clone();
+    let (ctl, rx) = unbounded_channel();
+    let pool = Arc::new(PoolShared {
+        db,
+        secrets,
+        ctl,
+        slots: Mutex::new(BTreeMap::new()),
+        idle: Arc::new(Mutex::new(RadioStatus::default())),
+        next_token: AtomicU64::new(1),
+        ble_scan_busy: AtomicBool::new(false),
+    });
+    let _ = RADIO_POOL.set(pool.clone());
+    let pool_thread = pool.clone();
     std::thread::Builder::new()
         .name("metis-radio".into())
         .spawn(move || {
@@ -455,24 +1221,10 @@ pub fn spawn_radio(db: Arc<Db>, secrets: Arc<Secrets>) -> RadioHandle {
                 .enable_all()
                 .build()
                 .expect("radio runtime");
-            runtime.block_on(radio_loop(
-                db,
-                secrets,
-                status_thread,
-                rx,
-                stop_rx,
-                reboot_thread,
-                scan_thread,
-            ));
+            runtime.block_on(pool_loop(pool_thread, rx));
         })
         .expect("radio thread");
-    RadioHandle {
-        cmd,
-        stop: Arc::new(stop),
-        reboot_pending,
-        scan_cancel,
-        status,
-    }
+    RadioHandle { pool }
 }
 
 fn end_discover_sync(status: &Mutex<RadioStatus>, detail: impl Into<String>) {
@@ -640,7 +1392,7 @@ async fn apply_default_flood_scope(
 }
 
 const REGION_SCAN_MAX_TARGETS: usize = 12;
-const REGION_SCAN_PER_TIMEOUT: Duration = Duration::from_secs(5);
+const REGION_SCAN_PER_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// `CMD_SEND_ANON_REQ` (57) regions subtype to one repeater/room pubkey.
 async fn request_regions_from_contact(
@@ -660,18 +1412,26 @@ async fn request_regions_from_contact(
         REGION_SCAN_PER_TIMEOUT,
     ));
     let mut tag: Option<[u8; 4]> = None;
-    let deadline = Instant::now() + REGION_SCAN_PER_TIMEOUT + Duration::from_secs(2);
+    let mut pending: Option<Vec<u8>> = None;
+    let deadline = Instant::now() + REGION_SCAN_PER_TIMEOUT;
 
     loop {
-        if Instant::now() > deadline {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
             return Err("Region request timed out.".into());
         }
         tokio::select! {
+            _ = tokio::time::sleep(left) => {
+                return Err("Region request timed out.".into());
+            }
             res = &mut send_fut, if tag.is_none() => {
                 match res {
                     Ok(event) => match event.payload {
                         EventPayload::MsgSent(info) => {
                             tag = Some(info.expected_ack);
+                            if let Some(data) = pending.take() {
+                                return Ok(crate::mesh_regions::parse_regions_binary_response(&data));
+                            }
                         }
                         _ => return Err("Unexpected response to region request.".into()),
                     },
@@ -683,12 +1443,22 @@ async fn request_regions_from_contact(
                     Ok(event) if event.event_type == EventType::MsgSent && tag.is_none() => {
                         if let EventPayload::MsgSent(info) = event.payload {
                             tag = Some(info.expected_ack);
+                            if let Some(data) = pending.take() {
+                                return Ok(crate::mesh_regions::parse_regions_binary_response(&data));
+                            }
                         }
                     }
                     Ok(event) if event.event_type == EventType::BinaryResponse => {
                         if let EventPayload::BinaryResponse { tag: resp_tag, data } = event.payload {
-                            if tag == Some(resp_tag) {
-                                return Ok(crate::mesh_regions::parse_regions_binary_response(&data));
+                            match tag {
+                                Some(t) if t == resp_tag => {
+                                    return Ok(crate::mesh_regions::parse_regions_binary_response(&data));
+                                }
+                                None => {
+                                    // Reply raced ahead of MsgSent — keep until tag arrives.
+                                    pending = Some(data);
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -777,21 +1547,38 @@ async fn run_node_discover(
     let mut tag = [0u8; 4];
     rand::thread_rng().fill_bytes(&mut tag);
 
-    // Wiki: [55][flags=0][sub=0x80][filter][tag:4][since:4]
-    let mut frame = vec![55u8, 0x00, 0x80, filter];
+    // MeshMonitor / companion app wire form (works on live companions):
+    // [55][0x80 DISCOVER_REQ][filter][tag:4]. Optional since is omitted.
+    let mut frame = vec![55u8, 0x80, filter];
     frame.extend_from_slice(&tag);
-    frame.extend_from_slice(&0u32.to_le_bytes());
 
     let dispatcher = meshcore.dispatcher();
     let mut rx = dispatcher.receiver();
     {
         let commands = meshcore.commands().lock().await;
-        if let Err(err) = commands
-            .send_with_timeout(&frame, Some(EventType::Ok), Duration::from_secs(5))
-            .await
+        // Listen before write — Ok often arrives before send_with_timeout subscribes.
+        match request_listening_first(
+            &commands,
+            dispatcher,
+            &frame,
+            &[EventType::Ok, EventType::Error],
+            Duration::from_secs(3),
+        )
+        .await
         {
-            end_discover_sync(status, err.to_string());
-            return Err(err.to_string());
+            Ok(event) if event.event_type == EventType::Error => {
+                let msg = match event.payload {
+                    EventPayload::String(s) => s,
+                    _ => "Discover request rejected.".into(),
+                };
+                end_discover_sync(status, msg.clone());
+                return Err(msg);
+            }
+            Ok(_) => {}
+            Err(err) => {
+                // Still collect 0x8E responses; some firmwares ACK too fast to catch.
+                hq_log!(debug, "discover send ack missed ({err}); listening anyway");
+            }
         }
     }
 
@@ -1173,54 +1960,147 @@ fn connected_detail(status: &Mutex<RadioStatus>, name: &str) -> String {
     }
 }
 
-async fn radio_loop(
-    db: Arc<Db>,
-    secrets: Arc<Secrets>,
-    status: Arc<Mutex<RadioStatus>>,
+/// Open the transport for one radio. BLE names/addresses use btleplug; USB uses a serial path.
+async fn connect_transport(transport: &str, address: &str) -> Result<MeshCore, String> {
+    match transport {
+        "usb" => MeshCore::serial(address, usb_serial::DEFAULT_BAUD)
+            .await
+            .map_err(|err| clarify_usb_connect_error(&err.to_string())),
+        "ble" => MeshCore::ble_connect(address)
+            .await
+            .map_err(|err| err.to_string()),
+        other => Err(format!("Unknown radio transport `{other}`.")),
+    }
+}
+
+fn clarify_usb_connect_error(raw: &str) -> String {
+    let lower = raw.to_ascii_lowercase();
+    if is_usb_permission_error(&lower) {
+        return format!("{raw} {}", usb_permission_hint());
+    }
+    if lower.contains("no such file")
+        || lower.contains("not found")
+        || lower.contains("the system cannot find")
+        || lower.contains("cannot find the file")
+    {
+        return format!("{raw} Unplug and replug the companion, then Refresh ports.");
+    }
+    if lower.contains("access is denied") || lower.contains("sharing violation") {
+        return format!(
+            "{raw} Close any other app using this COM port (serial monitor, another MeshCore client), then try again."
+        );
+    }
+    raw.to_string()
+}
+
+/// Expand USB session failures after the port already opened (protocol / SelfInfo).
+fn clarify_usb_session_error(raw: &str) -> String {
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("timeout") && (lower.contains("selfinfo") || lower.contains("self info")) {
+        return format!(
+            "{raw} The USB port opened, but companion protocol did not answer. \
+MeshCore ships separate companion firmwares: BLE builds speak over Bluetooth; USB builds speak \
+framed serial on this CDC port (often no BLE). Flash the USB companion image for this board \
+if you need cable TX, or connect over BLE instead. Close other serial apps and the phone MeshCore app first."
+        );
+    }
+    clarify_usb_connect_error(raw)
+}
+
+fn is_usb_permission_error(lower: &str) -> bool {
+    lower.contains("permission denied")
+        || lower.contains("operation not permitted")
+        || (cfg!(windows) && lower.contains("access is denied"))
+}
+
+fn usb_permission_hint() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "Add your user to the dialout group (`sudo usermod -aG dialout $USER`), then log out and back in."
+    } else if cfg!(target_os = "macos") {
+        "Quit other serial apps, confirm System Settings allows this app to use USB accessories, then unplug/replug the radio."
+    } else if cfg!(windows) {
+        "Close other apps using this COM port. If it still fails, reinstall/update the USB CDC driver, then unplug/replug."
+    } else {
+        "Close other apps using this serial port, then unplug/replug the radio."
+    }
+}
+
+/// Errors that will not clear with backoff (permissions, missing device, no companion protocol).
+fn is_fatal_usb_session_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    is_usb_permission_error(&lower)
+        || lower.contains("no such file")
+        || lower.contains("not found")
+        || lower.contains("the system cannot find")
+        || lower.contains("cannot find the file")
+        || lower.contains("sharing violation")
+        || (lower.contains("timeout") && (lower.contains("selfinfo") || lower.contains("self info")))
+}
+
+/// Wait out a reconnect backoff, still honouring Disconnect. Returns false to end the slot.
+async fn wait_or_stop(
+    status: &Mutex<RadioStatus>,
+    rx: &mut UnboundedReceiver<RadioCmd>,
+    stop: &mut watch::Receiver<u64>,
+    wait: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => return true,
+            _ = stop.changed() => return false,
+            cmd = rx.recv() => match cmd {
+                None | Some(RadioCmd::Disconnect) => return false,
+                Some(other) => reject_cmd(
+                    other,
+                    status,
+                    "This radio is reconnecting. Try again once it is connected.",
+                ),
+            },
+        }
+    }
+}
+
+/// One task per radio: connect, run the session, reconnect with backoff until the
+/// operator disconnects.
+async fn slot_loop(
+    ctx: Arc<SlotCtx>,
     mut rx: UnboundedReceiver<RadioCmd>,
-    stop_rx: watch::Receiver<u64>,
-    reboot_pending: Arc<AtomicBool>,
-    scan_cancel: Arc<AtomicBool>,
+    mut stop: watch::Receiver<u64>,
 ) {
-    let mut desired: Option<String> = None;
+    let status = &ctx.status;
     let mut backoff = Duration::from_secs(2);
     loop {
-        if let Some(name) = desired.clone() {
-            write_status(&status, "connecting", format!("Connecting to {name}"));
-            write_sync(
-                &status,
-                SyncPhase::Connecting,
-                format!("Connecting to {name}…"),
-                None,
-            );
-            clear_session_telemetry(&status);
-            // Ignore Disconnect presses from before this session started.
-            let mut stop = stop_rx.clone();
-            stop.borrow_and_update();
-            let live: Mutex<Option<Arc<MeshCore>>> = Mutex::new(None);
-            let end = tokio::select! {
-                end = run_session(
-                    &db,
-                    &secrets,
-                    &status,
-                    &mut rx,
-                    &name,
-                    &live,
-                    &scan_cancel,
-                ) => end,
-                _ = stop.changed() => SessionEnd::Stopped,
-            };
-            let want_reboot = reboot_pending.swap(false, Ordering::SeqCst);
-            // Always release the companion: stop meshcore-rs tasks and drop the
-            // OS-level Bluetooth link. meshcore-rs disconnect() alone leaves the
-            // GATT session up, so Settings reboot looked like a no-op.
-            let session = live.lock().unwrap_or_else(|err| err.into_inner()).take();
-            if let Some(meshcore) = session {
-                if want_reboot {
-                    let _ = send_companion_reboot(&meshcore).await;
-                }
-                let _ = meshcore.disconnect().await;
+        let name = ctx.address.clone();
+        write_status(status, "connecting", format!("Connecting to {name}"));
+        write_sync(
+            status,
+            SyncPhase::Connecting,
+            format!("Connecting to {name}…"),
+            None,
+        );
+        clear_session_telemetry(status);
+        // Ignore Disconnect presses from before this session started.
+        stop.borrow_and_update();
+        let live: Mutex<Option<Arc<MeshCore>>> = Mutex::new(None);
+        let started = Instant::now();
+        let end = tokio::select! {
+            end = run_session(&ctx, &mut rx, &live) => end,
+            _ = stop.changed() => SessionEnd::Stopped,
+        };
+        ctx.set_link(false);
+        let want_reboot = ctx.reboot_pending.swap(false, Ordering::SeqCst);
+        // Always release the companion: stop meshcore-rs tasks and drop the
+        // OS-level link. meshcore-rs disconnect() alone leaves a BLE GATT session
+        // up, so Settings reboot looked like a no-op.
+        let session = live.lock().unwrap_or_else(|err| err.into_inner()).take();
+        if let Some(meshcore) = session {
+            if want_reboot {
+                let _ = send_companion_reboot(&meshcore).await;
             }
+            let _ = meshcore.disconnect().await;
+        }
+        if ctx.transport == "ble" {
             match tokio::time::timeout(
                 Duration::from_secs(8),
                 crate::ble_pair::force_disconnect(&name),
@@ -1231,99 +2111,49 @@ async fn radio_loop(
                 Ok(Err(err)) => hq_log!(warn, "bluetooth disconnect: {err}"),
                 Err(_) => hq_log!(warn, "bluetooth disconnect: timed out"),
             }
-            match end {
-                SessionEnd::Stopped if want_reboot => {
-                    // Operator reboot: come back after the companion restarts.
-                    desired = Some(name);
-                    backoff = Duration::from_secs(5);
-                    clear_session_telemetry(&status);
-                    write_status(
-                        &status,
-                        "reconnecting",
-                        "Companion reboot sent. Reconnecting…",
-                    );
-                }
-                SessionEnd::Stopped => {
-                    desired = None;
-                    backoff = Duration::from_secs(2);
-                    clear_session_telemetry(&status);
-                    write_status(&status, "disconnected", "Disconnected.");
-                }
-                SessionEnd::Switch(next) => {
-                    desired = Some(next);
-                    backoff = Duration::from_secs(2);
-                    clear_session_telemetry(&status);
-                }
-                SessionEnd::Lost(error) => {
-                    {
-                        let mut guard = status.lock().unwrap_or_else(|err| err.into_inner());
-                        guard.connected_name.clear();
-                        guard.sync_phase = SyncPhase::Idle;
-                        guard.sync_label.clear();
-                        guard.sync_progress = None;
-                        guard.battery_pct = None;
-                        guard.battery_mv = None;
-                        guard.battery_charging = false;
-                        guard.firmware.clear();
-                        guard.protocol_ver = 0;
-                        guard.model.clear();
-                        guard.hq_lat = None;
-                        guard.hq_lon = None;
-                        guard.tx_power = None;
-                        guard.max_tx_power = None;
-                        guard.radio_freq_mhz = None;
-                        guard.radio_bw_khz = None;
-                        guard.radio_sf = None;
-                        guard.radio_cr = None;
-                        guard.adv_loc_policy = None;
-                        guard.manual_add_contacts = false;
-                        guard.telemetry_mode_base = 0;
-                        guard.telemetry_mode_loc = 0;
-                        guard.telemetry_mode_env = 0;
-                        guard.multi_acks = 0;
-                        guard.path_hash_mode = None;
-                        guard.public_key.clear();
-                        guard.client_repeat = false;
-                        guard.flood_scope = None;
-                        guard.custom_vars.clear();
-                        guard.connected_since = None;
-                        guard.state = "reconnecting".into();
-                        guard.detail = error;
-                    }
-                    if let Some(id) = radio_id(&db, &name) {
-                        let _ = db.set_radio_error(id, &status_detail(&status));
-                    }
-                    tokio::select! {
-                        _ = tokio::time::sleep(backoff) => {
-                            backoff = (backoff * 2).min(Duration::from_secs(30));
-                        }
-                        cmd = rx.recv() => {
-                            if !apply_idle_cmd(cmd, &db, &status, &mut desired).await {
-                                break;
-                            }
-                        }
-                    }
-                }
+        }
+        let wait = match end {
+            SessionEnd::Stopped if want_reboot => {
+                // Operator reboot: come back after the companion restarts.
+                backoff = Duration::from_secs(5);
+                clear_session_telemetry(status);
+                write_status(status, "reconnecting", "Companion reboot sent. Reconnecting…");
+                backoff
             }
-        } else {
-            let cmd = rx.recv().await;
-            if !apply_idle_cmd(cmd, &db, &status, &mut desired).await {
-                break;
+            SessionEnd::Stopped => {
+                clear_session_telemetry(status);
+                write_status(status, "disconnected", "Disconnected.");
+                return;
             }
+            SessionEnd::Lost(error) => {
+                let error = if ctx.transport == "usb" {
+                    clarify_usb_session_error(&error)
+                } else {
+                    error
+                };
+                if ctx.transport == "usb" && is_fatal_usb_session_error(&error) {
+                    clear_session_telemetry(status);
+                    write_status(status, "disconnected", error.clone());
+                    let _ = ctx.pool.db.set_radio_error(ctx.id, &error);
+                    return;
+                }
+                if started.elapsed() > Duration::from_secs(30) {
+                    backoff = Duration::from_secs(2);
+                }
+                clear_session_telemetry(status);
+                write_status(status, "reconnecting", error.clone());
+                let _ = ctx.pool.db.set_radio_error(ctx.id, &error);
+                let wait = backoff;
+                backoff = (backoff * 2).min(Duration::from_secs(30));
+                wait
+            }
+        };
+        if !wait_or_stop(status, &mut rx, &mut stop, wait).await {
+            clear_session_telemetry(status);
+            write_status(status, "disconnected", "Disconnected.");
+            return;
         }
     }
-}
-
-fn status_detail(status: &Mutex<RadioStatus>) -> String {
-    status
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
-        .detail
-        .clone()
-}
-
-fn radio_id(db: &Db, name: &str) -> Option<i64> {
-    db.upsert_radio("ble", name, "Companion").ok()
 }
 
 fn scanned_label(status: &Mutex<RadioStatus>, target: &str) -> String {
@@ -1355,150 +2185,6 @@ fn stable_radio_address(status: &Mutex<RadioStatus>, target: &str) -> String {
         })
         .map(|device| device.address.clone())
         .unwrap_or_else(|| target.to_string())
-}
-
-/// Returns false when the command channel has closed.
-async fn apply_idle_cmd(
-    cmd: Option<RadioCmd>,
-    db: &Db,
-    status: &Mutex<RadioStatus>,
-    desired: &mut Option<String>,
-) -> bool {
-    match cmd {
-        None => false,
-        Some(RadioCmd::Scan) => {
-            write_status(status, "scanning", "Listening for nearby Bluetooth devices…");
-            match discover_radios(Duration::from_secs(5)).await {
-                Ok(devices) => {
-                    let companions = devices.iter().filter(|device| device.companion).count();
-                    let count = devices.len();
-                    let mut guard = status.lock().unwrap_or_else(|err| err.into_inner());
-                    guard.devices = devices;
-                    guard.state = "disconnected".into();
-                    guard.detail = if count == 0 {
-                        "No Bluetooth devices answered. Confirm the adapter is on and the radio is powered.".into()
-                    } else if companions == 0 {
-                        format!("Found {count} devices. None advertised the MeshCore companion service. Match the upstairs radio by name and address.")
-                    } else {
-                        format!("Found {count} devices, {companions} advertising the MeshCore companion service.")
-                    };
-                }
-                Err(err) => write_status(status, "error", err),
-            }
-            true
-        }
-        Some(RadioCmd::Pair { target, pin }) => {
-            let target = target.trim().to_string();
-            if target.is_empty() {
-                write_status(status, "error", "Enter the Bluetooth name or address of the radio.");
-            } else {
-                write_status(
-                    status,
-                    "pairing",
-                    "Pairing with the radio. Enter the PIN shown on the radio if asked by the system.",
-                );
-                match crate::ble_pair::ensure_paired(&target, pin).await {
-                    Ok(()) => {
-                        let address = stable_radio_address(status, &target);
-                        let label = scanned_label(status, &target);
-                        let _ = db.remember_radio("ble", &address, &label);
-                        *desired = Some(address);
-                    }
-                    Err(err) => write_status(status, "error", err),
-                }
-            }
-            true
-        }
-        Some(RadioCmd::Reconnect(target)) => {
-            let target = target.trim().to_string();
-            if target.is_empty() {
-                write_status(status, "error", "Choose a saved companion radio first.");
-            } else {
-                let address = stable_radio_address(status, &target);
-                let label = scanned_label(status, &target);
-                let _ = db.remember_radio("ble", &address, &label);
-                write_status(status, "connecting", format!("Reconnecting to {address}…"));
-                *desired = Some(address);
-            }
-            true
-        }
-        Some(RadioCmd::Disconnect) => {
-            *desired = None;
-            write_status(status, "disconnected", "Disconnected.");
-            true
-        }
-        Some(RadioCmd::ApplyName(_)) => {
-            write_status(status, "disconnected", "Connect the radio before applying the advert name.");
-            true
-        }
-        Some(RadioCmd::SendChannel { reply, .. }) => {
-            let msg = "Connect the radio before sending. The message was not transmitted.";
-            push_send_note(status, msg);
-            if let Some(reply) = reply {
-                let _ = reply.send(Err(msg.into()));
-            }
-            write_status(status, "disconnected", msg);
-            true
-        }
-        Some(RadioCmd::PushChannel { .. }) => {
-            write_status(
-                status,
-                "disconnected",
-                "Connect the radio before changing channels or sending.",
-            );
-            true
-        }
-        Some(RadioCmd::ClearChannel { reply, .. }) => {
-            let msg = "Connect the radio before clearing a channel slot.";
-            if let Some(reply) = reply {
-                let _ = reply.send(Err(msg.into()));
-            }
-            write_status(status, "disconnected", msg);
-            true
-        }
-        Some(RadioCmd::RunCli { .. }) => {
-            push_cli_line(
-                status,
-                "error: Connect the radio before running CLI commands.",
-            );
-            write_status(
-                status,
-                "disconnected",
-                "Connect the radio before changing device settings.",
-            );
-            true
-        }
-        Some(RadioCmd::RefreshDeviceSettings)
-        | Some(RadioCmd::SetCustomVar { .. })
-        | Some(RadioCmd::SetCoords { .. })
-        | Some(RadioCmd::SetTxPower(_))
-        | Some(RadioCmd::SetRadioParams { .. })
-        | Some(RadioCmd::SetPathHashMode(_))
-        | Some(RadioCmd::SetAdvLocPolicy(_))
-        | Some(RadioCmd::SetDefaultFloodScope(_))
-        | Some(RadioCmd::SendAdvert { .. })
-        | Some(RadioCmd::Reboot)
-        | Some(RadioCmd::ProbeNoise) => {
-            write_status(
-                status,
-                "disconnected",
-                "Connect the radio before changing device settings.",
-            );
-            true
-        }
-        Some(RadioCmd::DiscoverRegions { reply }) => {
-            let _ = reply.send(Err(
-                "Connect the radio before scanning regions.".into(),
-            ));
-            true
-        }
-        Some(RadioCmd::DiscoverNodes { reply, .. }) => {
-            let _ = reply.send(Err(
-                "Connect the radio before discovering nodes.".into(),
-            ));
-            true
-        }
-    }
 }
 
 fn push_cli_line(status: &Mutex<RadioStatus>, line: impl Into<String>) {
@@ -1851,6 +2537,7 @@ async fn transmit_channel_message(
     radio_id: i64,
     slot: u8,
     text: &str,
+    is_primary: bool,
 ) -> Result<(), String> {
     let text = text.trim();
     if text.is_empty() {
@@ -1909,7 +2596,9 @@ async fn transmit_channel_message(
             }
             // Companion does not echo our own TX back as ChannelMsgRecv — run
             // METIS-INFO bot commands locally so the operator can test from HQ.
-            maybe_handle_local_metis_command(db, slot, text);
+            if is_primary {
+                maybe_handle_local_metis_command(db, slot, text);
+            }
             Ok(())
         }
         Err(err) => {
@@ -2033,30 +2722,92 @@ async fn apply_remote_cli(
 enum SessionEnd {
     Stopped,
     Lost(String),
-    Switch(String),
+}
+
+/// The companion's own identity from `appstart`. Only the primary writes it as the HQ identity.
+struct SelfIdentity {
+    pubkey: String,
+    name: String,
+    adv_lat: i32,
+    adv_lon: i32,
+    raw: serde_json::Value,
+}
+
+/// Record this companion as the HQ node and site settings. Primary companion only.
+fn apply_hq_identity(db: &Db, ident: &SelfIdentity) -> Result<(), String> {
+    db.save_hq(&ident.pubkey, &ident.name, ident.adv_lat, ident.adv_lon, &ident.raw)
+        .map_err(|err| err.to_string())?;
+    contact_qr::enqueue_contact_qr(&ident.pubkey);
+    if !ident.name.trim().is_empty() {
+        let _ = db.set_setting("hq_name", ident.name.trim());
+    }
+    let (lat, lon) = crate::db::coords_from_micro(ident.adv_lat, ident.adv_lon);
+    if let (Some(lat), Some(lon)) = (lat, lon) {
+        let _ = db.set_setting("hq_lat", &format!("{lat:.6}"));
+        let _ = db.set_setting("hq_lon", &format!("{lon:.6}"));
+    }
+    Ok(())
+}
+
+/// Channel-table work only the primary companion does: read its slots, push the
+/// HQ channels, and wipe slots the operator soft-deleted. Errors that mean the
+/// link is dead are returned; other failures are logged.
+async fn primary_channel_setup(
+    db: &Db,
+    secrets: &Secrets,
+    commands: &meshcore_rs::commands::CommandHandler,
+    max_channels: u8,
+    status: &Mutex<RadioStatus>,
+) -> Result<(), String> {
+    write_sync(
+        status,
+        SyncPhase::Channels,
+        "Syncing channels…",
+        Some((0, max_channels as u32)),
+    );
+    // Channel sync failure (including first-slot timeout on a dead link)
+    // must not fall through to "Companion ready".
+    if let Err(err) = sync_channels(db, secrets, commands, max_channels, status).await {
+        hq_log!(warn, "channel sync: {err}");
+        return Err(err);
+    }
+    if let Err(err) = push_channel(db, secrets, commands, max_channels).await {
+        hq_log!(warn, "channel setup: {err}");
+        if is_link_error(&err) {
+            return Err(err);
+        }
+    }
+    // Soft-delete is local; companion still holds the slot until we blank it.
+    if let Err(err) = clear_soft_deleted_radio_slots(db, commands).await {
+        hq_log!(warn, "clear soft-deleted channels: {err}");
+        if is_link_error(&err) {
+            return Err(err);
+        }
+    }
+    Ok(())
 }
 
 async fn run_session(
-    db: &Arc<Db>,
-    secrets: &Secrets,
-    status: &Arc<Mutex<RadioStatus>>,
+    ctx: &SlotCtx,
     rx: &mut UnboundedReceiver<RadioCmd>,
-    name: &str,
     live: &Mutex<Option<Arc<MeshCore>>>,
-    scan_cancel: &Arc<AtomicBool>,
 ) -> SessionEnd {
-    let meshcore = match MeshCore::ble_connect(name).await {
+    let db = &ctx.pool.db;
+    let secrets: &Secrets = &ctx.pool.secrets;
+    let status = &ctx.status;
+    let name = ctx.address.as_str();
+    let radio = ctx.id;
+    let scan_cancel = &ctx.scan_cancel;
+    let meshcore = match connect_transport(&ctx.transport, name).await {
         Ok(meshcore) => Arc::new(meshcore),
-        Err(err) => return SessionEnd::Lost(err.to_string()),
+        Err(err) => return SessionEnd::Lost(err),
     };
     // Shared so an operator Disconnect can tear the link down even while this
     // session is stuck mid-sync or waiting on the command lock.
     *live.lock().unwrap_or_else(|err| err.into_inner()) = Some(meshcore.clone());
-    let radio = match db.upsert_radio("ble", name, "Companion") {
-        Ok(id) => id,
-        Err(err) => return SessionEnd::Lost(err.to_string()),
-    };
 
+    let identity: Option<SelfIdentity>;
+    let mut channel_setup_done = false;
     let max_channels;
     {
         let commands = meshcore.commands().lock().await;
@@ -2079,40 +2830,46 @@ async fn run_session(
                     "sf": info.sf,
                     "cr": info.cr,
                 });
-                if let Err(err) = db.save_hq(&pubkey, &info.name, info.adv_lat, info.adv_lon, &raw) {
-                    return SessionEnd::Lost(err.to_string());
-                }
-                contact_qr::enqueue_contact_qr(&pubkey);
                 let label = if info.name.trim().is_empty() {
                     name
                 } else {
                     info.name.trim()
                 };
-                if !info.name.trim().is_empty() {
-                    let _ = db.set_setting("hq_name", info.name.trim());
-                }
-                let _ = db.remember_radio("ble", name, label);
+                let _ = db.remember_radio(&ctx.transport, name, label);
                 let (lat, lon) = crate::db::coords_from_micro(info.adv_lat, info.adv_lon);
-                if let (Some(lat), Some(lon)) = (lat, lon) {
-                    let _ = db.set_setting("hq_lat", &format!("{lat:.6}"));
-                    let _ = db.set_setting("hq_lon", &format!("{lon:.6}"));
+                {
+                    let mut guard = status.lock().unwrap_or_else(|err| err.into_inner());
+                    guard.hq_lat = lat;
+                    guard.hq_lon = lon;
+                    guard.tx_power = Some(info.tx_power);
+                    guard.max_tx_power = Some(info.max_tx_power);
+                    guard.radio_freq_mhz = Some(info.radio_freq as f64 / 1000.0);
+                    guard.radio_bw_khz = Some(info.radio_bw as f64 / 1000.0);
+                    guard.radio_sf = Some(info.sf);
+                    guard.radio_cr = Some(info.cr);
+                    guard.adv_loc_policy = Some(info.adv_loc_policy);
+                    guard.manual_add_contacts = info.manual_add_contacts;
+                    guard.telemetry_mode_base = info.telemetry_mode_base;
+                    guard.telemetry_mode_loc = info.telemetry_mode_loc;
+                    guard.telemetry_mode_env = info.telemetry_mode_env;
+                    guard.multi_acks = info.multi_acks;
+                    guard.public_key = pubkey.clone();
                 }
-                let mut guard = status.lock().unwrap_or_else(|err| err.into_inner());
-                guard.hq_lat = lat;
-                guard.hq_lon = lon;
-                guard.tx_power = Some(info.tx_power);
-                guard.max_tx_power = Some(info.max_tx_power);
-                guard.radio_freq_mhz = Some(info.radio_freq as f64 / 1000.0);
-                guard.radio_bw_khz = Some(info.radio_bw as f64 / 1000.0);
-                guard.radio_sf = Some(info.sf);
-                guard.radio_cr = Some(info.cr);
-                guard.adv_loc_policy = Some(info.adv_loc_policy);
-                guard.manual_add_contacts = info.manual_add_contacts;
-                guard.telemetry_mode_base = info.telemetry_mode_base;
-                guard.telemetry_mode_loc = info.telemetry_mode_loc;
-                guard.telemetry_mode_env = info.telemetry_mode_env;
-                guard.multi_acks = info.multi_acks;
-                guard.public_key = pubkey;
+                let ident = SelfIdentity {
+                    pubkey,
+                    name: info.name.clone(),
+                    adv_lat: info.adv_lat,
+                    adv_lon: info.adv_lon,
+                    raw,
+                };
+                // The first connected companion becomes primary when none is set.
+                ctx.set_link(true);
+                if ctx.is_primary() {
+                    if let Err(err) = apply_hq_identity(db, &ident) {
+                        return SessionEnd::Lost(err);
+                    }
+                }
+                identity = Some(ident);
             }
             Err(err) => return SessionEnd::Lost(err.to_string()),
         }
@@ -2171,34 +2928,19 @@ async fn run_session(
         // Slow/empty dumps can retry from the live loop; a dead link must not.
         if let Err(err) = sync_contacts(db, &commands, meshcore.dispatcher(), Some(status)).await {
             hq_log!(warn, "contact sync: {err}");
-            if is_ble_link_error(&err) {
+            if is_link_error(&err) {
                 return SessionEnd::Lost(err);
             }
         }
-        write_sync(
-            status,
-            SyncPhase::Channels,
-            "Syncing channels…",
-            Some((0, max_channels as u32)),
-        );
-        // Channel sync failure (including first-slot timeout on a dead link)
-        // must not fall through to "Companion ready".
-        if let Err(err) = sync_channels(db, secrets, &commands, max_channels, status).await {
-            hq_log!(warn, "channel sync: {err}");
-            return SessionEnd::Lost(err);
-        }
-        if let Err(err) = push_channel(db, secrets, &commands, max_channels).await {
-            hq_log!(warn, "channel setup: {err}");
-            if is_ble_link_error(&err) {
+        // Slot numbers are per radio. Only the primary reads its channel table into
+        // the database and receives the HQ channels; a secondary waits for promotion.
+        if ctx.is_primary() {
+            if let Err(err) =
+                primary_channel_setup(db, secrets, &commands, max_channels, status).await
+            {
                 return SessionEnd::Lost(err);
             }
-        }
-        // Soft-delete is local; companion still holds the slot until we blank it.
-        if let Err(err) = clear_soft_deleted_radio_slots(db, &commands).await {
-            hq_log!(warn, "clear soft-deleted channels: {err}");
-            if is_ble_link_error(&err) {
-                return SessionEnd::Lost(err);
-            }
+            channel_setup_done = true;
         }
         // Cap the initial queue drain. On a busy Public channel, new RF traffic
         // can refill the companion queue forever — holding this lock for hours
@@ -2257,7 +2999,7 @@ async fn run_session(
         // deadlocked the session forever (tokio Mutex is not reentrant).
         if let Err(err) = refresh_custom_vars(&commands, status).await {
             hq_log!(debug, "custom vars: {err}");
-            if is_ble_link_error(&err) {
+            if is_link_error(&err) {
                 return SessionEnd::Lost(err);
             }
         }
@@ -2291,6 +3033,7 @@ async fn run_session(
 
     let mut replies: HashMap<String, Instant> = HashMap::new();
     let mut pushed_generation = 0i64;
+    let mut was_primary = ctx.is_primary();
     let mut last_battery = Instant::now();
     // Contacts were just synced during connect.
     let mut last_advert_sync = Instant::now();
@@ -2330,22 +3073,8 @@ async fn run_session(
                         let _ = meshcore.disconnect().await;
                         return SessionEnd::Stopped;
                     }
-                    Some(RadioCmd::Pair { target: next, pin }) if next.trim() != name => {
-                        let next = next.trim().to_string();
-                        write_status(status, "pairing", "Pairing with the next radio…");
-                        if let Err(err) = crate::ble_pair::ensure_paired(&next, pin).await {
-                            write_status(status, "connected", err);
-                            continue;
-                        }
-                        let _ = db.remember_radio("ble", &next, "Companion");
-                        let _ = meshcore.disconnect().await;
-                        return SessionEnd::Switch(next);
-                    }
-                    Some(RadioCmd::Reconnect(next)) if next.trim() != name => {
-                        let next = next.trim().to_string();
-                        let _ = db.set_setting("radio_name", &next);
-                        let _ = meshcore.disconnect().await;
-                        return SessionEnd::Switch(next);
+                    Some(cmd) if cmd.needs_primary() && !ctx.is_primary() => {
+                        reject_cmd(cmd, status, NOT_PRIMARY_REASON);
                     }
                     Some(RadioCmd::ApplyName(advert)) => {
                         let advert = advert.trim().to_string();
@@ -2400,7 +3129,14 @@ async fn run_session(
                     Some(RadioCmd::SendChannel { slot, text, reply }) => {
                         hq_log!(debug, "channel send: handling slot {slot}");
                         let result = transmit_channel_message(
-                            db, &meshcore, status, name, radio, slot, &text,
+                            db,
+                            &meshcore,
+                            status,
+                            name,
+                            radio,
+                            slot,
+                            &text,
+                            ctx.is_primary(),
                         )
                         .await;
                         if let Err(err) = &result {
@@ -2683,16 +3419,14 @@ async fn run_session(
                             Err(err) => write_status(status, "connected", err),
                         }
                     }
-                    Some(RadioCmd::Scan)
-                    | Some(RadioCmd::Pair { .. })
-                    | Some(RadioCmd::Reconnect(_)) => {}
                 }
             }
             event = event_rx.recv() => {
                 match event {
                     None => return SessionEnd::Lost("Radio event stream ended.".into()),
                     Some(event) if event.event_type == EventType::Disconnected => {
-                        return SessionEnd::Lost("Bluetooth link closed.".into());
+                        let link = if ctx.transport == "usb" { "USB" } else { "Bluetooth" };
+                        return SessionEnd::Lost(format!("{link} link closed."));
                     }
                     Some(event) if event.event_type == EventType::MessagesWaiting => {
                         // Spawn so a slow get_msg drain cannot block SendChannel
@@ -2710,7 +3444,9 @@ async fn run_session(
                             need_contact_retry = true;
                             contact_retry_at = Instant::now();
                         }
-                        if let Err(err) = handle_event(db, &meshcore, event, radio, true).await {
+                        // Bot replies only on the primary; every radio still ingests history.
+                        let live_bot = ctx.is_primary();
+                        if let Err(err) = handle_event(db, &meshcore, event, radio, live_bot).await {
                             hq_log!(warn, "event: {err}");
                         }
                     }
@@ -2718,11 +3454,50 @@ async fn run_session(
             }
             _ = tick.tick() => {
                 let _ = db.fail_stale_tx_messages(90);
-                if let Err(err) = flush_one_outbound(db, &meshcore, &mut replies).await {
-                    hq_log!(warn, "send: {err}");
+                let primary = ctx.is_primary();
+                if primary {
+                    if !was_primary {
+                        hq_log!(info, "radio {radio} took over as primary companion");
+                        if let Some(ident) = identity.as_ref() {
+                            if let Err(err) = apply_hq_identity(db, ident) {
+                                hq_log!(warn, "HQ identity: {err}");
+                            }
+                        }
+                        if !channel_setup_done {
+                            // Promoted from secondary: read its channel table and push HQ
+                            // channels off the select arm so sends stay responsive.
+                            channel_setup_done = true;
+                            pushed_generation = db.channel_generation().unwrap_or(0);
+                            let db = Arc::clone(db);
+                            let secrets = Arc::clone(&ctx.pool.secrets);
+                            let meshcore = meshcore.clone();
+                            let status = Arc::clone(status);
+                            tokio::spawn(async move {
+                                let Ok(commands) =
+                                    tokio::time::timeout(SEND_LOCK_WAIT, meshcore.commands().lock())
+                                        .await
+                                else {
+                                    hq_log!(warn, "promotion channel setup: radio busy");
+                                    return;
+                                };
+                                if let Err(err) = primary_channel_setup(
+                                    &db, &secrets, &commands, max_channels, &status,
+                                )
+                                .await
+                                {
+                                    hq_log!(warn, "promotion channel setup: {err}");
+                                }
+                                write_sync(&status, SyncPhase::Ready, "Companion ready", None);
+                            });
+                        }
+                    }
+                    if let Err(err) = flush_one_outbound(db, &meshcore, radio, &mut replies).await {
+                        hq_log!(warn, "send: {err}");
+                    }
                 }
+                was_primary = primary;
                 let generation = db.channel_generation().unwrap_or(0);
-                if generation != pushed_generation {
+                if primary && generation != pushed_generation {
                     if let Some(commands) = lock_commands_brief(&meshcore).await {
                         match push_channel(db, secrets, &commands, max_channels).await {
                             Ok(true) => pushed_generation = generation,
@@ -2919,7 +3694,7 @@ async fn sync_contacts(
     Ok(())
 }
 
-fn is_ble_link_error(err: &str) -> bool {
+fn is_link_error(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
     lower.contains("not connected")
         || lower.contains("disconnected")
@@ -2927,6 +3702,11 @@ fn is_ble_link_error(err: &str) -> bool {
         || lower.contains("link closed")
         || lower.contains("unresponsive")
         || lower.contains("link lost")
+        // USB serial drops (unplugged cable, reset companion).
+        || lower.contains("broken pipe")
+        || lower.contains("input/output error")
+        || lower.contains("no such device")
+        || lower.contains("port closed")
 }
 
 fn is_channel_query_timeout(err: &str) -> bool {
@@ -2967,7 +3747,7 @@ async fn clear_soft_deleted_radio_slots(
                 if let Err(err) = clear_radio_channel_slot(commands, idx).await {
                     let msg = err.to_string();
                     hq_log!(warn, "clear soft-deleted `{name}` slot {idx}: {msg}");
-                    if is_ble_link_error(&msg) {
+                    if is_link_error(&msg) {
                         return Err(msg);
                     }
                 }
@@ -2976,7 +3756,7 @@ async fn clear_soft_deleted_radio_slots(
             Err(err) => {
                 let msg = err.to_string();
                 hq_log!(debug, "get_channel({idx}) while clearing soft-deleted: {msg}");
-                if is_ble_link_error(&msg) {
+                if is_link_error(&msg) {
                     return Err(msg);
                 }
             }
@@ -3050,7 +3830,7 @@ async fn sync_channels(
             Err(err) => {
                 let msg = err.to_string();
                 hq_log!(debug, "get_channel({idx}): {msg}");
-                if is_ble_link_error(&msg) {
+                if is_link_error(&msg) {
                     return Err(format!("Channel sync stopped at slot {idx}: {msg}"));
                 }
                 // meshcore-rs often surfaces a dead GATT link as a plain timeout
@@ -3060,7 +3840,7 @@ async fn sync_channels(
                 if is_channel_query_timeout(&msg) {
                     if completed == 0 {
                         return Err(format!(
-                            "Bluetooth link unresponsive during channel sync (slot {idx}): {msg}"
+                            "Radio link unresponsive during channel sync (slot {idx}): {msg}"
                         ));
                     }
                     // Timeout on a later slot usually means the table ended or the
@@ -3090,34 +3870,51 @@ async fn push_channel(
     commands: &meshcore_rs::commands::CommandHandler,
     max_channels: u8,
 ) -> Result<bool, String> {
-    let Some(secret) = secrets.load(CHANNEL_NAME).map_err(|err| err)? else {
-        return Ok(false);
-    };
-    // Prefer the existing METIS-INFO slot. Never stomp another channel's slot
-    // (that used to leave two DB rows on slot 1 and break private sends).
-    let slot = db
-        .list_channels()
-        .ok()
-        .and_then(|rows| {
-            rows.into_iter()
-                .find(|row| row.name.eq_ignore_ascii_case(CHANNEL_NAME))
-                .map(|row| row.slot as u8)
-        })
-        .or_else(|| {
-            db.next_channel_slot()
-                .ok()
-                .map(|slot| slot as u8)
-                .filter(|slot| (*slot as u8) < max_channels)
-        })
+    let info_name = db
+        .info_channel_name()
+        .map_err(|err| err.to_string())?;
+    let net_name = db.net_channel_name().map_err(|err| err.to_string())?;
+    let info_secret = db
+        .ensure_channel_secret(secrets)
+        .map_err(|err| err.to_string())?;
+    let net_secret = db
+        .ensure_net_channel_secret(secrets)
+        .map_err(|err| err.to_string())?;
+
+    let rows = db.list_channels().map_err(|err| err.to_string())?;
+    let info_slot = rows
+        .iter()
+        .find(|row| row.name.eq_ignore_ascii_case(&info_name))
+        .map(|row| row.slot as u8)
         .unwrap_or(if max_channels > 1 { 1 } else { 0 });
-    let slot = slot.min(max_channels.saturating_sub(1));
+    let net_slot = rows
+        .iter()
+        .find(|row| row.name.eq_ignore_ascii_case(&net_name))
+        .map(|row| row.slot as u8)
+        .unwrap_or(if max_channels > 2 { 2 } else { info_slot.saturating_add(1) });
+    let info_slot = info_slot.min(max_channels.saturating_sub(1));
+    let mut net_slot = net_slot.min(max_channels.saturating_sub(1));
+    if net_slot == info_slot && max_channels > 2 {
+        net_slot = if info_slot == 1 { 2 } else { 1 };
+    }
+
+    // Prefer existing HQ slots. Never stomp another channel's slot
+    // (that used to leave two DB rows on one slot and break private sends).
     commands
-        .set_channel(slot, CHANNEL_NAME, &secret)
+        .set_channel(info_slot, &info_name, &info_secret)
         .await
         .map_err(|err| err.to_string())?;
-    let _ = db.ensure_channel_row(CHANNEL_NAME, slot as i64, "private", "emergency");
-    db.set_setting("channel_slot", &slot.to_string())
+    let _ = db.ensure_channel_row(&info_name, info_slot as i64, "private", "info");
+    db.set_setting("channel_slot", &info_slot.to_string())
         .map_err(|err| err.to_string())?;
+
+    if max_channels > 1 && net_slot != info_slot {
+        commands
+            .set_channel(net_slot, &net_name, &net_secret)
+            .await
+            .map_err(|err| err.to_string())?;
+        let _ = db.ensure_channel_row(&net_name, net_slot as i64, "private", "net");
+    }
     Ok(true)
 }
 
@@ -3128,8 +3925,11 @@ async fn push_named_channel(
     slot: u8,
     name: &str,
 ) -> Result<(), String> {
-    let secret = if name.eq_ignore_ascii_case(CHANNEL_NAME) {
+    let secret = if db.is_info_channel(name) {
         db.ensure_channel_secret(secrets)
+            .map_err(|err| err.to_string())?
+    } else if db.is_net_channel(name) {
+        db.ensure_net_channel_secret(secrets)
             .map_err(|err| err.to_string())?
     } else if let Some(existing) = secrets.load(name).map_err(|err| err.to_string())? {
         existing
@@ -3683,6 +4483,7 @@ async fn send_direct_text(
 async fn flush_one_outbound(
     db: &Arc<Db>,
     meshcore: &MeshCore,
+    radio_id: i64,
     replies: &mut HashMap<String, Instant>,
 ) -> Result<(), String> {
     let Some(outbound) = db.next_outbound().map_err(|err| err.to_string())? else {
@@ -3733,7 +4534,7 @@ async fn flush_one_outbound(
                 None,
                 &raw,
                 "sent",
-                None,
+                Some(radio_id),
             );
             if automatic {
                 replies.insert(outbound.pubkey.clone(), Instant::now());
@@ -4022,6 +4823,95 @@ mod tests {
         assert_eq!(battery_pct_from_mv(3700), 30);
         assert_eq!(battery_pct_from_mv(3000), 0);
         assert!(battery_pct_from_mv(4024) < 100);
+    }
+
+    #[test]
+    fn primary_prefers_the_saved_choice_when_connected() {
+        assert_eq!(pick_primary(Some(7), &[3, 7, 9]), Some(7));
+    }
+
+    #[test]
+    fn primary_promotes_lowest_connected_when_choice_drops() {
+        // Saved primary 2 is not connected: lowest id among the rest wins.
+        assert_eq!(pick_primary(Some(2), &[9, 4, 6]), Some(4));
+        assert_eq!(pick_primary(None, &[5, 3]), Some(3));
+    }
+
+    #[test]
+    fn primary_is_none_without_connected_companions() {
+        assert_eq!(pick_primary(Some(1), &[]), None);
+        assert_eq!(pick_primary(None, &[]), None);
+    }
+
+    #[test]
+    fn only_disconnect_skips_the_primary_gate() {
+        assert!(!RadioCmd::Disconnect.needs_primary());
+        assert!(RadioCmd::SendAdvert { flood: false }.needs_primary());
+        assert!(RadioCmd::Reboot.needs_primary());
+        assert!(RadioCmd::SendChannel {
+            slot: 1,
+            text: "hi".into(),
+            reply: None,
+        }
+        .needs_primary());
+    }
+
+    #[test]
+    fn secondary_refuses_channel_send_with_a_reason() {
+        let status = Mutex::new(RadioStatus::default());
+        let (tx, mut rx) = oneshot::channel();
+        reject_cmd(
+            RadioCmd::SendChannel {
+                slot: 1,
+                text: "hello".into(),
+                reply: Some(tx),
+            },
+            &status,
+            NOT_PRIMARY_REASON,
+        );
+        let err = rx.try_recv().expect("reply sent").expect_err("must refuse");
+        assert!(err.contains("not the primary"), "{err}");
+        let guard = status.lock().unwrap();
+        assert_eq!(guard.send_note, NOT_PRIMARY_REASON);
+        assert_eq!(guard.send_seq, 1);
+    }
+
+    #[test]
+    fn no_primary_message_is_command_specific() {
+        let send = RadioCmd::SendChannel {
+            slot: 0,
+            text: String::new(),
+            reply: None,
+        };
+        assert!(no_primary_reason(&send).contains("not transmitted"));
+        assert!(no_primary_reason(&RadioCmd::Reboot).contains("device settings"));
+    }
+
+    #[test]
+    fn usb_label_falls_back_to_the_path_leaf() {
+        assert_eq!(usb_fallback_label("/dev/ttyACM0"), "ttyACM0");
+        assert_eq!(usb_fallback_label("COM3"), "COM3");
+    }
+
+    #[test]
+    fn usb_permission_denied_is_fatal_with_os_hint() {
+        let msg = clarify_usb_connect_error("Failed to open serial port: Permission denied");
+        assert!(is_fatal_usb_session_error(&msg));
+        assert!(
+            msg.contains("dialout")
+                || msg.contains("USB accessories")
+                || msg.contains("COM port")
+                || msg.contains("serial port"),
+            "{msg}"
+        );
+        assert!(!is_fatal_usb_session_error("Connection reset by peer"));
+    }
+
+    #[test]
+    fn usb_selfinfo_timeout_is_fatal_with_companion_hint() {
+        let msg = clarify_usb_session_error("Timeout waiting for Some(SelfInfo)");
+        assert!(is_fatal_usb_session_error(&msg));
+        assert!(msg.to_ascii_lowercase().contains("companion"), "{msg}");
     }
 
     #[test]

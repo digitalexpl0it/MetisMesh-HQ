@@ -6,7 +6,12 @@ use std::path::{Path, PathBuf};
 
 use rand::RngCore;
 
+/// Default bot-home private channel name (override via `channel_info_name`).
 pub const CHANNEL_NAME: &str = "METIS-INFO";
+/// Default human/peer private channel name (override via `channel_net_name`).
+pub const NET_CHANNEL_NAME: &str = "METIS-NET";
+/// MeshCore packs names into `CHANNEL_NAME_LEN` (32) with a null terminator.
+pub const MAX_CHANNEL_NAME_BYTES: usize = 31;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecretStoreKind {
@@ -78,6 +83,14 @@ impl Secrets {
         self.load_file(name)
     }
 
+    /// Drop a secret account after a channel rename (best-effort).
+    pub fn forget(&self, name: &str) -> Result<(), String> {
+        if !self.prefer_file {
+            let _ = self.forget_keyring(name);
+        }
+        self.forget_file(name)
+    }
+
     fn store_keyring(&self, name: &str, secret: &[u8; 16]) -> Result<SecretStoreKind, String> {
         let entry = keyring::Entry::new("metis-mesh-hq", name).map_err(|err| err.to_string())?;
         entry
@@ -95,6 +108,14 @@ impl Secrets {
             Ok(value) => decode_hex_secret(&value).map(Some),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(_) => Ok(None),
+        }
+    }
+
+    fn forget_keyring(&self, name: &str) -> Result<(), String> {
+        let entry = keyring::Entry::new("metis-mesh-hq", name).map_err(|err| err.to_string())?;
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(err) => Err(err.to_string()),
         }
     }
 
@@ -117,6 +138,20 @@ impl Secrets {
             }
         }
         Ok(None)
+    }
+
+    fn forget_file(&self, name: &str) -> Result<(), String> {
+        let path = self.file_path();
+        if !path.exists() {
+            return Ok(());
+        }
+        let mut lines = self.read_lines();
+        let before = lines.len();
+        lines.retain(|line| line.split_whitespace().next() != Some(name));
+        if lines.len() == before {
+            return Ok(());
+        }
+        write_private(&path, lines.join("\n") + "\n")
     }
 
     fn file_path(&self) -> PathBuf {

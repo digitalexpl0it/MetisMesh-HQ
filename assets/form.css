@@ -7,6 +7,70 @@
 }
 
 /*
+ * App chrome. Some WebKit/Wry embeds treat banner landmarks (or <header>) as
+ * sticky/fixed overlays, so page content paints underneath the top bar.
+ * Keep the top bar in normal flex flow with an opaque background.
+ */
+.hq-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.hq-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.hq-right {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.hq-topbar {
+  position: relative !important;
+  top: auto !important;
+  inset: auto !important;
+  z-index: 10;
+  display: flex;
+  flex: 0 0 3.5rem;
+  align-items: center;
+  justify-content: space-between;
+  height: 3.5rem;
+  padding: 0 1.25rem;
+  border-bottom: 1px solid #ffffff14;
+  background-color: var(--color-background, #101418);
+}
+
+.hq-main {
+  position: relative;
+  z-index: 0;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 1.25rem;
+}
+
+.hq-main-map {
+  overflow: hidden;
+}
+
+/* Fill the main pane; avoid 100vh which ignores the top bar + footer. */
+.hq-page-fill {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+}
+
+/*
  * Overview dashboard grids. Arbitrary Tailwind grid templates are not in the
  * precompiled assets/tailwind.css, so these media queries own the layout.
  */

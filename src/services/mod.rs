@@ -4,6 +4,7 @@
 //! are enrolled-only, rate-limited, and capped at 160 bytes.
 
 mod ecowitt;
+pub mod map_upload;
 mod mqtt_weather;
 mod nws;
 mod poller;
@@ -12,6 +13,9 @@ mod station;
 mod weather;
 
 pub use ecowitt::{bump_ecowitt_config, ecowitt_pull_status_line, ecowitt_push_status_line};
+pub use map_upload::{
+    authorize_map_upload, map_upload_status_line, revoke_map_upload_auth,
+};
 pub use mqtt_weather::{
     bump_mqtt_weather_config, clear_mqtt_weather_password, default_json_template,
     mqtt_weather_status_line, password_file_present, save_mqtt_weather_password,

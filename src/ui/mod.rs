@@ -431,7 +431,7 @@ pub fn App() -> Element {
             document::Stylesheet { href: asset!("/assets/tailwind.css") }
             document::Stylesheet { href: asset!("/assets/form.css") }
         }
-        div { class: "flex h-screen flex-col overflow-hidden bg-background text-foreground",
+        div { class: "hq-shell bg-background text-foreground",
             PinSlideDown {
                 open: pin_open(),
                 target: pin_target(),
@@ -453,7 +453,7 @@ pub fn App() -> Element {
                     }
                 },
             }
-            div { class: "flex min-h-0 flex-1 overflow-hidden",
+            div { class: "hq-body",
                 nav { class: "flex {nav_width} shrink-0 flex-col border-r border-border bg-card transition-[width] duration-200",
                     div { class: "flex items-center gap-3 border-b border-border px-3 py-3",
                         button {
@@ -614,12 +614,12 @@ pub fn App() -> Element {
                         }
                     }
                 }
-                div { class: "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
-                    // Use a div (not <header>): some WebKit embeds style <header> as
-                    // overlay/sticky and page content then paints underneath the bar.
+                div { class: "hq-right",
+                    // Not role=banner: some WebKit/Wry embeds treat that landmark as a
+                    // fixed overlay so Messages/Weather paint under the top bar.
                     div {
-                        class: "relative z-10 flex h-14 shrink-0 items-center justify-between border-b border-border bg-background px-5",
-                        role: "banner",
+                        class: "hq-topbar",
+                        aria_label: "Headquarters status",
                         div { class: "flex min-w-0 items-center",
                             if let Some(src) = brand_logo.as_ref() {
                                 img {
@@ -639,9 +639,9 @@ pub fn App() -> Element {
                     }
                     div {
                         class: if page() == Page::Map {
-                            "min-h-0 flex-1 overflow-hidden p-5"
+                            "hq-main hq-main-map"
                         } else {
-                            "min-h-0 flex-1 overflow-auto p-5"
+                            "hq-main"
                         },
                         role: "main",
                         match page() {
@@ -2302,7 +2302,12 @@ fn RosterPage() -> Element {
                                                     span { "snr {snr:.1}" }
                                                 }
                                             }
-                                            p { class: "mt-1 whitespace-pre-wrap break-words text-xs", "{msg.text}" }
+                                            div { class: "mt-1 text-xs",
+                                                MessageBody {
+                                                    text: msg.text.clone(),
+                                                    outgoing: msg.direction == "tx",
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -2986,7 +2991,7 @@ fn MessagesPage() -> Element {
         }
         let dm_key = dm_pubkey.clone();
         return rsx! {
-            div { class: "mx-auto flex h-[calc(100vh-8rem)] max-w-4xl flex-col gap-3",
+            div { class: "hq-page-fill mx-auto max-w-4xl gap-3",
                 div { class: "flex flex-wrap items-center justify-between gap-3",
                     div { class: "flex min-w-0 items-center gap-3",
                         Button {
@@ -3031,7 +3036,10 @@ fn MessagesPage() -> Element {
                                             } else {
                                                 "min-w-[12rem] rounded-2xl rounded-bl-md bg-muted px-3 py-2.5 text-sm"
                                             },
-                                            p { class: "whitespace-pre-wrap break-words", "{message.text}" }
+                                            MessageBody {
+                                                text: message.text.clone(),
+                                                outgoing,
+                                            }
                                             p { class: "mt-1 text-[0.65rem] text-muted-foreground",
                                                 "{format_time(Some(message.received_at))}"
                                             }
@@ -3209,7 +3217,7 @@ fn MessagesPage() -> Element {
             });
         };
         return rsx! {
-            div { class: "mx-auto flex h-[calc(100vh-8rem)] max-w-4xl flex-col gap-3",
+            div { class: "hq-page-fill mx-auto max-w-4xl gap-3",
                 div { class: "flex flex-wrap items-center justify-between gap-3",
                     div { class: "flex min-w-0 items-center gap-3",
                         Button {
@@ -4111,8 +4119,19 @@ fn MessageBody(text: String, #[props(default)] outgoing: bool) -> Element {
     } else {
         "underline decoration-signal/70 underline-offset-2 hover:text-signal"
     };
+    let mesh_box = if outgoing {
+        "my-1 flex max-w-full items-start gap-2 rounded-md border border-sky-400/30 bg-sky-950/40 px-2 py-1.5"
+    } else {
+        "my-1 flex max-w-full items-start gap-2 rounded-md border border-border bg-background/70 px-2 py-1.5"
+    };
+    let mesh_btn = if outgoing {
+        "inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[0.65rem] text-sky-100 hover:bg-sky-400/15 cursor-pointer"
+    } else {
+        "inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[0.65rem] text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
+    };
     rsx! {
-        p { class: "whitespace-pre-wrap break-words",
+        // `div` so meshcore:// chips can be block-level without invalid nesting.
+        div { class: "whitespace-pre-wrap break-words",
             for (idx, part) in parts.into_iter().enumerate() {
                 {
                     match part {
@@ -4136,6 +4155,34 @@ fn MessageBody(text: String, #[props(default)] outgoing: bool) -> Element {
                                 "{url}"
                             }
                         },
+                        TextPart::MeshLink(url) => {
+                            let url_copy = url.clone();
+                            let label = shorten_mesh_link(&url);
+                            rsx! {
+                                div {
+                                    key: "{idx}",
+                                    class: "{mesh_box}",
+                                    title: "{url}",
+                                    code {
+                                        class: "min-w-0 flex-1 break-all font-mono text-[0.7rem] leading-snug text-foreground/90",
+                                        "{label}"
+                                    }
+                                    button {
+                                        class: "{mesh_btn}",
+                                        title: "Copy meshcore link",
+                                        onclick: move |_| {
+                                            copy_text_to_clipboard(&url_copy);
+                                            crate::toast::push(
+                                                crate::toast::ToastKind::Success,
+                                                "Copied meshcore link",
+                                            );
+                                        },
+                                        Icon { name: IconName::Copy, size: 12 }
+                                        "Copy"
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -4143,11 +4190,33 @@ fn MessageBody(text: String, #[props(default)] outgoing: bool) -> Element {
     }
 }
 
-#[derive(Clone)]
+fn copy_text_to_clipboard(text: &str) {
+    let escaped = text
+        .replace('\\', "\\\\")
+        .replace('`', "\\`")
+        .replace('$', "\\$");
+    let script = format!("navigator.clipboard.writeText(`{escaped}`).catch(() => {{}})");
+    document::eval(&script);
+}
+
+/// Shorten long meshcore:// URIs for the bubble; full value stays in title + Copy.
+fn shorten_mesh_link(url: &str) -> String {
+    const KEEP_HEAD: usize = 22;
+    const KEEP_TAIL: usize = 10;
+    if url.len() <= KEEP_HEAD + KEEP_TAIL + 3 {
+        return url.to_string();
+    }
+    format!("{}…{}", &url[..KEEP_HEAD], &url[url.len() - KEEP_TAIL..])
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum TextPart {
     Text(String),
     Mention(String),
+    /// http(s) — open in browser.
     Link(String),
+    /// meshcore:// — copy chip (no shell / unconfigured URL open).
+    MeshLink(String),
 }
 
 fn parse_message_parts(input: &str) -> Vec<TextPart> {
@@ -4212,23 +4281,38 @@ fn split_mentions(input: &str) -> Vec<TextPart> {
     parts
 }
 
+fn next_url_start(hay: &str) -> Option<(usize, &'static str)> {
+    let candidates = ["https://", "http://", "meshcore://"];
+    let mut best: Option<(usize, &'static str)> = None;
+    for scheme in candidates {
+        if let Some(pos) = hay.find(scheme) {
+            if best.map(|(b, _)| pos < b).unwrap_or(true) {
+                best = Some((pos, scheme));
+            }
+        }
+    }
+    best
+}
+
 fn linkify_text(input: &str) -> Vec<TextPart> {
     let mut parts = Vec::new();
     let mut rest = input;
-    while let Some(start) = rest.find("http://").or_else(|| rest.find("https://")) {
+    while let Some((start, scheme)) = next_url_start(rest) {
         if start > 0 {
             parts.push(TextPart::Text(rest[..start].to_string()));
         }
         let after = &rest[start..];
         let end = after
-            .find(|ch: char| ch.is_whitespace() || matches!(ch, ')' | ']' | '"' | '\''))
+            .find(|ch: char| ch.is_whitespace() || matches!(ch, ')' | ']' | '"' | '\'' | '<' | '>'))
             .unwrap_or(after.len());
         let mut url = after[..end].to_string();
         while url.ends_with(['.', ',', ';', ':', '!', '?']) {
             url.pop();
         }
-        if url.is_empty() {
+        if url.len() <= scheme.len() {
             parts.push(TextPart::Text(after[..end].to_string()));
+        } else if scheme == "meshcore://" {
+            parts.push(TextPart::MeshLink(url));
         } else {
             parts.push(TextPart::Link(url));
         }
@@ -4238,6 +4322,51 @@ fn linkify_text(input: &str) -> Vec<TextPart> {
         parts.push(TextPart::Text(rest.to_string()));
     }
     parts
+}
+
+#[cfg(test)]
+mod message_body_tests {
+    use super::{linkify_text, parse_message_parts, shorten_mesh_link, TextPart};
+
+    #[test]
+    fn linkifies_https_and_meshcore() {
+        let parts = linkify_text(
+            "see https://example.com/x and meshcore://aabbccddeeff00112233445566778899 here",
+        );
+        assert!(parts.iter().any(|p| matches!(p, TextPart::Link(u) if u.starts_with("https://"))));
+        assert!(parts
+            .iter()
+            .any(|p| matches!(p, TextPart::MeshLink(u) if u.starts_with("meshcore://"))));
+    }
+
+    #[test]
+    fn meshcore_only_message_is_one_chip() {
+        let url = "meshcore://1100eeb86d8060b5063e823c520562e412b9c931c9c090bf39a851e759fce4201d1c8be9e86aa6dfece6b5f233613488861c849";
+        let parts = parse_message_parts(url);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0], TextPart::MeshLink(url.into()));
+    }
+
+    #[test]
+    fn strips_trailing_punctuation_from_links() {
+        let parts = linkify_text("go https://map.meshcore.dev.");
+        assert_eq!(
+            parts,
+            vec![
+                TextPart::Text("go ".into()),
+                TextPart::Link("https://map.meshcore.dev".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn shortens_long_mesh_links() {
+        let url = "meshcore://1100eeb86d8060b5063e823c520562e412b9c931c9c090bf39a851e759fce4201d1c8be9e86aa6dfece6b5f233613488861c849";
+        let short = shorten_mesh_link(url);
+        assert!(short.contains('…'));
+        assert!(short.starts_with("meshcore://"));
+        assert!(short.ends_with("861c849") || short.len() < url.len());
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -4528,6 +4657,33 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
     let mut regions_tick = use_signal(|| 0u32);
     let mut confirm_purge = use_signal(|| false);
     let mut purge_note = use_signal(String::new);
+    let mut map_upload_enabled = use_signal(|| {
+        crate::services::setting_bool(&state().db, "svc_map_upload_enabled", false)
+    });
+    let mut map_upload_authorized = use_signal(|| {
+        crate::services::setting_bool(&state().db, "svc_map_upload_authorized", false)
+    });
+    let mut map_upload_dry_run = use_signal(|| {
+        crate::services::setting_bool(&state().db, "svc_map_upload_dry_run", false)
+    });
+    let mut map_upload_interval = use_signal(|| {
+        state()
+            .db
+            .setting("svc_map_upload_interval_secs")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "3600".into())
+    });
+    let mut map_upload_api = use_signal(|| {
+        state()
+            .db
+            .setting("svc_map_upload_api_url")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "https://map.meshcore.dev/api/v1/uploader/node".into())
+    });
+    let mut map_upload_note = use_signal(String::new);
+    let mut map_upload_tick = use_signal(|| 0u32);
     let mut backup_pass = use_signal(String::new);
     let mut backup_pass2 = use_signal(String::new);
     let mut backup_note = use_signal(String::new);
@@ -6322,10 +6478,141 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
             if hq_tab() == HqTab::Data {
             {
                 let _ = regions_tick();
+                let _ = map_upload_tick();
+                let map_status = crate::services::map_upload_status_line(&state().db);
                 let regions = crate::map_tiles::list_installed_regions(&state().db);
                 let active = crate::map_tiles::active_region_id(&state().db).unwrap_or_default();
                 let dl = crate::map_tiles::download_status();
                 rsx! {
+                    Card { title: "Community map upload", icon: Some(IconName::Map),
+                        p { class: "mb-3 text-sm text-muted-foreground",
+                            "Optional. When enabled and authorized, HQ posts overheard repeater / room / sensor ADVERTs that include GPS to map.meshcore.dev. Companions, Tracker trails, and HQ site pins stay local. Needs internet. Signing uses the primary companion — the private key is never stored in HQ."
+                        }
+                        ToggleSwitch {
+                            checked: map_upload_enabled(),
+                            label: "Upload infra GPS adverts".to_string(),
+                            hint: Some(map_status.clone()),
+                            onchange: move |next| {
+                                map_upload_enabled.set(next);
+                                crate::services::set_setting_bool(
+                                    &state().db,
+                                    "svc_map_upload_enabled",
+                                    next,
+                                );
+                                if !next {
+                                    crate::services::revoke_map_upload_auth(&state().db);
+                                    map_upload_authorized.set(false);
+                                }
+                                map_upload_tick.with_mut(|n| *n = n.wrapping_add(1));
+                            }
+                        }
+                        div { class: "mb-3 flex flex-wrap items-center gap-2",
+                            Button {
+                                kind: ButtonKind::Primary,
+                                disabled: !map_upload_enabled() || map_upload_authorized(),
+                                onclick: move |_| {
+                                    let radio = state().radio.clone();
+                                    let db = state().db.clone();
+                                    map_upload_note.set("Authorizing…".into());
+                                    spawn(async move {
+                                        match crate::services::authorize_map_upload(&db, &radio).await {
+                                            Ok(()) => {
+                                                map_upload_authorized.set(true);
+                                                map_upload_note.set(
+                                                    "Authorized. Primary companion will sign uploads.".into(),
+                                                );
+                                                crate::toast::push(
+                                                    crate::toast::ToastKind::Success,
+                                                    "Map upload authorized",
+                                                );
+                                            }
+                                            Err(err) => {
+                                                map_upload_authorized.set(false);
+                                                map_upload_note.set(err.clone());
+                                                crate::toast::push(
+                                                    crate::toast::ToastKind::Error,
+                                                    err,
+                                                );
+                                            }
+                                        }
+                                        map_upload_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                    });
+                                },
+                                if map_upload_authorized() { "Authorized" } else { "Authorize" }
+                            }
+                            if map_upload_authorized() {
+                                Button {
+                                    kind: ButtonKind::Ghost,
+                                    onclick: move |_| {
+                                        crate::services::revoke_map_upload_auth(&state().db);
+                                        map_upload_authorized.set(false);
+                                        map_upload_note.set("Authorization cleared.".into());
+                                        map_upload_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                    },
+                                    "Revoke"
+                                }
+                            }
+                        }
+                        p { class: "mb-3 text-xs text-muted-foreground",
+                            "Authorize once while the primary companion is connected. Private key stays on the radio (or briefly in RAM if firmware cannot sign)."
+                        }
+                        ToggleSwitch {
+                            checked: map_upload_dry_run(),
+                            disabled: !map_upload_enabled(),
+                            label: "Dry run (log only, no POST)".to_string(),
+                            onchange: move |next| {
+                                map_upload_dry_run.set(next);
+                                crate::services::set_setting_bool(
+                                    &state().db,
+                                    "svc_map_upload_dry_run",
+                                    next,
+                                );
+                                map_upload_tick.with_mut(|n| *n = n.wrapping_add(1));
+                            }
+                        }
+                        div { class: "mb-3 grid gap-2 sm:grid-cols-2",
+                            div { class: "flex flex-col gap-1",
+                                label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Min re-upload interval (seconds)" }
+                                TextInput {
+                                    value: map_upload_interval(),
+                                    placeholder: "3600".to_string(),
+                                    oninput: move |event: FormEvent| {
+                                        let value = event.value();
+                                        map_upload_interval.set(value.clone());
+                                        if let Ok(secs) = value.trim().parse::<i64>() {
+                                            if (60..7 * 24 * 3600).contains(&secs) {
+                                                let _ = state().db.set_setting(
+                                                    "svc_map_upload_interval_secs",
+                                                    value.trim(),
+                                                );
+                                            }
+                                        }
+                                    },
+                                }
+                            }
+                            div { class: "flex flex-col gap-1",
+                                label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "API URL" }
+                                TextInput {
+                                    value: map_upload_api(),
+                                    placeholder: "https://map.meshcore.dev/api/v1/uploader/node".to_string(),
+                                    oninput: move |event: FormEvent| {
+                                        let value = event.value();
+                                        map_upload_api.set(value.clone());
+                                        let trimmed = value.trim();
+                                        if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+                                            let _ = state().db.set_setting(
+                                                "svc_map_upload_api_url",
+                                                trimmed,
+                                            );
+                                        }
+                                    },
+                                }
+                            }
+                        }
+                        if !map_upload_note().is_empty() {
+                            p { class: "text-sm text-muted-foreground", "{map_upload_note()}" }
+                        }
+                    }
                     Card { title: "Offline map packs", icon: Some(IconName::Map),
                         p { class: "mb-3 text-sm text-muted-foreground",
                             "Installed packs only. Download new areas from Map (ZIP + radius). One pack covers Streets, Terrain, and Topo."

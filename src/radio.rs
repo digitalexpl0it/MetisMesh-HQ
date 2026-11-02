@@ -301,6 +301,15 @@ pub enum RadioCmd {
     },
     /// Probe noise floor via status requests for GPS contacts.
     ProbeNoise,
+    /// Sign bytes with the primary companion (Ed25519). Used by map upload.
+    SignBytes {
+        data: Vec<u8>,
+        reply: oneshot::Sender<Result<Vec<u8>, String>>,
+    },
+    /// Export private key into caller RAM only (never persisted by HQ).
+    ExportPrivateKey {
+        reply: oneshot::Sender<Result<[u8; 64], String>>,
+    },
 }
 
 impl RadioCmd {
@@ -330,6 +339,9 @@ fn no_primary_reason(cmd: &RadioCmd) -> &'static str {
         RadioCmd::RunCli { .. } => "Connect a primary companion radio before running CLI commands.",
         RadioCmd::SendLogin { .. } => {
             "Connect a primary companion radio before verifying infrastructure."
+        }
+        RadioCmd::SignBytes { .. } | RadioCmd::ExportPrivateKey { .. } => {
+            "Connect a primary companion radio before authorizing map uploads."
         }
         _ => "Connect a primary companion radio before changing device settings.",
     }
@@ -371,6 +383,12 @@ fn reject_cmd(cmd: RadioCmd, status: &Mutex<RadioStatus>, reason: &str) {
             let _ = reply.send(Err(reason.into()));
         }
         RadioCmd::SendLogin { reply, .. } => {
+            let _ = reply.send(Err(reason.into()));
+        }
+        RadioCmd::SignBytes { reply, .. } => {
+            let _ = reply.send(Err(reason.into()));
+        }
+        RadioCmd::ExportPrivateKey { reply } => {
             let _ = reply.send(Err(reason.into()));
         }
         RadioCmd::RunCli { .. } => push_cli_line(status, format!("error: {reason}")),
@@ -1258,6 +1276,25 @@ impl RadioHandle {
         self.pool.cancel_primary_scan();
     }
 
+    /// Ask the primary companion to Ed25519-sign `data` (map upload SHA-256 digest).
+    pub async fn sign_bytes(&self, data: Vec<u8>) -> Result<Vec<u8>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.pool
+            .route_to_primary(RadioCmd::SignBytes { data, reply: tx });
+        rx.await
+            .unwrap_or_else(|_| Err("Radio task ended.".into()))
+    }
+
+    /// One-shot private key export into process memory for map-upload fallback.
+    /// Caller must keep it in RAM only — never write to DB, keyring, or backup.
+    pub async fn export_private_key_ram(&self) -> Result<[u8; 64], String> {
+        let (tx, rx) = oneshot::channel();
+        self.pool
+            .route_to_primary(RadioCmd::ExportPrivateKey { reply: tx });
+        rx.await
+            .unwrap_or_else(|_| Err("Radio task ended.".into()))
+    }
+
     /// Status of the primary companion (or the first live radio), plus scan results.
     pub fn snapshot(&self) -> RadioStatus {
         self.pool.snapshot()
@@ -1369,6 +1406,8 @@ fn write_sync(
 }
 
 fn clear_session_telemetry(status: &Mutex<RadioStatus>) {
+    // Map-upload RAM key (if any) dies with the radio session.
+    crate::services::map_upload::clear_ram_private_key();
     let mut guard = status.lock().unwrap_or_else(|err| err.into_inner());
     guard.connected_name.clear();
     guard.sync_phase = SyncPhase::Idle;
@@ -3146,7 +3185,8 @@ async fn run_session(
 
     let (event_tx, mut event_rx) = unbounded_channel();
     let mut subscriptions = Vec::new();
-    for kind in [
+    let map_upload_on = crate::services::map_upload::upload_enabled(db);
+    let mut kinds = vec![
         EventType::ContactMsgRecv,
         EventType::ChannelMsgRecv,
         EventType::Advertisement,
@@ -3156,7 +3196,15 @@ async fn run_session(
         EventType::MessagesWaiting,
         EventType::LoginSuccess,
         EventType::LoginFailed,
-    ] {
+    ];
+    // LogData carries raw ADVERT packets for map.meshcore.dev (E4). Only when enabled
+    // so we do not flood BLE with every overheard frame by default.
+    let mut logdata_subscribed = false;
+    if map_upload_on {
+        kinds.push(EventType::LogData);
+        logdata_subscribed = true;
+    }
+    for kind in kinds {
         let event_tx = event_tx.clone();
         let subscription = meshcore
             .subscribe(kind, HashMap::new(), move |event| {
@@ -3165,11 +3213,12 @@ async fn run_session(
             .await;
         subscriptions.push(subscription);
     }
+    let event_tx_late = event_tx.clone();
     drop(event_tx);
     // Do NOT use meshcore-rs start_auto_message_fetching(): it spawns tasks that
     // hold the command mutex across get_msg and starve channel sends / CLI.
     // MessagesWaiting is drained in the session loop instead.
-    let _keep = subscriptions;
+    // Keep `subscriptions` mut so mid-session LogData subscribe can append.
 
     let mut replies: HashMap<String, Instant> = HashMap::new();
     let mut pushed_generation = 0i64;
@@ -3573,6 +3622,22 @@ async fn run_session(
                             run_noise_probe(db, meshcore, status).await;
                         });
                     }
+                    Some(RadioCmd::SignBytes { data, reply }) => {
+                        let commands = meshcore.commands().lock().await;
+                        let outcome = match commands.sign(&data, 128).await {
+                            Ok(sig) => Ok(sig),
+                            Err(err) => Err(err.to_string()),
+                        };
+                        let _ = reply.send(outcome);
+                    }
+                    Some(RadioCmd::ExportPrivateKey { reply }) => {
+                        let commands = meshcore.commands().lock().await;
+                        let outcome = match commands.export_private_key().await {
+                            Ok(key) => Ok(key),
+                            Err(err) => Err(err.to_string()),
+                        };
+                        let _ = reply.send(outcome);
+                    }
                     Some(RadioCmd::Reboot) => {
                         // Prefer the out-of-band reboot path (stop + reboot_pending).
                         // If we get here instead, still send the frame and leave.
@@ -3610,6 +3675,20 @@ async fn run_session(
                             need_contact_retry = true;
                             contact_retry_at = Instant::now();
                         }
+                        // Map uploader: rebuild infra ADVERTs from LogData (non-blocking).
+                        if let EventPayload::LogData(ref log) = event.payload {
+                            if ctx.is_primary() {
+                                let guard = status.lock().unwrap_or_else(|err| err.into_inner());
+                                let params = crate::services::map_upload::radio_params_from_mhz(
+                                    guard.radio_freq_mhz,
+                                    guard.radio_bw_khz,
+                                    guard.radio_sf,
+                                    guard.radio_cr,
+                                );
+                                drop(guard);
+                                crate::services::map_upload::try_enqueue(db, log, params);
+                            }
+                        }
                         // Infra CLI_DATA replies → CLI transcript (not chat enrollment).
                         if let EventPayload::ContactMessage(ref msg) = event.payload {
                             if msg.txt_type == 1 && !msg.text.trim().is_empty() {
@@ -3626,6 +3705,18 @@ async fn run_session(
             }
             _ = tick.tick() => {
                 let _ = db.fail_stale_tx_messages(90);
+                // Mid-session enable of map upload: subscribe LogData without reconnect.
+                if !logdata_subscribed && crate::services::map_upload::upload_enabled(db) {
+                    let event_tx = event_tx_late.clone();
+                    let subscription = meshcore
+                        .subscribe(EventType::LogData, HashMap::new(), move |event| {
+                            let _ = event_tx.send(event);
+                        })
+                        .await;
+                    subscriptions.push(subscription);
+                    logdata_subscribed = true;
+                    hq_log!(info, "map upload: subscribed LogData");
+                }
                 let primary = ctx.is_primary();
                 if primary {
                     if !was_primary {

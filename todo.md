@@ -61,7 +61,7 @@ HQ durability and sharing. One-off contact QR already exists (`meshcore://contac
 - [x] **E1** Backup / restore: encrypted archive (passphrase) of SQLite + channel secrets from keyring/`data/`; restore with confirm + audit entry; never leave secrets in cleartext zip
 - [x] **E2** Contact bulk export: JSON (or MeshCore-compatible list) of pubkey, name, type, optional last lat/lon — no secrets / private keys
 - [x] **E3** Contact bulk import into HQ DB: merge by pubkey; do **not** auto-push onto the radio contact table; “add to radio” stays deliberate
-- [ ] **E4** (optional) Map uploader → [map.meshcore.dev](https://map.meshcore.dev) ([bot docs](https://github.com/agessaman/meshcore-bot/blob/main/docs/map-uploader.md)): default **off**; infra ADVERTs with GPS only (repeaters/rooms/sensors); skip CHAT/companions, Tracker trails, site pins; rate-limit re-uploads; private-key signing operator-gated
+- [x] **E4** (optional) Map uploader → [map.meshcore.dev](https://map.meshcore.dev) ([bot docs](https://github.com/agessaman/meshcore-bot/blob/main/docs/map-uploader.md)): default **off**; infra ADVERTs with GPS only (repeaters/rooms/sensors); skip CHAT/companions, Tracker trails, site pins; rate-limit re-uploads; private-key signing operator-gated
 
 ## Phase F — USB + multi-radio pool + TCP
 
@@ -145,7 +145,7 @@ Heard nodes stay on Roster/Map. **Claimed** nodes are HQ-owned mesh infrastructu
 - [x] Ecowitt push/pull → Weather page + bare #weather; no cloud station APIs
 - [x] USB companion + BLE/USB/TCP second radio both live under one HQ; bot TX from primary only
 - [x] Backup restores roster + secrets on a fresh machine; import does not flood radio contacts
-- [ ] Map uploader (if on): only infra GPS adverts; companions/tracks stay local
+- [x] Map uploader (if on): only infra GPS adverts; companions/tracks stay local
 - [ ] Release artifacts: one standalone binary (or app bundle) each for Linux, Windows, macOS
 - [ ] Fresh launch: `PRAGMA journal_mode` reports `wal`; app survives concurrent radio writes without SQLite lock storms
 - [x] Claim repeater → Infrastructure page + Overview strip; probe/CLI via linked companion; empty claim list hides Overview infra chrome

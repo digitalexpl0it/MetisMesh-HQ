@@ -173,7 +173,7 @@ pub fn WeatherPage() -> Element {
         .unwrap_or_default();
 
     rsx! {
-        div { class: "flex h-full min-h-0 flex-col gap-4 overflow-auto p-1",
+        div { class: "hq-page-fill gap-4 p-1",
             PageHeading { icon: IconName::Weather, title: "Weather".to_string(),
                 "Local station dashboard. Mesh #weather prefers a fresh reading; ZIP lookups stay on Open-Meteo."
             }

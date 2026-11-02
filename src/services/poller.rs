@@ -35,9 +35,12 @@ pub fn spawn_poller(db: Arc<Db>, secrets: Arc<Secrets>, radio: RadioHandle) {
                 let mqtt_db = db.clone();
                 let push_db = db.clone();
                 let pull_db = db.clone();
+                let map_db = db.clone();
+                let map_radio = radio.clone();
                 tokio::spawn(crate::services::mqtt_weather::mqtt_weather_loop(mqtt_db));
                 tokio::spawn(crate::services::ecowitt::ecowitt_push_loop(push_db));
                 tokio::spawn(crate::services::ecowitt::ecowitt_pull_loop(pull_db));
+                crate::services::map_upload::spawn_map_upload_worker(map_db, map_radio);
                 poller_loop(db, secrets, radio).await;
             });
         })

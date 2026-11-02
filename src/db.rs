@@ -854,6 +854,24 @@ impl Db {
         if self.setting("svc_emerg_state")?.is_none() {
             self.set_setting("svc_emerg_state", "CA")?;
         }
+        if self.setting("svc_map_upload_enabled")?.is_none() {
+            self.set_setting("svc_map_upload_enabled", "0")?;
+        }
+        if self.setting("svc_map_upload_authorized")?.is_none() {
+            self.set_setting("svc_map_upload_authorized", "0")?;
+        }
+        if self.setting("svc_map_upload_api_url")?.is_none() {
+            self.set_setting(
+                "svc_map_upload_api_url",
+                "https://map.meshcore.dev/api/v1/uploader/node",
+            )?;
+        }
+        if self.setting("svc_map_upload_interval_secs")?.is_none() {
+            self.set_setting("svc_map_upload_interval_secs", "3600")?;
+        }
+        if self.setting("svc_map_upload_dry_run")?.is_none() {
+            self.set_setting("svc_map_upload_dry_run", "0")?;
+        }
         if self.setting("backup_schedule")?.is_none() {
             self.set_setting("backup_schedule", "off")?;
         }

@@ -21,6 +21,7 @@
 - Weather, NWS/Amber alerts, earthquakes on METIS-INFO; optional METIS-NET peer channel
 - Local MQTT weather station (D1c): bare `#weather` prefers a fresh Mosquitto reading (e.g. Ecowitt GW3002 via HA/WeeWX); ZIP/sched stay Open-Meteo
 - Local Ecowitt ingest + Weather page (D1d): custom-server push and gateway `get_livedata_info` pull (GW1200 / WittBoy / GW300x); shared station cache; no cloud Ambient
+- Optional map.meshcore.dev uploader (E4): default off; LogData infra GPS ADVERTs only; operator Authorize on primary companion (no private key in DB/backup)
 - Encrypted backup/restore; contact bulk import/export
 - Offline firmware locker + selective Manage overlay + USB flasher
 

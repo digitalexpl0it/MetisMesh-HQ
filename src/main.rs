@@ -17,6 +17,7 @@ mod secrets;
 mod services;
 mod signup;
 mod timefmt;
+mod tcp_radio;
 mod toast;
 mod ui;
 mod usb_serial;

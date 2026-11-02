@@ -2,7 +2,25 @@ use dioxus::html::FormValue;
 use dioxus::prelude::*;
 
 use super::icons::{Icon, IconName};
+use crate::db::unix_now;
 use crate::toast::{self, ToastKind};
+
+/// Last-heard older than this → GPS/locate icon turns red.
+pub const HEARD_WEEK_SECS: i64 = 7 * 24 * 60 * 60;
+
+/// True when the node was heard within the last week.
+pub fn heard_within_week(last_heard: Option<i64>) -> bool {
+    last_heard.is_some_and(|t| (unix_now() - t).max(0) <= HEARD_WEEK_SECS)
+}
+
+/// Green when fresh, red when silent longer than a week (or never heard).
+pub fn heard_icon_class(last_heard: Option<i64>) -> &'static str {
+    if heard_within_week(last_heard) {
+        "text-signal"
+    } else {
+        "text-red-200"
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum ButtonKind {

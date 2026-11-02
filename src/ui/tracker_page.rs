@@ -7,7 +7,9 @@ use crate::signup::Enrollment;
 
 use super::icons::{Icon, IconName};
 use super::state;
-use super::widgets::{Button, ButtonKind, PageHeading, TextInput};
+use super::widgets::{
+    heard_icon_class, heard_within_week, Button, ButtonKind, PageHeading, TextInput,
+};
 
 fn node_title(name: &str, requested: &Option<String>) -> String {
     if let Some(req) = requested {
@@ -124,7 +126,7 @@ pub fn TrackerPage() -> Element {
                                 }
                             }
                             tbody {
-                                for row in tracked {
+                                for (row_i, row) in tracked.into_iter().enumerate() {
                                     {
                                         let node = nodes.iter().find(|n| n.pubkey == row.pubkey);
                                         let title = node
@@ -143,6 +145,7 @@ pub fn TrackerPage() -> Element {
                                             });
                                         let has_gps = node.map(|n| n.has_gps).unwrap_or(false);
                                         let last = node.and_then(|n| n.last_advert.or(n.last_heard));
+                                        let last_heard = node.and_then(|n| n.last_heard);
                                         let last_label = relative_ago(last);
                                         let added_label = relative_ago(Some(row.added_at));
                                         let notes_display = if row.notes.is_empty() {
@@ -153,15 +156,27 @@ pub fn TrackerPage() -> Element {
                                         let is_editing = editing().as_deref() == Some(row.pubkey.as_str());
                                         let pubkey = row.pubkey.clone();
                                         let notes_for_edit = row.notes.clone();
+                                        let row_class = if row_i % 2 == 1 {
+                                            "row-zebra border-t border-border"
+                                        } else {
+                                            "border-t border-border"
+                                        };
+                                        let locate_class = heard_icon_class(last_heard);
                                         rsx! {
-                                            tr { class: "border-t border-border",
+                                            tr { class: "{row_class}",
                                                 td { class: "px-3 py-2",
                                                     div { class: "font-medium", "{title}" }
                                                     div { class: "font-mono text-xs text-muted-foreground", "{prefix}" }
                                                     div { class: "text-xs text-muted-foreground", "Added {added_label}" }
                                                 }
                                                 td { class: "px-3 py-2 text-muted-foreground",
-                                                    span { class: "inline-flex items-center gap-1.5",
+                                                    span {
+                                                        class: "inline-flex items-center gap-1.5 {locate_class}",
+                                                        title: if heard_within_week(last_heard) {
+                                                            "Heard within the last week"
+                                                        } else {
+                                                            "Not heard in over a week"
+                                                        },
                                                         Icon { name: IconName::Locate, size: 14 }
                                                         if has_gps {
                                                             "{last_label}"
@@ -274,7 +289,7 @@ pub fn TrackerPage() -> Element {
                     }
                 } else {
                     div { class: "flex flex-col gap-2",
-                        for (_score, node, title) in candidates {
+                        for (row_i, (_score, node, title)) in candidates.into_iter().enumerate() {
                             {
                                 let gps_line = if node.has_gps {
                                     format!(
@@ -287,8 +302,13 @@ pub fn TrackerPage() -> Element {
                                 let key = node.pubkey.clone();
                                 let label = title.clone();
                                 let prefix = node.prefix.clone();
+                                let row_class = if row_i % 2 == 1 {
+                                    "row-zebra flex flex-wrap items-center justify-between gap-2 rounded-md border border-border px-3 py-2"
+                                } else {
+                                    "flex flex-wrap items-center justify-between gap-2 rounded-md border border-border px-3 py-2"
+                                };
                                 rsx! {
-                                    div { class: "flex flex-wrap items-center justify-between gap-2 rounded-md border border-border px-3 py-2",
+                                    div { class: "{row_class}",
                                         div { class: "min-w-0",
                                             p { class: "truncate font-medium", "{title}" }
                                             p { class: "font-mono text-xs text-muted-foreground", "{prefix}" }

@@ -15,7 +15,7 @@ dioxus = "0.7"
 futures-util = "0.3"
 hex = "0.4"
 keyring = "3"
-meshcore-rs = { version = "0.2", default-features = false, features = ["ble", "serial"] }
+meshcore-rs = { version = "0.2", default-features = false, features = ["ble", "serial", "tcp"] }
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 rand = "0.8"
 regex = "1"
@@ -26,7 +26,7 @@ serde_json = "1"
 serialport = "4"
 sha2 = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 ureq = { version = "2", default-features = false, features = ["tls"] }
 uuid = "1"
 

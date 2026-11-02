@@ -1,5 +1,6 @@
 mod cli_page;
 mod icons;
+mod infra_page;
 mod map_host;
 mod map_page;
 mod tracker_page;
@@ -28,12 +29,14 @@ use crate::signup::Enrollment;
 
 use cli_page::CliPage;
 use icons::{Icon, IconName};
+use infra_page::InfraPage;
 use map_page::MapPage;
 use tracker_page::TrackerPage;
 use widgets::{
-    append_emoji, Badge, BarMix, BarMixRow, BatteryChart, BatteryPill, BatterySample, Button,
-    ButtonKind, Card, ChartSeries, Dialog, EmojiPickerButton, LineChart, PageHeading, PinSlideDown,
-    SelectInput, SlideDownPanel, Sparkline, TextInput, ToastHost,
+    append_emoji, heard_icon_class, heard_within_week, Badge, BarMix, BarMixRow, BatteryChart,
+    BatteryPill, BatterySample, Button, ButtonKind, Card, ChartSeries, Dialog, EmojiPickerButton,
+    LineChart, PageHeading, PinSlideDown, SelectInput, SlideDownPanel, Sparkline, TextInput,
+    ToastHost,
 };
 
 /// Show a transient toast (and log it). Prefer this over inline amber labels.
@@ -64,6 +67,7 @@ enum Page {
     Dashboard,
     Map,
     Tracker,
+    Infrastructure,
     Roster,
     Inbox,
     Messages,
@@ -71,10 +75,274 @@ enum Page {
     Settings,
 }
 
+/// Sidebar jump index: page title + keywords (no live roster/message bodies).
+struct NavSearchEntry {
+    page: Page,
+    title: &'static str,
+    icon: IconName,
+    /// Topic labels shown as “in Page · topic” when they match.
+    topics: &'static [&'static str],
+}
+
+const NAV_SEARCH_INDEX: &[NavSearchEntry] = &[
+    NavSearchEntry {
+        page: Page::Dashboard,
+        title: "Overview",
+        icon: IconName::Dashboard,
+        topics: &[
+            "dashboard",
+            "status",
+            "companion",
+            "radio pool",
+            "alerts",
+            "backup",
+            "firmware",
+            "enrolled",
+            "heard",
+            "traffic",
+            "battery",
+            "signup queue",
+            "infrastructure strip",
+        ],
+    },
+    NavSearchEntry {
+        page: Page::Messages,
+        title: "Messages",
+        icon: IconName::Messages,
+        topics: &[
+            "Channels",
+            "Direct",
+            "direct messages",
+            "DM",
+            "METIS-INFO",
+            "METIS-NET",
+            "chat",
+            "unread",
+            "channel secret",
+        ],
+    },
+    NavSearchEntry {
+        page: Page::Inbox,
+        title: "Inbox",
+        icon: IconName::Inbox,
+        topics: &[
+            "Waiting",
+            "signup",
+            "pending signup",
+            "approve",
+            "deny",
+            "Pending alerts",
+            "alerts",
+            "weather alert",
+            "quake",
+            "amber",
+            "NWS",
+        ],
+    },
+    NavSearchEntry {
+        page: Page::Roster,
+        title: "Roster",
+        icon: IconName::Users,
+        topics: &[
+            "nodes",
+            "contacts",
+            "claim",
+            "enroll",
+            "revoke",
+            "invite channel",
+            "heard",
+            "enrolled",
+            "denied",
+            "GPS",
+            "public key",
+            "advert",
+        ],
+    },
+    NavSearchEntry {
+        page: Page::Map,
+        title: "Map",
+        icon: IconName::Map,
+        topics: &[
+            "Tracked",
+            "Heard",
+            "pins",
+            "trails",
+            "site pin",
+            "sonar",
+            "location",
+            "MapLibre",
+            "offline map",
+        ],
+    },
+    NavSearchEntry {
+        page: Page::Infrastructure,
+        title: "Infrastructure",
+        icon: IconName::Signal,
+        topics: &[
+            "repeater",
+            "room",
+            "sensor",
+            "claim",
+            "Claim from roster",
+            "verify",
+            "Verify admin",
+            "admin password",
+            "Status probe",
+            "Discover repeaters",
+            "remote CLI",
+            "ACL",
+            "neighbors",
+            "Verified",
+            "Unverified",
+            "Unclaim",
+        ],
+    },
+    NavSearchEntry {
+        page: Page::Tracker,
+        title: "Tracker",
+        icon: IconName::Track,
+        topics: &[
+            "track",
+            "whitelist",
+            "vehicle",
+            "hike",
+            "GPS share",
+            "breadcrumb",
+            "trail",
+            "Tracked",
+        ],
+    },
+    NavSearchEntry {
+        page: Page::Cli,
+        title: "CLI",
+        icon: IconName::Radio,
+        topics: &[
+            "device CLI",
+            "companion CLI",
+            "remote CLI",
+            "reboot",
+            "get radio",
+            "firmware commands",
+            "terminal",
+        ],
+    },
+    NavSearchEntry {
+        page: Page::Settings,
+        title: "Settings",
+        icon: IconName::Settings,
+        topics: &[
+            // Top-level settings tabs
+            "HQ",
+            "Device",
+            "Flasher",
+            "Diagnostics",
+            // HQ subtabs
+            "Connect",
+            "Preferences",
+            "Services",
+            "Data",
+            // Connect link tabs
+            "Bluetooth",
+            "USB",
+            "Network",
+            "TCP",
+            "Wi-Fi",
+            "Ethernet",
+            "companion PIN",
+            "primary radio",
+            "pair",
+            "reconnect",
+            // Device subtabs
+            "Identity",
+            "Radio",
+            "Advanced",
+            "clock",
+            "advert",
+            "name",
+            // Preferences / secrets / history
+            "secrets",
+            "channel secret",
+            "purge",
+            "history",
+            "timezone",
+            "date",
+            "time",
+            "brand",
+            "logo",
+            // Services
+            "weather",
+            "NWS",
+            "quake",
+            "amber",
+            "ZIP",
+            // Data
+            "backup",
+            "restore",
+            "metisbak",
+            "contacts export",
+            "offline map",
+            // Flasher / diagnostics
+            "firmware",
+            "flash",
+            "ESP32",
+            "serial",
+            "logs",
+            "diagnostics log",
+        ],
+    },
+];
+
+fn nav_search_hits(query: &str) -> Vec<(i32, Page, IconName, String, String)> {
+    let needle = query.trim();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut hits = Vec::new();
+    for entry in NAV_SEARCH_INDEX {
+        let title_score = fuzzy_score(needle, &[entry.title]);
+        let mut best_topic: Option<(&'static str, i32)> = None;
+        for topic in entry.topics {
+            let Some(score) = fuzzy_score(needle, &[topic]) else {
+                continue;
+            };
+            if best_topic.is_none_or(|(_, best)| score > best) {
+                best_topic = Some((topic, score));
+            }
+        }
+        let score = match (title_score, best_topic.map(|(_, s)| s)) {
+            (Some(a), Some(b)) => a.max(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => continue,
+        };
+        let (label, subtitle) = match best_topic {
+            Some((topic, topic_score))
+                if title_score.is_none_or(|ts| topic_score >= ts)
+                    && !entry.title.eq_ignore_ascii_case(topic) =>
+            {
+                (
+                    format!("{} · {}", entry.title, topic),
+                    format!("Open {topic} in {}", entry.title),
+                )
+            }
+            _ => (
+                entry.title.to_string(),
+                format!("Go to {}", entry.title),
+            ),
+        };
+        hits.push((score, entry.page, entry.icon, label, subtitle));
+    }
+    hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.3.cmp(&b.3)));
+    hits.dedup_by(|a, b| a.1 == b.1);
+    hits.truncate(12);
+    hits
+}
+
 #[allow(non_snake_case)]
 pub fn App() -> Element {
     let mut page = use_signal(|| Page::Dashboard);
     let mut nav_open = use_signal(|| false);
+    let mut nav_query = use_signal(String::new);
     let mut pin_open = use_signal(|| false);
     let mut pin_target = use_signal(String::new);
     let mut pin_error = use_signal(String::new);
@@ -135,7 +403,7 @@ pub fn App() -> Element {
             document::Stylesheet { href: asset!("/assets/tailwind.css") }
             document::Stylesheet { href: asset!("/assets/form.css") }
         }
-        div { class: "flex h-screen flex-col bg-background text-foreground",
+        div { class: "flex h-screen flex-col overflow-hidden bg-background text-foreground",
             PinSlideDown {
                 open: pin_open(),
                 target: pin_target(),
@@ -157,13 +425,19 @@ pub fn App() -> Element {
                     }
                 },
             }
-            div { class: "flex min-h-0 flex-1",
+            div { class: "flex min-h-0 flex-1 overflow-hidden",
                 nav { class: "flex {nav_width} shrink-0 flex-col border-r border-border bg-card transition-[width] duration-200",
                     div { class: "flex items-center gap-3 border-b border-border px-3 py-3",
                         button {
                             class: "inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-signal hover:bg-accent cursor-pointer",
                             title: if expanded { "Collapse navigation" } else { "Expand navigation" },
-                            onclick: move |_| nav_open.set(!nav_open()),
+                            onclick: move |_| {
+                                let next = !nav_open();
+                                nav_open.set(next);
+                                if !next {
+                                    nav_query.set(String::new());
+                                }
+                            },
                             Icon {
                                 name: if expanded { IconName::PanelClose } else { IconName::Menu },
                                 size: 22,
@@ -176,72 +450,141 @@ pub fn App() -> Element {
                             }
                         }
                     }
-                    div { class: "flex flex-1 flex-col gap-1 p-2",
-                        NavButton {
-                            icon: IconName::Dashboard,
-                            label: "Overview".to_string(),
-                            expanded,
-                            active: page() == Page::Dashboard,
-                            onclick: move |_| page.set(Page::Dashboard),
+                    div { class: "flex min-h-0 flex-1 flex-col gap-1 p-2",
+                        if expanded {
+                            div { class: "mb-1",
+                                TextInput {
+                                    value: nav_query(),
+                                    placeholder: "Find a page…".to_string(),
+                                    kind: "text".to_string(),
+                                    oninput: move |event: FormEvent| nav_query.set(event.value()),
+                                }
+                            }
                         }
-                        NavButton {
-                            icon: IconName::Map,
-                            label: "Map".to_string(),
-                            expanded,
-                            active: page() == Page::Map,
-                            onclick: move |_| page.set(Page::Map),
-                        }
-                        NavButton {
-                            icon: IconName::Track,
-                            label: "Tracker".to_string(),
-                            expanded,
-                            active: page() == Page::Tracker,
-                            onclick: move |_| page.set(Page::Tracker),
-                        }
-                        NavButton {
-                            icon: IconName::Users,
-                            label: "Roster".to_string(),
-                            expanded,
-                            active: page() == Page::Roster,
-                            badge: roster_badge,
-                            onclick: move |_| page.set(Page::Roster),
-                        }
-                        NavButton {
-                            icon: IconName::Inbox,
-                            label: "Inbox".to_string(),
-                            expanded,
-                            active: page() == Page::Inbox,
-                            badge: inbox_badge,
-                            onclick: move |_| page.set(Page::Inbox),
-                        }
-                        NavButton {
-                            icon: IconName::Messages,
-                            label: "Messages".to_string(),
-                            expanded,
-                            active: page() == Page::Messages,
-                            badge: channel_unread,
-                            badge_alt: dm_unread,
-                            onclick: move |_| page.set(Page::Messages),
-                        }
-                        NavButton {
-                            icon: IconName::Radio,
-                            label: "CLI".to_string(),
-                            expanded,
-                            active: page() == Page::Cli,
-                            onclick: move |_| page.set(Page::Cli),
-                        }
-                        div { class: "mt-auto" }
-                        NavButton {
-                            icon: IconName::Settings,
-                            label: "Settings".to_string(),
-                            expanded,
-                            active: page() == Page::Settings,
-                            onclick: move |_| page.set(Page::Settings),
+                        {
+                            let searching = expanded && !nav_query().trim().is_empty();
+                            let hits = if searching {
+                                nav_search_hits(&nav_query())
+                            } else {
+                                Vec::new()
+                            };
+                            if searching {
+                                rsx! {
+                                    div { class: "flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto",
+                                        if hits.is_empty() {
+                                            p { class: "px-2 py-3 text-xs text-muted-foreground",
+                                                "No pages match."
+                                            }
+                                        } else {
+                                            for (_score, hit_page, icon, title, subtitle) in hits {
+                                                {
+                                                    let go = hit_page;
+                                                    rsx! {
+                                                        button {
+                                                            class: if page() == go {
+                                                                "flex w-full cursor-pointer items-start gap-3 rounded-md bg-accent px-3 py-2 text-left text-signal"
+                                                            } else {
+                                                                "flex w-full cursor-pointer items-start gap-3 rounded-md px-3 py-2 text-left text-muted-foreground hover:bg-muted hover:text-foreground"
+                                                            },
+                                                            onclick: move |_| {
+                                                                page.set(go);
+                                                                nav_query.set(String::new());
+                                                            },
+                                                            span { class: "mt-0.5 shrink-0",
+                                                                Icon { name: icon, size: 20 }
+                                                            }
+                                                            span { class: "min-w-0",
+                                                                span { class: "block truncate text-sm font-medium", "{title}" }
+                                                                span { class: "block truncate text-[0.7rem] text-muted-foreground", "{subtitle}" }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                rsx! {
+                                    NavButton {
+                                        icon: IconName::Dashboard,
+                                        label: "Overview".to_string(),
+                                        expanded,
+                                        active: page() == Page::Dashboard,
+                                        onclick: move |_| page.set(Page::Dashboard),
+                                    }
+                                    NavButton {
+                                        icon: IconName::Messages,
+                                        label: "Messages".to_string(),
+                                        expanded,
+                                        active: page() == Page::Messages,
+                                        badge: channel_unread,
+                                        badge_alt: dm_unread,
+                                        onclick: move |_| page.set(Page::Messages),
+                                    }
+                                    NavButton {
+                                        icon: IconName::Inbox,
+                                        label: "Inbox".to_string(),
+                                        expanded,
+                                        active: page() == Page::Inbox,
+                                        badge: inbox_badge,
+                                        onclick: move |_| page.set(Page::Inbox),
+                                    }
+                                    NavButton {
+                                        icon: IconName::Users,
+                                        label: "Roster".to_string(),
+                                        expanded,
+                                        active: page() == Page::Roster,
+                                        badge: roster_badge,
+                                        onclick: move |_| page.set(Page::Roster),
+                                    }
+                                    NavButton {
+                                        icon: IconName::Map,
+                                        label: "Map".to_string(),
+                                        expanded,
+                                        active: page() == Page::Map,
+                                        onclick: move |_| page.set(Page::Map),
+                                    }
+                                    NavButton {
+                                        icon: IconName::Signal,
+                                        label: "Infrastructure".to_string(),
+                                        expanded,
+                                        active: page() == Page::Infrastructure,
+                                        onclick: move |_| page.set(Page::Infrastructure),
+                                    }
+                                    NavButton {
+                                        icon: IconName::Track,
+                                        label: "Tracker".to_string(),
+                                        expanded,
+                                        active: page() == Page::Tracker,
+                                        onclick: move |_| page.set(Page::Tracker),
+                                    }
+                                    NavButton {
+                                        icon: IconName::Radio,
+                                        label: "CLI".to_string(),
+                                        expanded,
+                                        active: page() == Page::Cli,
+                                        onclick: move |_| page.set(Page::Cli),
+                                    }
+                                    div { class: "mt-auto" }
+                                    NavButton {
+                                        icon: IconName::Settings,
+                                        label: "Settings".to_string(),
+                                        expanded,
+                                        active: page() == Page::Settings,
+                                        onclick: move |_| page.set(Page::Settings),
+                                    }
+                                }
+                            }
                         }
                     }
                 }
-                div { class: "flex min-w-0 flex-1 flex-col",
-                    header { class: "flex h-14 shrink-0 items-center justify-between border-b border-border px-5",
+                div { class: "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
+                    // Use a div (not <header>): some WebKit embeds style <header> as
+                    // overlay/sticky and page content then paints underneath the bar.
+                    div {
+                        class: "relative z-10 flex h-14 shrink-0 items-center justify-between border-b border-border bg-background px-5",
+                        role: "banner",
                         div { class: "flex min-w-0 items-center",
                             if let Some(src) = brand_logo.as_ref() {
                                 img {
@@ -259,16 +602,18 @@ pub fn App() -> Element {
                         }
                         HeaderRadioControls { radio: radio.clone() }
                     }
-                    main {
+                    div {
                         class: if page() == Page::Map {
                             "min-h-0 flex-1 overflow-hidden p-5"
                         } else {
                             "min-h-0 flex-1 overflow-auto p-5"
                         },
+                        role: "main",
                         match page() {
                             Page::Dashboard => rsx! { DashboardPage { radio: radio.clone(), on_navigate: move |next| page.set(next) } },
                             Page::Map => rsx! { MapPage {} },
                             Page::Tracker => rsx! { TrackerPage {} },
+                            Page::Infrastructure => rsx! { InfraPage { radio: radio.clone() } },
                             Page::Roster => rsx! { RosterPage {} },
                             Page::Inbox => rsx! { InboxPage {} },
                             Page::Messages => rsx! { MessagesPage {} },
@@ -372,6 +717,7 @@ fn transport_icon(transport: &str) -> IconName {
     match transport {
         "usb" => IconName::Usb,
         "ble" => IconName::Bluetooth,
+        "tcp" => IconName::Signal,
         _ => IconName::Radio,
     }
 }
@@ -380,7 +726,17 @@ fn transport_label(transport: &str) -> &'static str {
     match transport {
         "usb" => "USB",
         "ble" => "Bluetooth",
+        "tcp" => "Network",
         _ => "Companion",
+    }
+}
+
+fn transport_badge(transport: &str) -> &'static str {
+    match transport {
+        "usb" => "USB",
+        "ble" => "BLE",
+        "tcp" => "TCP",
+        _ => "Radio",
     }
 }
 
@@ -550,6 +906,7 @@ fn companion_option_label(row: &crate::db::RadioRow, devices: &[BleRadio]) -> St
     match row.transport.as_str() {
         "usb" => format!("{name} · USB"),
         "ble" => format!("{name} · BLE"),
+        "tcp" => format!("{name} · TCP"),
         _ => name,
     }
 }
@@ -623,6 +980,8 @@ fn HeaderRadioControls(radio: RadioStatus) -> Element {
                             span { class: "text-muted-foreground", "USB" }
                         } else if radio.transport == "ble" {
                             span { class: "text-muted-foreground", "BLE" }
+                        } else if radio.transport == "tcp" {
+                            span { class: "text-muted-foreground", "TCP" }
                         }
                     }
                     if linked || radio.battery_pct.is_some() {
@@ -996,6 +1355,61 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
             PageHeading { icon: IconName::Dashboard, title: "Overview".to_string(),
                 "Live status for the headquarters radio, roster, and recent mesh traffic."
             }
+            {
+                let claimed_rows = state().db.list_claimed_infra().unwrap_or_default();
+                let total_claimed = state().db.count_claimed_infra().unwrap_or(0);
+                let verified_rows: Vec<_> = claimed_rows
+                    .into_iter()
+                    .filter(|r| r.is_verified())
+                    .collect();
+                let claimed_count = verified_rows.len();
+                if claimed_count > 0 {
+                    let claimed_keys: std::collections::HashSet<_> =
+                        verified_rows.iter().map(|r| r.pubkey.clone()).collect();
+                    let nodes = state().db.list_nodes().unwrap_or_default();
+                    let recent_secs = 30 * 60;
+                    let now = unix_now();
+                    let online = nodes
+                        .iter()
+                        .filter(|n| claimed_keys.contains(&n.pubkey))
+                        .filter(|n| {
+                            n.last_heard
+                                .map(|t| now - t <= recent_secs)
+                                .unwrap_or(false)
+                        })
+                        .count();
+                    let stale = claimed_count.saturating_sub(online);
+                    let infra_hint = if stale == 0 {
+                        format!("{online} heard recently")
+                    } else {
+                        format!("{online} recent · {stale} stale")
+                    };
+                    let count_label = if total_claimed as usize > claimed_count {
+                        format!("{claimed_count} verified · {infra_hint}")
+                    } else {
+                        format!("{claimed_count} claimed · {infra_hint}")
+                    };
+                    rsx! {
+                        section { class: "flex flex-wrap items-stretch gap-2",
+                            button {
+                                class: "inline-flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-signal/30 bg-card px-3 py-2 text-left hover:bg-muted/40 cursor-pointer",
+                                onclick: move |_| on_navigate.call(Page::Infrastructure),
+                                span { class: "flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-accent text-signal",
+                                    Icon { name: IconName::Signal, size: 14 }
+                                }
+                                span { class: "min-w-0",
+                                    span { class: "block text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground", "Infrastructure" }
+                                    span { class: "block truncate text-sm text-foreground",
+                                        "{count_label}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    rsx! {}
+                }
+            }
             section { class: "flex flex-wrap items-stretch gap-2",
                 button {
                     class: "inline-flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-left hover:bg-muted/40 cursor-pointer",
@@ -1105,7 +1519,10 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
                             }
                         }
                         div { class: "inline-flex flex-wrap items-center gap-1.5",
-                            if companion_transport == "usb" || companion_transport == "ble" {
+                            if companion_transport == "usb"
+                                || companion_transport == "ble"
+                                || companion_transport == "tcp"
+                            {
                                 span { class: "spec-chip",
                                     Icon { name: companion_icon, size: 12 }
                                     span { class: "ml-1", "{companion_transport_chip}" }
@@ -1136,6 +1553,8 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
                                         "USB companion linked · synced"
                                     } else if companion_transport == "ble" {
                                         "Bluetooth companion linked · synced"
+                                    } else if companion_transport == "tcp" {
+                                        "Network companion linked · synced"
                                     } else {
                                         "Companion linked · synced"
                                     }
@@ -1657,6 +2076,10 @@ fn RosterPage() -> Element {
     let mut dm_target = use_signal(|| None::<(String, String)>);
     let mut dm_body = use_signal(String::new);
     let mut invite_target = use_signal(|| None::<(String, String)>);
+    let mut claim_target = use_signal(|| None::<(String, String)>);
+    let mut claim_password = use_signal(String::new);
+    let mut claim_busy = use_signal(|| false);
+    let mut claim_error = use_signal(String::new);
     let mut details_pubkey = use_signal(|| None::<String>);
     let mut invite_channel = use_signal(|| {
         private_channels
@@ -1689,6 +2112,10 @@ fn RosterPage() -> Element {
         })
         .collect();
     ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.to_lowercase().cmp(&b.2.to_lowercase())));
+    let claimed_keys = state()
+        .db
+        .claimed_pubkey_set()
+        .unwrap_or_default();
 
     let details_key = details_pubkey();
     let details_node = details_key
@@ -1907,13 +2334,27 @@ fn RosterPage() -> Element {
                                 }
                             }
                         }
-                        for (_score, node, title) in ranked {
-                            tr { class: "border-t border-border",
+                        for (row_i, (_score, node, title)) in ranked.into_iter().enumerate() {
+                            {
+                                let is_claimed = claimed_keys.contains(&node.pubkey);
+                                let can_claim = matches!(node.contact_type, 2 | 3 | 4)
+                                    && node.enrollment != Enrollment::Hq
+                                    && !is_claimed;
+                                let row_class = if row_i % 2 == 1 {
+                                    "row-zebra border-t border-border"
+                                } else {
+                                    "border-t border-border"
+                                };
+                                rsx! {
+                            tr { class: "{row_class}",
                                 td { class: "px-3 py-2",
                                     div { class: "flex flex-wrap items-center gap-2",
                                         span { class: "font-medium", "{title}" }
                                         if !node.noticed {
                                             span { class: "roster-new-pill", "NEW" }
+                                        }
+                                        if is_claimed {
+                                            Badge { tone: "signal".to_string(), "Claimed" }
                                         }
                                     }
                                     div { class: "font-mono text-xs text-muted-foreground", "{node.prefix}" }
@@ -1922,7 +2363,13 @@ fn RosterPage() -> Element {
                                 td { class: "px-3 py-2 text-muted-foreground", "{contact_type_label(node.contact_type)}" }
                                 td { class: "px-3 py-2", "{format_time(node.last_heard)}" }
                                 td { class: "px-3 py-2",
-                                    span { class: "inline-flex items-center gap-1.5",
+                                    span {
+                                        class: "inline-flex items-center gap-1.5 {heard_icon_class(node.last_heard)}",
+                                        title: if heard_within_week(node.last_heard) {
+                                            "Heard within the last week"
+                                        } else {
+                                            "Not heard in over a week"
+                                        },
                                         Icon { name: IconName::Locate, size: 14 }
                                         if node.has_gps { "Fix" } else { "None" }
                                     }
@@ -1940,6 +2387,22 @@ fn RosterPage() -> Element {
                                             },
                                             Icon { name: IconName::ChevronRight, size: 14 }
                                             "Details"
+                                        }
+                                        if can_claim {
+                                            Button {
+                                                kind: ButtonKind::Ghost,
+                                                onclick: {
+                                                    let pubkey = node.pubkey.clone();
+                                                    let label = title.clone();
+                                                    move |_| {
+                                                        claim_error.set(String::new());
+                                                        claim_password.set(String::new());
+                                                        claim_target.set(Some((pubkey.clone(), label.clone())));
+                                                    }
+                                                },
+                                                Icon { name: IconName::Key, size: 14 }
+                                                "Claim…"
+                                            }
                                         }
                                         if node.enrollment != Enrollment::Hq {
                                             Button {
@@ -1991,6 +2454,8 @@ fn RosterPage() -> Element {
                                             }
                                         }
                                     }
+                                }
+                            }
                                 }
                             }
                         }
@@ -2048,6 +2513,101 @@ fn RosterPage() -> Element {
                             Icon { name: IconName::Messages, size: 14 }
                             "Send DM"
                         }
+                        }
+                    }
+                }
+            }
+            Dialog {
+                open: claim_target().is_some(),
+                title: "Claim infrastructure".to_string(),
+                on_close: move |_| {
+                    if !claim_busy() {
+                        claim_target.set(None);
+                        claim_password.set(String::new());
+                        claim_error.set(String::new());
+                    }
+                },
+                div { class: "flex flex-col gap-3",
+                    p { class: "text-sm text-muted-foreground",
+                        {
+                            if let Some((_, label)) = claim_target() {
+                                format!(
+                                    "Enter the MeshCore admin password for {label}. Guest password is refused. Nothing is written until login succeeds."
+                                )
+                            } else {
+                                "Enter the admin password.".to_string()
+                            }
+                        }
+                    }
+                    TextInput {
+                        value: claim_password(),
+                        placeholder: "Admin password (max 15)".to_string(),
+                        kind: "password".to_string(),
+                        maxlength: Some(15),
+                        oninput: move |event: FormEvent| claim_password.set(event.value()),
+                    }
+                    if !claim_error().is_empty() {
+                        p { class: "text-xs text-amber-200", "{claim_error}" }
+                    }
+                    div { class: "flex flex-wrap justify-end gap-2",
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            disabled: claim_busy(),
+                            onclick: move |_| {
+                                claim_target.set(None);
+                                claim_password.set(String::new());
+                                claim_error.set(String::new());
+                            },
+                            "Cancel"
+                        }
+                        Button {
+                            disabled: claim_busy()
+                                || claim_password().trim().is_empty()
+                                || claim_target().is_none(),
+                            onclick: move |_| {
+                                let Some((pubkey, label)) = claim_target() else {
+                                    return;
+                                };
+                                let password = claim_password();
+                                if password.trim().is_empty() {
+                                    claim_error.set("Admin password required.".into());
+                                    return;
+                                }
+                                if state().radio.snapshot().state != "connected" {
+                                    claim_error.set(
+                                        "Connect a primary companion before verifying.".into(),
+                                    );
+                                    return;
+                                }
+                                claim_busy.set(true);
+                                claim_error.set(String::new());
+                                let rx = state().radio.login_infra(pubkey.clone(), password);
+                                spawn(async move {
+                                    let result = rx.await.unwrap_or_else(|_| {
+                                        Err("Verify cancelled or radio unavailable.".into())
+                                    });
+                                    match result {
+                                        Ok(()) => {
+                                            match state().db.claim_infra_verified(
+                                                &pubkey, None, &label, "",
+                                            ) {
+                                                Ok(()) => {
+                                                    claim_target.set(None);
+                                                    claim_password.set(String::new());
+                                                    note.set(format!(
+                                                        "Claimed and verified {label}."
+                                                    ));
+                                                }
+                                                Err(err) => claim_error.set(err.to_string()),
+                                            }
+                                        }
+                                        Err(err) => claim_error.set(err),
+                                    }
+                                    claim_busy.set(false);
+                                });
+                            },
+                            Icon { name: IconName::Key, size: 14 }
+                            if claim_busy() { "Verifying…" } else { "Verify and claim" }
                         }
                     }
                 }
@@ -3672,6 +4232,13 @@ enum HqTab {
     Data,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConnectLinkTab {
+    Bluetooth,
+    Usb,
+    Network,
+}
+
 fn custom_var_label(key: &str) -> String {
     let lower = key.to_ascii_lowercase();
     if lower.contains("gps") {
@@ -3900,6 +4467,9 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
         .flatten()
         .unwrap_or_else(|| DateFormatPref::MonthDayShort.as_str().into());
     let mut radio_name = use_signal(|| saved_name);
+    let mut tcp_host = use_signal(String::new);
+    let mut tcp_port = use_signal(|| crate::tcp_radio::DEFAULT_TCP_PORT.to_string());
+    let mut connect_link_tab = use_signal(|| ConnectLinkTab::Bluetooth);
     let mut hq_name = use_signal(|| saved_hq);
     let mut time_format = use_signal(|| saved_time);
     let mut date_format = use_signal(|| saved_date);
@@ -4302,7 +4872,7 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                 }
                 if pool.is_empty() {
                     p { class: "text-sm text-muted-foreground",
-                        "None yet. Connect USB below, or scan Bluetooth and Pair once."
+                        "None yet. Connect USB or Network below, or scan Bluetooth and Pair once."
                     }
                 } else {
                     div { class: "flex flex-col gap-2",
@@ -4312,7 +4882,7 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                                 let slot_addr = slot.address.clone();
                                 let slot_connected = slot.connected;
                                 let slot_primary = slot.is_primary;
-                                let transport_badge = if slot.transport == "usb" { "USB" } else { "BLE" };
+                                let transport_badge = transport_badge(&slot.transport);
                                 rsx! {
                                     div {
                                         key: "{slot.id}",
@@ -4379,11 +4949,7 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                                                         state().radio.reconnect(slot_addr.clone());
                                                     },
                                                     Icon {
-                                                        name: if slot.transport == "usb" {
-                                                            IconName::Radio
-                                                        } else {
-                                                            IconName::Bluetooth
-                                                        },
+                                                        name: transport_icon(&slot.transport),
                                                         size: 14
                                                     }
                                                     "Connect"
@@ -4403,128 +4969,214 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                     }
                 }
             }
-            Card { title: "USB serial", icon: Some(IconName::Radio),
+            Card { title: "Add companion".to_string(), icon: Some(IconName::Radio),
                 p { class: "mb-3 text-sm text-muted-foreground",
-                    "Plug in a MeshCore companion over USB (CDC). Needs USB companion firmware (BLE companion builds usually leave this port as console only). Linux prefers by-id paths; Windows uses COM ports; macOS uses cu.usbmodem. No Bluetooth PIN."
+                    "Link a MeshCore companion over Bluetooth, USB, or the LAN. Several can stay in the pool; only the primary sends enrollment and bot traffic."
                 }
-                div { class: "mb-3 flex flex-wrap gap-2",
-                    Button {
-                        kind: ButtonKind::Ghost,
-                        onclick: move |_| state().radio.scan_usb(),
-                        Icon { name: IconName::Scan, size: 14 }
-                        "Refresh ports"
+                div { class: "settings-subtabs mb-3",
+                    button {
+                        class: if connect_link_tab() == ConnectLinkTab::Bluetooth {
+                            "settings-subtab settings-subtab-active"
+                        } else {
+                            "settings-subtab"
+                        },
+                        onclick: move |_| connect_link_tab.set(ConnectLinkTab::Bluetooth),
+                        Icon { name: IconName::Bluetooth, size: 14 }
+                        "Bluetooth"
+                    }
+                    button {
+                        class: if connect_link_tab() == ConnectLinkTab::Usb {
+                            "settings-subtab settings-subtab-active"
+                        } else {
+                            "settings-subtab"
+                        },
+                        onclick: move |_| {
+                            connect_link_tab.set(ConnectLinkTab::Usb);
+                            state().radio.scan_usb();
+                        },
+                        Icon { name: IconName::Usb, size: 14 }
+                        "USB"
+                    }
+                    button {
+                        class: if connect_link_tab() == ConnectLinkTab::Network {
+                            "settings-subtab settings-subtab-active"
+                        } else {
+                            "settings-subtab"
+                        },
+                        onclick: move |_| connect_link_tab.set(ConnectLinkTab::Network),
+                        Icon { name: IconName::Signal, size: 14 }
+                        "Network"
                     }
                 }
-                if usb_ports.is_empty() {
-                    p { class: "text-sm text-muted-foreground",
-                        "No USB serial ports found. Refresh after plugging in a companion."
+                if connect_link_tab() == ConnectLinkTab::Bluetooth {
+                    p { class: "mb-3 text-sm text-muted-foreground",
+                        "Scan for nearby devices. Connect for a saved radio; Pair for a new one (six-digit PIN). Disconnect the phone app first."
                     }
-                } else {
-                    div { class: "flex flex-col gap-2",
-                        for port in usb_ports {
-                            div {
-                                key: "{port.path}",
-                                class: "flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-background px-3 py-3",
-                                div { class: "min-w-0",
-                                    p { class: "truncate font-medium", "{port.label}" }
-                                    p { class: "font-mono text-xs text-muted-foreground", "{port.path}" }
-                                    if port.system_path != port.path {
-                                        p { class: "font-mono text-[0.65rem] text-muted-foreground", "also {port.system_path}" }
-                                    }
+                    div { class: "mb-3 flex flex-wrap gap-2",
+                        div { class: "min-w-0 flex-1 basis-48",
+                            TextInput {
+                                value: radio_name(),
+                                placeholder: "Name or AA:BB:CC:DD:EE:FF".to_string(),
+                                oninput: move |event: FormEvent| radio_name.set(event.value()),
+                            }
+                        }
+                        if target_saved {
+                            Button {
+                                disabled: busy || radio_name().trim().is_empty(),
+                                onclick: move |_| state().radio.reconnect(radio_name()),
+                                Icon { name: IconName::Bluetooth, size: 14 }
+                                "Connect"
+                            }
+                        } else {
+                            Button {
+                                onclick: move |_| on_request_pin.call(radio_name()),
+                                Icon { name: IconName::Key, size: 14 }
+                                "Pair"
+                            }
+                        }
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            disabled: scanning,
+                            onclick: move |_| state().radio.scan(),
+                            Icon { name: IconName::Scan, size: 14 }
+                            if scanning { "Scanning" } else { "Scan" }
+                        }
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| state().radio.disconnect(),
+                            Icon { name: IconName::Unlink, size: 14 }
+                            "Disconnect primary"
+                        }
+                    }
+                    if !radio.devices.is_empty() {
+                        div { class: "mb-3 flex items-center justify-between gap-3",
+                            p { class: "text-xs text-muted-foreground",
+                                "{radio.devices.len()} devices, {companion_count} MeshCore"
+                            }
+                            div { class: "w-56",
+                                TextInput {
+                                    value: device_query(),
+                                    placeholder: "Filter name or address".to_string(),
+                                    oninput: move |event: FormEvent| device_query.set(event.value()),
                                 }
-                                Button {
-                                    disabled: busy,
-                                    onclick: {
-                                        let path = port.path.clone();
-                                        move |_| state().radio.connect_usb(path.clone())
+                            }
+                        }
+                        div { class: "flex max-h-[32rem] flex-col gap-2 overflow-y-auto pr-1",
+                            if devices.is_empty() {
+                                p { class: "text-sm text-muted-foreground", "No devices match that filter." }
+                            }
+                            for device in devices {
+                                DeviceCard {
+                                    key: "{device.address}",
+                                    device: device.clone(),
+                                    selected: radio_name() == device.address || radio_name() == device.name,
+                                    connected: radio.state == "connected"
+                                        && (radio.connected_name == device.address
+                                            || radio.connected_name == device.name),
+                                    paired: state().db.is_saved_radio(&device.address).unwrap_or(false)
+                                        || state().db.is_saved_radio(&device.name).unwrap_or(false),
+                                    on_use: {
+                                        let address = device.address.clone();
+                                        let paired = state().db.is_saved_radio(&device.address).unwrap_or(false)
+                                            || state().db.is_saved_radio(&device.name).unwrap_or(false);
+                                        move |_| {
+                                            radio_name.set(address.clone());
+                                            if paired {
+                                                state().radio.reconnect(address.clone());
+                                            } else {
+                                                on_request_pin.call(address.clone());
+                                            }
+                                        }
                                     },
-                                    Icon { name: IconName::Radio, size: 14 }
-                                    "Connect USB"
                                 }
                             }
                         }
                     }
-                }
-            }
-            Card { title: "Bluetooth", icon: Some(IconName::Bluetooth),
-                p { class: "mb-3 text-sm text-muted-foreground",
-                    "Scan for nearby Bluetooth devices. Use Connect for a radio already on the saved list. Use Pair only for a new radio; that asks for the six-digit PIN. Disconnect the phone app first. Multiple BLE companions can stay linked alongside USB."
-                }
-                div { class: "mb-3 flex gap-2",
-                    TextInput {
-                        value: radio_name(),
-                        placeholder: "Name or AA:BB:CC:DD:EE:FF",
-                        oninput: move |event: FormEvent| radio_name.set(event.value()),
+                } else if connect_link_tab() == ConnectLinkTab::Usb {
+                    p { class: "mb-3 text-sm text-muted-foreground",
+                        "USB companion firmware (CDC). BLE-only builds usually leave this as console. Linux prefers by-id paths; Windows COM; macOS cu.usbmodem. No PIN."
                     }
-                    if target_saved {
+                    div { class: "mb-3 flex flex-wrap gap-2",
                         Button {
-                            disabled: busy || radio_name().trim().is_empty(),
-                            onclick: move |_| state().radio.reconnect(radio_name()),
-                            Icon { name: IconName::Bluetooth, size: 14 }
-                            "Connect"
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| state().radio.scan_usb(),
+                            Icon { name: IconName::Scan, size: 14 }
+                            "Refresh ports"
+                        }
+                    }
+                    if usb_ports.is_empty() {
+                        p { class: "text-sm text-muted-foreground",
+                            "No USB serial ports found. Refresh after plugging in a companion."
                         }
                     } else {
-                        Button {
-                            onclick: move |_| on_request_pin.call(radio_name()),
-                            Icon { name: IconName::Key, size: 14 }
-                            "Pair"
-                        }
-                    }
-                    Button {
-                        kind: ButtonKind::Ghost,
-                        disabled: scanning,
-                        onclick: move |_| state().radio.scan(),
-                        Icon { name: IconName::Scan, size: 14 }
-                        if scanning { "Scanning" } else { "Scan" }
-                    }
-                    Button {
-                        kind: ButtonKind::Ghost,
-                        onclick: move |_| state().radio.disconnect(),
-                        Icon { name: IconName::Unlink, size: 14 }
-                        "Disconnect primary"
-                    }
-                }
-                if !radio.devices.is_empty() {
-                    div { class: "mb-3 flex items-center justify-between gap-3",
-                        p { class: "text-xs text-muted-foreground",
-                            "{radio.devices.len()} devices, {companion_count} MeshCore"
-                        }
-                        div { class: "w-56",
-                            TextInput {
-                                value: device_query(),
-                                placeholder: "Filter name or address",
-                                oninput: move |event: FormEvent| device_query.set(event.value()),
-                            }
-                        }
-                    }
-                    div { class: "flex max-h-[32rem] flex-col gap-2 overflow-y-auto pr-1",
-                        if devices.is_empty() {
-                            p { class: "text-sm text-muted-foreground", "No devices match that filter." }
-                        }
-                        for device in devices {
-                            DeviceCard {
-                                key: "{device.address}",
-                                device: device.clone(),
-                                selected: radio_name() == device.address || radio_name() == device.name,
-                                connected: radio.state == "connected"
-                                    && (radio.connected_name == device.address
-                                        || radio.connected_name == device.name),
-                                paired: state().db.is_saved_radio(&device.address).unwrap_or(false)
-                                    || state().db.is_saved_radio(&device.name).unwrap_or(false),
-                                on_use: {
-                                    let address = device.address.clone();
-                                    let paired = state().db.is_saved_radio(&device.address).unwrap_or(false)
-                                        || state().db.is_saved_radio(&device.name).unwrap_or(false);
-                                    move |_| {
-                                        radio_name.set(address.clone());
-                                        if paired {
-                                            state().radio.reconnect(address.clone());
-                                        } else {
-                                            on_request_pin.call(address.clone());
+                        div { class: "flex flex-col gap-2",
+                            for port in usb_ports {
+                                div {
+                                    key: "{port.path}",
+                                    class: "flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-background px-3 py-3",
+                                    div { class: "min-w-0",
+                                        p { class: "truncate font-medium", "{port.label}" }
+                                        p { class: "font-mono text-xs text-muted-foreground", "{port.path}" }
+                                        if port.system_path != port.path {
+                                            p { class: "font-mono text-[0.65rem] text-muted-foreground", "also {port.system_path}" }
                                         }
                                     }
-                                },
+                                    Button {
+                                        disabled: busy,
+                                        onclick: {
+                                            let path = port.path.clone();
+                                            move |_| state().radio.connect_usb(path.clone())
+                                        },
+                                        Icon { name: IconName::Usb, size: 14 }
+                                        "Connect USB"
+                                    }
+                                }
                             }
+                        }
+                    }
+                } else {
+                    p { class: "mb-3 text-sm text-muted-foreground",
+                        "Wi-Fi or Ethernet companion on the LAN over TCP (default port 5000). Same MeshCore protocol as BLE/USB; no PIN."
+                    }
+                    div { class: "grid gap-3 sm:grid-cols-[minmax(0,1fr)_7rem_auto] sm:items-end",
+                        div { class: "min-w-0",
+                            label {
+                                class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground",
+                                "Host or IP"
+                            }
+                            TextInput {
+                                value: tcp_host(),
+                                placeholder: "192.168.1.50 or companion.local".to_string(),
+                                oninput: move |event: FormEvent| tcp_host.set(event.value()),
+                            }
+                        }
+                        div {
+                            label {
+                                class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground",
+                                "Port"
+                            }
+                            TextInput {
+                                value: tcp_port(),
+                                placeholder: "5000".to_string(),
+                                oninput: move |event: FormEvent| tcp_port.set(event.value()),
+                            }
+                        }
+                        Button {
+                            disabled: busy || tcp_host().trim().is_empty(),
+                            onclick: move |_| {
+                                let host = tcp_host().trim().to_string();
+                                let port = tcp_port().trim().to_string();
+                                let raw = if port.is_empty() || port == "5000" {
+                                    host
+                                } else if host.contains(':') && !host.starts_with('[') {
+                                    format!("[{host}]:{port}")
+                                } else {
+                                    format!("{host}:{port}")
+                                };
+                                state().radio.connect_tcp(raw);
+                            },
+                            Icon { name: IconName::Signal, size: 14 }
+                            "Connect TCP"
                         }
                     }
                 }

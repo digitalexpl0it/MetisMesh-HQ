@@ -330,6 +330,20 @@ impl Db {
             CREATE INDEX IF NOT EXISTS positions_pubkey_time ON positions(pubkey, at);",
         );
         let _ = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS claimed_infra (
+                pubkey TEXT PRIMARY KEY,
+                kind TEXT NOT NULL DEFAULT 'repeater',
+                label TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                added_at INTEGER NOT NULL,
+                verified_at INTEGER NOT NULL DEFAULT 0
+            );",
+        );
+        let _ = conn.execute(
+            "ALTER TABLE claimed_infra ADD COLUMN verified_at INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS service_events (
                 id TEXT PRIMARY KEY,
                 kind TEXT NOT NULL,
@@ -485,6 +499,14 @@ impl Db {
                 label TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 added_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS claimed_infra (
+                pubkey TEXT PRIMARY KEY,
+                kind TEXT NOT NULL DEFAULT 'repeater',
+                label TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                added_at INTEGER NOT NULL,
+                verified_at INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS service_events (
                 id TEXT PRIMARY KEY,
@@ -3041,6 +3063,142 @@ impl Db {
         Ok(())
     }
 
+    /// Default claimed-infra kind from MeshCore `contact_type` (2 repeater, 3 room, 4 sensor).
+    pub fn infra_kind_from_contact_type(contact_type: u8) -> &'static str {
+        match contact_type {
+            3 => "room",
+            4 => "sensor",
+            _ => "repeater",
+        }
+    }
+
+    pub fn normalize_infra_kind(kind: &str) -> &'static str {
+        match kind.trim().to_ascii_lowercase().as_str() {
+            "room" | "roomserver" | "room_server" => "room",
+            "sensor" => "sensor",
+            _ => "repeater",
+        }
+    }
+
+    pub fn list_claimed_infra(&self) -> Result<Vec<ClaimedInfraRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT pubkey, kind, label, notes, added_at, verified_at
+             FROM claimed_infra
+             ORDER BY added_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ClaimedInfraRow {
+                pubkey: row.get(0)?,
+                kind: row.get(1)?,
+                label: row.get(2)?,
+                notes: row.get(3)?,
+                added_at: row.get(4)?,
+                verified_at: row.get(5)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::from)
+    }
+
+    pub fn claimed_pubkey_set(&self) -> Result<std::collections::HashSet<String>> {
+        Ok(self
+            .list_claimed_infra()?
+            .into_iter()
+            .map(|row| row.pubkey)
+            .collect())
+    }
+
+    pub fn count_claimed_infra(&self) -> Result<i64> {
+        Ok(self.lock().query_row(
+            "SELECT COUNT(*) FROM claimed_infra",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Insert/update a claim only after RF admin login succeeded. Never store passwords.
+    pub fn claim_infra_verified(
+        &self,
+        pubkey: &str,
+        kind_override: Option<&str>,
+        label: &str,
+        notes: &str,
+    ) -> Result<()> {
+        let key = pubkey.trim();
+        if key.is_empty() {
+            return Err(Error::Msg("Missing pubkey.".into()));
+        }
+        let kind = if let Some(raw) = kind_override {
+            Self::normalize_infra_kind(raw).to_string()
+        } else {
+            let contact_type = self
+                .get_node(key)?
+                .map(|n| n.contact_type)
+                .unwrap_or(2);
+            Self::infra_kind_from_contact_type(contact_type).to_string()
+        };
+        let now = unix_now();
+        self.lock().execute(
+            "INSERT INTO claimed_infra (pubkey, kind, label, notes, added_at, verified_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(pubkey) DO UPDATE SET
+                kind = excluded.kind,
+                label = excluded.label,
+                notes = CASE
+                    WHEN excluded.notes = '' THEN claimed_infra.notes
+                    ELSE excluded.notes
+                END,
+                verified_at = excluded.verified_at",
+            params![key, kind, label.trim(), notes.trim(), now, now],
+        )?;
+        let _ = self.audit("claim_infra_verified", key, &kind);
+        Ok(())
+    }
+
+    /// Re-verify an existing claim after ACL was lost (sets verified_at).
+    pub fn mark_claimed_verified(&self, pubkey: &str) -> Result<()> {
+        let n = self.lock().execute(
+            "UPDATE claimed_infra SET verified_at = ?2 WHERE pubkey = ?1",
+            params![pubkey, unix_now()],
+        )?;
+        if n == 0 {
+            return Err(Error::Msg("That node is not on the Infrastructure list.".into()));
+        }
+        let _ = self.audit("claim_infra_reverified", pubkey, "");
+        Ok(())
+    }
+
+    pub fn unclaim_infra(&self, pubkey: &str) -> Result<()> {
+        self.lock()
+            .execute("DELETE FROM claimed_infra WHERE pubkey = ?1", params![pubkey])?;
+        let _ = self.audit("unclaim_infra", pubkey, "");
+        Ok(())
+    }
+
+    pub fn update_claimed_notes(&self, pubkey: &str, notes: &str) -> Result<()> {
+        let n = self.lock().execute(
+            "UPDATE claimed_infra SET notes = ?2 WHERE pubkey = ?1",
+            params![pubkey, notes.trim()],
+        )?;
+        if n == 0 {
+            return Err(Error::Msg("That node is not on the Infrastructure list.".into()));
+        }
+        Ok(())
+    }
+
+    pub fn update_claimed_kind(&self, pubkey: &str, kind: &str) -> Result<()> {
+        let kind = Self::normalize_infra_kind(kind);
+        let n = self.lock().execute(
+            "UPDATE claimed_infra SET kind = ?2 WHERE pubkey = ?1",
+            params![pubkey, kind],
+        )?;
+        if n == 0 {
+            return Err(Error::Msg("That node is not on the Infrastructure list.".into()));
+        }
+        Ok(())
+    }
+
     /// Position breadcrumbs for trail drawing (oldest → newest per query order).
     pub fn positions_for_pubkeys(
         &self,
@@ -3154,6 +3312,23 @@ pub struct TrackedNodeRow {
     pub label: String,
     pub notes: String,
     pub added_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClaimedInfraRow {
+    pub pubkey: String,
+    pub kind: String,
+    pub label: String,
+    pub notes: String,
+    pub added_at: i64,
+    /// Unix seconds; 0 = unverified (pre-change claim or failed gate).
+    pub verified_at: i64,
+}
+
+impl ClaimedInfraRow {
+    pub fn is_verified(&self) -> bool {
+        self.verified_at > 0
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -3383,6 +3558,14 @@ CREATE TABLE IF NOT EXISTS tracked_nodes (
     label TEXT NOT NULL DEFAULT '',
     notes TEXT NOT NULL DEFAULT '',
     added_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS claimed_infra (
+    pubkey TEXT PRIMARY KEY,
+    kind TEXT NOT NULL DEFAULT 'repeater',
+    label TEXT NOT NULL DEFAULT '',
+    notes TEXT NOT NULL DEFAULT '',
+    added_at INTEGER NOT NULL,
+    verified_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS telemetry_samples (
     id INTEGER PRIMARY KEY,
@@ -3681,5 +3864,87 @@ mod tests {
         db.set_dm_last_read("aa11", id2).unwrap();
         assert_eq!(db.total_dm_unread().unwrap(), 0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn claim_infra_verified_sets_kind_and_verified_at() {
+        let (db, _, dir) = test_db();
+        // contact_type 2 → repeater, 3 → room, 4 → sensor
+        db.upsert_contact("rep01", "P1", 2, 0, -1, &[], 1, 0, 0, 1, &json!({}), true)
+            .unwrap();
+        db.upsert_contact("room1", "Room", 3, 0, -1, &[], 1, 0, 0, 1, &json!({}), true)
+            .unwrap();
+        db.upsert_contact("sens1", "Sense", 4, 0, -1, &[], 1, 0, 0, 1, &json!({}), true)
+            .unwrap();
+        db.claim_infra_verified("rep01", None, "P1", "").unwrap();
+        db.claim_infra_verified("room1", None, "Room", "").unwrap();
+        db.claim_infra_verified("sens1", None, "Sense", "").unwrap();
+        let rows = db.list_claimed_infra().unwrap();
+        assert_eq!(db.count_claimed_infra().unwrap(), 3);
+        let kind = |key: &str| {
+            rows.iter()
+                .find(|r| r.pubkey == key)
+                .map(|r| r.kind.as_str())
+                .unwrap()
+        };
+        assert_eq!(kind("rep01"), "repeater");
+        assert_eq!(kind("room1"), "room");
+        assert_eq!(kind("sens1"), "sensor");
+        assert!(rows.iter().all(|r| r.is_verified()));
+        db.unclaim_infra("rep01").unwrap();
+        assert_eq!(db.count_claimed_infra().unwrap(), 2);
+        assert!(!db.claimed_pubkey_set().unwrap().contains("rep01"));
+        // Override kind even when roster says otherwise.
+        db.claim_infra_verified("rep01", Some("sensor"), "P1", "roof")
+            .unwrap();
+        let again = db.list_claimed_infra().unwrap();
+        let row = again.iter().find(|r| r.pubkey == "rep01").unwrap();
+        assert_eq!(row.kind, "sensor");
+        assert_eq!(row.notes, "roof");
+        assert!(row.is_verified());
+        // Simulate unverified legacy row then re-verify.
+        db.lock()
+            .execute(
+                "UPDATE claimed_infra SET verified_at = 0 WHERE pubkey = 'rep01'",
+                [],
+            )
+            .unwrap();
+        assert!(!db
+            .list_claimed_infra()
+            .unwrap()
+            .iter()
+            .find(|r| r.pubkey == "rep01")
+            .unwrap()
+            .is_verified());
+        db.mark_claimed_verified("rep01").unwrap();
+        assert!(db
+            .list_claimed_infra()
+            .unwrap()
+            .iter()
+            .find(|r| r.pubkey == "rep01")
+            .unwrap()
+            .is_verified());
+        db.update_claimed_notes("rep01", "checked").unwrap();
+        assert_eq!(
+            db.list_claimed_infra()
+                .unwrap()
+                .iter()
+                .find(|r| r.pubkey == "rep01")
+                .unwrap()
+                .notes,
+            "checked"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn infra_kind_helpers() {
+        assert_eq!(Db::infra_kind_from_contact_type(2), "repeater");
+        assert_eq!(Db::infra_kind_from_contact_type(3), "room");
+        assert_eq!(Db::infra_kind_from_contact_type(4), "sensor");
+        assert_eq!(Db::infra_kind_from_contact_type(1), "repeater");
+        assert_eq!(Db::normalize_infra_kind("Room"), "room");
+        assert_eq!(Db::normalize_infra_kind("SENSOR"), "sensor");
+        assert_eq!(Db::normalize_infra_kind("whatever"), "repeater");
     }
 }

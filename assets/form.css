@@ -1,4 +1,12 @@
 /*
+ * Alternating list/table rows. assets/tailwind.css is a frozen snapshot and
+ * does not include bg-muted/40, so zebra must live here.
+ */
+.row-zebra {
+  background-color: rgba(34, 40, 49, 0.55);
+}
+
+/*
  * Overview dashboard grids. Arbitrary Tailwind grid templates are not in the
  * precompiled assets/tailwind.css, so these media queries own the layout.
  */

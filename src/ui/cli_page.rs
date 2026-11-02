@@ -9,7 +9,7 @@ use crate::radio::RadioStatus;
 
 /// Firmware role for which CLI vocabulary to offer.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum CliMode {
+pub enum CliMode {
     Companion,
     Repeater,
     Room,
@@ -17,7 +17,7 @@ enum CliMode {
 }
 
 impl CliMode {
-    fn from_contact_type(contact_type: u8) -> Self {
+    pub fn from_contact_type(contact_type: u8) -> Self {
         match contact_type {
             2 => Self::Repeater,
             3 => Self::Room,
@@ -27,7 +27,15 @@ impl CliMode {
         }
     }
 
-    fn label(self) -> &'static str {
+    pub fn from_infra_kind(kind: &str) -> Self {
+        match kind.trim().to_ascii_lowercase().as_str() {
+            "room" => Self::Room,
+            "sensor" => Self::Sensor,
+            _ => Self::Repeater,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
         match self {
             Self::Companion => "Companion",
             Self::Repeater => "Repeater",
@@ -133,7 +141,7 @@ fn sensor_commands() -> Vec<(&'static str, &'static str)> {
 // Room and Sensor need extras; use lazy static via once_cell or just allocate in the component.
 // Simpler: return owned Vec from a helper used once when mode changes.
 
-fn commands_for(mode: CliMode) -> Vec<(&'static str, &'static str)> {
+pub fn commands_for(mode: CliMode) -> Vec<(&'static str, &'static str)> {
     match mode {
         CliMode::Companion => COMPANION_COMMANDS.to_vec(),
         CliMode::Repeater => REPEATER_COMMANDS.to_vec(),
@@ -142,7 +150,10 @@ fn commands_for(mode: CliMode) -> Vec<(&'static str, &'static str)> {
     }
 }
 
-fn is_destructive_cli(command: &str) -> bool {
+/// Rate-limited status probe set for claimed infrastructure.
+pub const STATUS_PROBE_COMMANDS: &[&str] = &["ver", "get radio", "neighbors"];
+
+pub fn is_destructive_cli(command: &str) -> bool {
     let lower = command.trim().to_ascii_lowercase();
     ["erase", "reboot", "poweroff", "shutdown", "factory", "clkreboot"]
         .iter()

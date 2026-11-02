@@ -178,7 +178,7 @@ pub struct RadioStatus {
     pub send_note: String,
     /// Database id of the radio this status describes (`None` when no radio is live).
     pub radio_id: Option<i64>,
-    /// `ble`, `usb`, or empty when no radio is live.
+    /// `ble`, `usb`, `tcp`, or empty when no radio is live.
     pub transport: String,
     /// `companion`, `room`, `repeater`, `other`, or empty.
     pub role: String,
@@ -285,11 +285,19 @@ pub enum RadioCmd {
     },
     SendAdvert { flood: bool },
     Reboot,
-    /// Local companion CLI (CMD 66) or remote TXT_TYPE_CLI_COMMAND to a contact prefix.
+    /// Local companion CLI (CMD 66) or remote TXT to a contact prefix.
     RunCli {
         /// Empty = local companion; otherwise 12-char hex pubkey prefix (or longer hex pubkey).
         contact_hex: String,
         text: String,
+        /// `true` → TXT_TYPE_CLI_DATA (1) for claimed infra; `false` → CLI_COMMAND (3).
+        infra: bool,
+    },
+    /// RF admin login to a repeater/room/sensor (`CMD_SEND_LOGIN`) + admin ACL proof.
+    SendLogin {
+        pubkey_hex: String,
+        password: String,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     /// Probe noise floor via status requests for GPS contacts.
     ProbeNoise,
@@ -320,6 +328,9 @@ fn no_primary_reason(cmd: &RadioCmd) -> &'static str {
             "Connect a primary companion radio before discovering nodes."
         }
         RadioCmd::RunCli { .. } => "Connect a primary companion radio before running CLI commands.",
+        RadioCmd::SendLogin { .. } => {
+            "Connect a primary companion radio before verifying infrastructure."
+        }
         _ => "Connect a primary companion radio before changing device settings.",
     }
 }
@@ -359,6 +370,9 @@ fn reject_cmd(cmd: RadioCmd, status: &Mutex<RadioStatus>, reason: &str) {
         RadioCmd::DiscoverNodes { reply, .. } => {
             let _ = reply.send(Err(reason.into()));
         }
+        RadioCmd::SendLogin { reply, .. } => {
+            let _ = reply.send(Err(reason.into()));
+        }
         RadioCmd::RunCli { .. } => push_cli_line(status, format!("error: {reason}")),
         _ => {}
     }
@@ -395,6 +409,8 @@ enum PoolCmd {
     Reconnect(String),
     ConnectBle { address: String, label: String },
     ConnectUsb(String),
+    /// Wi-Fi / Ethernet companion: normalized `host:port`.
+    ConnectTcp(String),
     DisconnectRadio(i64),
     ForgetRadio(i64),
     SetPrimary(i64),
@@ -929,23 +945,37 @@ impl PoolShared {
             self.notify("error", "Choose a saved companion radio first.");
             return;
         }
-        // A saved USB radio reconnects by its stored path; BLE resolves through the scan list.
-        let saved_usb = self.db.list_saved_radios().ok().and_then(|rows| {
+        // USB and TCP reconnect by stored address; BLE resolves through the scan list.
+        let saved_row = self.db.list_saved_radios().ok().and_then(|rows| {
             rows.into_iter().find(|row| {
-                row.transport == "usb"
+                (row.transport == "usb" || row.transport == "tcp")
                     && (row.address.eq_ignore_ascii_case(&target)
                         || row.label.eq_ignore_ascii_case(&target))
             })
         });
-        if let Some(row) = saved_usb {
+        if let Some(row) = saved_row {
             self.notify("connecting", format!("Reconnecting to {}…", row.address));
-            self.start_slot("usb", &row.address, &row.label).await;
+            self.start_slot(&row.transport, &row.address, &row.label)
+                .await;
             return;
         }
         let address = stable_radio_address(&self.idle, &target);
         let label = scanned_label(&self.idle, &target);
         self.notify("connecting", format!("Reconnecting to {address}…"));
         self.start_slot("ble", &address, &label).await;
+    }
+
+    async fn connect_tcp_now(self: &Arc<Self>, raw: String) {
+        let address = match crate::tcp_radio::normalize_tcp_address(&raw) {
+            Ok(addr) => addr,
+            Err(err) => {
+                self.notify("error", err);
+                return;
+            }
+        };
+        let label = crate::tcp_radio::tcp_fallback_label(&address);
+        self.notify("connecting", format!("Opening TCP {address}…"));
+        self.start_slot("tcp", &address, &label).await;
     }
 
     async fn connect_usb_now(self: &Arc<Self>, raw: String) {
@@ -1009,6 +1039,7 @@ async fn pool_loop(pool: Arc<PoolShared>, mut rx: UnboundedReceiver<PoolCmd>) {
                 pool.start_slot("ble", &address, &label).await;
             }
             PoolCmd::ConnectUsb(path) => pool.connect_usb_now(path).await,
+            PoolCmd::ConnectTcp(address) => pool.connect_tcp_now(address).await,
             PoolCmd::DisconnectRadio(id) => {
                 pool.disconnect_slot(id);
             }
@@ -1042,7 +1073,7 @@ impl RadioHandle {
         self.ctl(PoolCmd::Pair { target, pin });
     }
 
-    /// Connect a saved radio (Bluetooth address or saved USB path).
+    /// Connect a saved radio (Bluetooth address, USB path, or TCP host:port).
     pub fn reconnect(&self, target: String) {
         self.ctl(PoolCmd::Reconnect(target));
     }
@@ -1055,6 +1086,11 @@ impl RadioHandle {
     /// Open a USB serial companion by path (prefer `/dev/serial/by-id/...`).
     pub fn connect_usb(&self, path: String) {
         self.ctl(PoolCmd::ConnectUsb(path));
+    }
+
+    /// Open a Wi-Fi / Ethernet companion over TCP (`host` or `host:port`, default 5000).
+    pub fn connect_tcp(&self, address: String) {
+        self.ctl(PoolCmd::ConnectTcp(address));
     }
 
     /// Disconnect one radio in the pool by database id.
@@ -1183,8 +1219,35 @@ impl RadioHandle {
     }
 
     pub fn run_cli(&self, contact_hex: String, text: String) {
-        self.pool
-            .route_to_primary(RadioCmd::RunCli { contact_hex, text });
+        self.pool.route_to_primary(RadioCmd::RunCli {
+            contact_hex,
+            text,
+            infra: false,
+        });
+    }
+
+    /// Remote CLI for claimed infrastructure (TXT_TYPE_CLI_DATA after ACL login).
+    pub fn run_infra_cli(&self, contact_hex: String, text: String) {
+        self.pool.route_to_primary(RadioCmd::RunCli {
+            contact_hex,
+            text,
+            infra: true,
+        });
+    }
+
+    /// Verify admin access on a repeater/room/sensor via RF login. Password is never logged.
+    pub fn login_infra(
+        &self,
+        pubkey_hex: String,
+        password: String,
+    ) -> oneshot::Receiver<Result<(), String>> {
+        let (tx, rx) = oneshot::channel();
+        self.pool.route_to_primary(RadioCmd::SendLogin {
+            pubkey_hex,
+            password,
+            reply: tx,
+        });
+        rx
     }
 
     pub fn probe_noise_samples(&self) {
@@ -1970,6 +2033,12 @@ async fn connect_transport(transport: &str, address: &str) -> Result<MeshCore, S
         "ble" => MeshCore::ble_connect(address)
             .await
             .map_err(|err| err.to_string()),
+        "tcp" => {
+            let (host, port) = crate::tcp_radio::parse_tcp_address(address)?;
+            MeshCore::tcp(&host, port)
+                .await
+                .map_err(|err| crate::tcp_radio::clarify_tcp_connect_error(&err.to_string()))
+        }
         other => Err(format!("Unknown radio transport `{other}`.")),
     }
 }
@@ -2699,17 +2768,18 @@ async fn apply_local_cli(
     }
 }
 
-/// Remote CLI: CMD_SEND_TXT_MSG with TXT_TYPE_CLI_COMMAND = 3.
+/// Remote CLI: CMD_SEND_TXT_MSG. `txt_type` 3 = companion remote; 1 = infra CLI_DATA.
 async fn apply_remote_cli(
     commands: &meshcore_rs::commands::CommandHandler,
     prefix: [u8; 6],
     text: &str,
+    txt_type: u8,
 ) -> Result<String, String> {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as u32)
         .unwrap_or(0);
-    let mut data = vec![0x02u8, 0x03, 0x00]; // SEND_TXT, CLI_COMMAND, attempt
+    let mut data = vec![0x02u8, txt_type, 0x00]; // SEND_TXT, type, attempt
     data.extend_from_slice(&ts.to_le_bytes());
     data.extend_from_slice(&prefix);
     data.extend_from_slice(text.as_bytes());
@@ -2718,6 +2788,73 @@ async fn apply_remote_cli(
         .await
         .map_err(|err| err.to_string())?;
     Ok("CLI command sent to contact (replies arrive as mesh messages).".into())
+}
+
+const INFRA_LOGIN_TIMEOUT: Duration = Duration::from_secs(25);
+const INFRA_ACL_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// `CMD_SEND_LOGIN` then prove admin via binary ACL request (guest must not pass).
+async fn apply_infra_login(
+    meshcore: &MeshCore,
+    pubkey_hex: &str,
+    password: &str,
+) -> Result<(), String> {
+    let key = parse_pubkey_full(pubkey_hex)?;
+    let password = password.trim();
+    if password.is_empty() {
+        return Err("Admin password required.".into());
+    }
+    if password.as_bytes().len() > 15 {
+        return Err("Password max 15 bytes (MeshCore limit).".into());
+    }
+
+    let commands = lock_commands_for_operator(meshcore).await?;
+    let mut early_rx = meshcore.dispatcher().receiver();
+
+    // Listen before send so a fast LOGIN_SUCCESS is not missed.
+    let send_result = commands
+        .send_login(Destination::Bytes(key.to_vec()), password)
+        .await
+        .map_err(|err| format!("Login send failed: {err}"));
+    if let Err(err) = send_result {
+        return Err(err);
+    }
+
+    let login_outcome = tokio::time::timeout(INFRA_LOGIN_TIMEOUT, async {
+        loop {
+            match early_rx.recv().await {
+                Ok(event) if event.event_type == EventType::LoginSuccess => {
+                    return Ok(());
+                }
+                Ok(event) if event.event_type == EventType::LoginFailed => {
+                    return Err(
+                        "Login failed — wrong password or node unreachable.".to_string(),
+                    );
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(_) => return Err("Companion event stream closed.".into()),
+            }
+        }
+    })
+    .await;
+
+    match login_outcome {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => return Err(err),
+        Err(_) => return Err("Login timed out — no reply from node.".into()),
+    }
+
+    // Admin proof: guests should not receive ACL. Password never appears here.
+    match commands
+        .request_acl_with_timeout(Destination::Bytes(key.to_vec()), INFRA_ACL_TIMEOUT)
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(_) => Err(
+            "Admin password required (guest login or ACL unread).".into(),
+        ),
+    }
 }
 
 enum SessionEnd {
@@ -3017,6 +3154,8 @@ async fn run_session(
         EventType::Ack,
         EventType::Disconnected,
         EventType::MessagesWaiting,
+        EventType::LoginSuccess,
+        EventType::LoginFailed,
     ] {
         let event_tx = event_tx.clone();
         let subscription = meshcore
@@ -3360,7 +3499,11 @@ async fn run_session(
                             Err(err) => write_status(status, "connected", err.to_string()),
                         }
                     }
-                    Some(RadioCmd::RunCli { contact_hex, text }) => {
+                    Some(RadioCmd::RunCli {
+                        contact_hex,
+                        text,
+                        infra,
+                    }) => {
                         let text = text.trim().to_string();
                         if text.is_empty() {
                             push_cli_line(status, "Empty command.");
@@ -3370,6 +3513,7 @@ async fn run_session(
                             .lock()
                             .unwrap_or_else(|err| err.into_inner())
                             .protocol_ver;
+                        let txt_type = if infra { 1u8 } else { 3u8 };
                         let result = if contact_hex.trim().is_empty() {
                             apply_local_cli(&meshcore, &text, protocol_ver).await
                         } else {
@@ -3377,7 +3521,8 @@ async fn run_session(
                                 Ok(prefix) => {
                                     match lock_commands_for_operator(&meshcore).await {
                                         Ok(commands) => {
-                                            apply_remote_cli(&commands, prefix, &text).await
+                                            apply_remote_cli(&commands, prefix, &text, txt_type)
+                                                .await
                                         }
                                         Err(err) => Err(err),
                                     }
@@ -3396,6 +3541,26 @@ async fn run_session(
                                 write_status(status, "connected", err);
                             }
                         }
+                    }
+                    Some(RadioCmd::SendLogin {
+                        pubkey_hex,
+                        password,
+                        reply,
+                    }) => {
+                        // Never put the password in status/cli/audit.
+                        write_status(status, "connected", "Verifying infrastructure login…");
+                        let outcome = apply_infra_login(&meshcore, &pubkey_hex, &password).await;
+                        match &outcome {
+                            Ok(()) => {
+                                push_cli_line(status, "login ok");
+                                write_status(status, "connected", "Infrastructure login ok.");
+                            }
+                            Err(err) => {
+                                push_cli_line(status, format!("login failed: {err}"));
+                                write_status(status, "connected", err.clone());
+                            }
+                        }
+                        let _ = reply.send(outcome);
                     }
                     Some(RadioCmd::ProbeNoise) => {
                         // Run off the session select arm. Holding commands across
@@ -3444,6 +3609,12 @@ async fn run_session(
                             last_advert_sync = Instant::now();
                             need_contact_retry = true;
                             contact_retry_at = Instant::now();
+                        }
+                        // Infra CLI_DATA replies → CLI transcript (not chat enrollment).
+                        if let EventPayload::ContactMessage(ref msg) = event.payload {
+                            if msg.txt_type == 1 && !msg.text.trim().is_empty() {
+                                push_cli_line(status, msg.text.trim());
+                            }
                         }
                         // Bot replies only on the primary; every radio still ingests history.
                         let live_bot = ctx.is_primary();
@@ -4081,9 +4252,18 @@ async fn on_direct(
         .first()
         .map(|node| node.enrollment)
         .unwrap_or(crate::signup::Enrollment::Heard);
-    // Bot commands are METIS-INFO channel-only. DMs stay enrollment desk (signup/status).
-    let command = parse_command(&message.text);
-    let decision = decide(&command, current, unique);
+    // CLI_DATA (txt_type 1) is remote admin/stats reply — not signup chat.
+    let is_cli_data = message.txt_type == 1;
+    let decision = if is_cli_data {
+        crate::signup::ReplyDecision {
+            enrollment: current,
+            requested_name: None,
+            reply: None,
+        }
+    } else {
+        let command = parse_command(&message.text);
+        decide(&command, current, unique)
+    };
     let pubkey = unique.then(|| matches[0].pubkey.clone());
     let hops = hop_count_from_path_len(message.path_len).map(i64::from);
     let raw = json!({
@@ -4097,7 +4277,7 @@ async fn on_direct(
     });
     let inserted = db
         .insert_message(
-            "direct",
+            if is_cli_data { "cli" } else { "direct" },
             "rx",
             pubkey.as_deref(),
             &prefix,
@@ -4117,8 +4297,10 @@ async fn on_direct(
         return Ok(());
     };
     if let Some(ref pubkey) = pubkey {
-        db.set_enrollment(pubkey, decision.enrollment, decision.requested_name.clone())
-            .map_err(|err| err.to_string())?;
+        if !is_cli_data {
+            db.set_enrollment(pubkey, decision.enrollment, decision.requested_name.clone())
+                .map_err(|err| err.to_string())?;
+        }
         let _ = db.touch_last_heard(pubkey);
         remember_route(db, meshcore, pubkey, message_id).await;
     }

@@ -5,8 +5,9 @@ alwaysApply: true
 
 # Radio
 
-- One Tokio task owns each companion. Bluetooth allows one client. The phone app must be disconnected.
+- One Tokio task owns each companion (BLE, USB, or TCP). Bluetooth allows one GATT client; the phone app must be disconnected for that radio. USB and TCP do not use a companion PIN.
 - Connecting over Bluetooth asks for the six-digit companion PIN, pairs through the system agent, then opens the GATT session. Do not show the PIN in the message list or status text after entry.
+- TCP (Wi-Fi / Ethernet companion firmware) connects to `host:port` (default port 5000). Reconnect by the saved address; no pairing step.
 - On connect: app start, device query, set the clock, incremental `get_contacts(since)`, drain queued messages, subscribe, auto-fetch.
 - Persist every parsed contact and message field, plus a JSON snapshot. Do not drop unknown values.
 - Save latitude and longitude only when an advert or telemetry includes them. Ignore 0,0.

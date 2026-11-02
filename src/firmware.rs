@@ -112,6 +112,10 @@ fn selection_path() -> PathBuf {
     firmware_root().join("selection.json")
 }
 
+fn unavailable_path() -> PathBuf {
+    firmware_root().join("unavailable.json")
+}
+
 fn releases_dir() -> PathBuf {
     firmware_root().join("releases")
 }
@@ -374,8 +378,23 @@ pub struct SelectionEntry {
 pub struct FirmwareSelection {
     #[serde(default)]
     pub updated_at: i64,
+    /// Operator asked for every community offer (Latest). Restored when reopening Manage.
+    #[serde(default)]
+    pub download_all: bool,
     #[serde(default)]
     pub entries: Vec<SelectionEntry>,
+}
+
+/// True when every catalog offer key is present in the selection entries.
+pub fn selection_covers_all_offers(
+    selection: &FirmwareSelection,
+    offers: &[FirmwareOffer],
+) -> bool {
+    if offers.is_empty() {
+        return false;
+    }
+    let selected: BTreeSet<&str> = selection.entries.iter().map(|e| e.key.as_str()).collect();
+    offers.iter().all(|o| selected.contains(o.key.as_str()))
 }
 
 pub fn selection_key(device: &str, role: &str) -> String {
@@ -500,6 +519,24 @@ pub fn save_selection(sel: &FirmwareSelection) -> Result<(), String> {
     fs::write(selection_path(), raw).map_err(|e| e.to_string())
 }
 
+/// Selected offer keys whose patterns matched no GitHub/CDN asset on the last sync.
+pub fn load_unavailable_keys() -> BTreeSet<String> {
+    let Ok(raw) = fs::read_to_string(unavailable_path()) else {
+        return BTreeSet::new();
+    };
+    serde_json::from_str::<Vec<String>>(&raw)
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
+}
+
+fn save_unavailable_keys(keys: &BTreeSet<String>) -> Result<(), String> {
+    ensure_dirs()?;
+    let list: Vec<String> = keys.iter().cloned().collect();
+    let raw = serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?;
+    fs::write(unavailable_path(), raw).map_err(|e| e.to_string())
+}
+
 /// Pick latest or previous from a newest-first tag list.
 pub fn pick_tag_for_policy(tags: &[String], policy: VersionPolicy) -> Option<String> {
     match policy {
@@ -565,6 +602,7 @@ pub fn auto_seed_selection_from_index(
     }
     FirmwareSelection {
         updated_at: now_unix(),
+        download_all: false,
         entries,
     }
 }
@@ -1031,6 +1069,7 @@ fn run_sync(_db: &Db) -> Result<(), String> {
         index.assets.clear();
         index.updated_at = now_unix();
         index.save()?;
+        let _ = save_unavailable_keys(&BTreeSet::new());
         prune_to_keep(&BTreeSet::new(), &BTreeSet::new())?;
         let (count, bytes) = index.refresh_totals();
         set_sync(|s| {
@@ -1049,13 +1088,19 @@ fn run_sync(_db: &Db) -> Result<(), String> {
     let offer_by_key: BTreeMap<_, _> = offers.iter().map(|o| (o.key.clone(), o)).collect();
     // (tag, name) -> (family, optional github asset for download)
     let mut needed: BTreeMap<(String, String), (String, Option<GhAsset>)> = BTreeMap::new();
+    let mut unavailable: BTreeSet<String> = BTreeSet::new();
 
     for entry in &selection.entries {
         let Some(offer) = offer_by_key.get(&entry.key) else {
+            unavailable.insert(entry.key.clone());
             continue;
         };
         if !offer.static_versions.is_empty() {
             let names = wanted_names_for_offer(offer, entry.version, &[]);
+            if names.is_empty() {
+                unavailable.insert(entry.key.clone());
+                continue;
+            }
             for name in names {
                 needed
                     .entry(("catalog-static".into(), name))
@@ -1065,13 +1110,26 @@ fn run_sync(_db: &Db) -> Result<(), String> {
         }
         let tags = family_tags.get(&offer.family).cloned().unwrap_or_default();
         let Some(tag) = pick_tag_for_policy(&tags, entry.version) else {
+            unavailable.insert(entry.key.clone());
             continue;
         };
         let Some(rel) = releases_by_tag.get(&tag) else {
+            unavailable.insert(entry.key.clone());
             continue;
         };
         let release_names: Vec<String> = rel.assets.iter().map(|a| a.name.clone()).collect();
         let names = wanted_names_for_offer(offer, entry.version, &release_names);
+        if names.is_empty() {
+            // Catalog lists the role, but this MeshCore release has no matching asset.
+            unavailable.insert(entry.key.clone());
+            hq_log!(
+                warn,
+                "firmware: no published asset for {} ({}) on {tag}",
+                offer.device,
+                offer.role_pill
+            );
+            continue;
+        }
         for name in names {
             let gh = rel.assets.iter().find(|a| a.name == name).cloned();
             needed
@@ -1079,6 +1137,7 @@ fn run_sync(_db: &Db) -> Result<(), String> {
                 .or_insert_with(|| (offer.family.clone(), gh));
         }
     }
+    let _ = save_unavailable_keys(&unavailable);
 
     let mut next_assets: Vec<IndexAsset> = Vec::new();
     let total = needed.len().max(1);
@@ -1174,14 +1233,20 @@ fn run_sync(_db: &Db) -> Result<(), String> {
     index.save()?;
     let (count, bytes) = index.refresh_totals();
     let n_sel = selection.entries.len();
+    let n_unavail = unavailable.len();
+    let detail = if n_unavail == 0 {
+        format!("{n_sel} selected · {count} assets · {}", format_bytes(bytes))
+    } else {
+        format!(
+            "{n_sel} selected · {count} assets · {} · {n_unavail} role(s) not published upstream",
+            format_bytes(bytes)
+        )
+    };
 
     set_sync(|s| {
         s.running = false;
         s.phase = "ready".into();
-        s.detail = format!(
-            "{n_sel} selected · {count} assets · {}",
-            format_bytes(bytes)
-        );
+        s.detail = detail;
         s.last_ok_at = index.updated_at;
         s.asset_count = count;
         s.bytes_on_disk = bytes;
@@ -1329,34 +1394,70 @@ pub fn open_firmware_folder() -> Result<(), String> {
     Ok(())
 }
 
+/// `file://` URI with spaces / non-ASCII percent-encoded (D-Bus needs this).
+fn path_as_file_uri(path: &Path) -> String {
+    let abs = path.to_string_lossy();
+    let mut out = String::from("file://");
+    for b in abs.as_bytes() {
+        let c = *b;
+        let keep = c.is_ascii_alphanumeric()
+            || matches!(c, b'/' | b'-' | b'_' | b'.' | b'~');
+        if keep {
+            out.push(c as char);
+        } else {
+            out.push('%');
+            out.push(char::from_digit((c >> 4) as u32, 16).unwrap_or('0'));
+            out.push(char::from_digit((c & 0xf) as u32, 16).unwrap_or('0'));
+        }
+    }
+    out
+}
+
+fn spawn_detached(mut cmd: Command) -> Result<(), String> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 fn open_folder_detached(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        Command::new("explorer")
-            .arg(path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        return Ok(());
+        return spawn_detached({
+            let mut c = Command::new("explorer");
+            c.arg(path);
+            c
+        });
     }
     #[cfg(target_os = "macos")]
     {
-        Command::new("open")
-            .arg(path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        return Ok(());
+        return spawn_detached({
+            let mut c = Command::new("open");
+            c.arg(path);
+            c
+        });
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        // Prefer the FreeDesktop FileManager interface (opens a normal window,
-        // not a chooser dialog tied to our GTK/WebView).
-        let uri = format!("file://{}", path.display());
+        // Prefer path-based openers first — they handle spaces. D-Bus ShowFolders
+        // used to "succeed" with an unencoded `MetisMesh HQ` URI and open nothing.
+        let path_s = path.display().to_string();
+        for (bin, args) in [
+            ("gio", vec!["open".into(), path_s.clone()]),
+            ("xdg-open", vec![path_s.clone()]),
+            ("nautilus", vec![path_s.clone()]),
+            ("thunar", vec![path_s.clone()]),
+            ("dolphin", vec![path_s.clone()]),
+        ] {
+            let mut cmd = Command::new(bin);
+            cmd.args(&args);
+            if spawn_detached(cmd).is_ok() {
+                return Ok(());
+            }
+        }
+        let uri = path_as_file_uri(path);
         let dbus_ok = Command::new("dbus-send")
             .args([
                 "--session",
@@ -1376,14 +1477,10 @@ fn open_folder_detached(path: &Path) -> Result<(), String> {
         if dbus_ok {
             return Ok(());
         }
-        Command::new("xdg-open")
-            .arg(path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        return Ok(());
+        return Err(format!(
+            "Could not open folder {} (tried gio, xdg-open, FileManager1)",
+            path.display()
+        ));
     }
     #[allow(unreachable_code)]
     Ok(())

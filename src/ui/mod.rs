@@ -773,6 +773,7 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
         .unwrap_or_default();
     let kind_rows = zero_filled_kind_rows(&kind_counts);
     let activity_labels = activity_hour_labels(&traffic_hourly);
+    let activity_point_labels = activity_hour_point_labels(&traffic_hourly);
     let battery_points = state()
         .db
         .telemetry_series("battery", since_24h)
@@ -1077,7 +1078,12 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
                                 }
                                 p { class: "text-xl font-semibold tabular-nums text-signal", "{total_tx_24h}" }
                                 p { class: "mt-0.5 text-[0.65rem] text-muted-foreground", "Outbound last 24h" }
-                                Sparkline { values: traffic_tx.clone(), tone: "signal".to_string() }
+                                Sparkline {
+                                    values: traffic_tx.clone(),
+                                    tone: "signal".to_string(),
+                                    labels: activity_point_labels.clone(),
+                                    value_suffix: "msgs".to_string(),
+                                }
                             }
                             div { class: "metric-tile",
                                 div { class: "mb-1 flex items-center gap-1.5 text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground",
@@ -1086,7 +1092,12 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
                                 }
                                 p { class: "text-xl font-semibold tabular-nums text-sky-200", "{total_rx_24h}" }
                                 p { class: "mt-0.5 text-[0.65rem] text-muted-foreground", "Inbound last 24h" }
-                                Sparkline { values: traffic_rx.clone(), tone: "ok".to_string() }
+                                Sparkline {
+                                    values: traffic_rx.clone(),
+                                    tone: "ok".to_string(),
+                                    labels: activity_point_labels.clone(),
+                                    value_suffix: "msgs".to_string(),
+                                }
                             }
                         }
                     }
@@ -1148,6 +1159,7 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
                         ],
                         height: 160.0,
                         labels: activity_labels,
+                        point_labels: activity_point_labels,
                     }
                 }
                 Card { title: "Traffic mix".to_string(), icon: Some(IconName::Messages),
@@ -1281,6 +1293,21 @@ fn activity_hour_labels(hours: &[crate::db::HourlyTraffic]) -> Vec<String> {
                 "now".into()
             } else {
                 hour_tick_label(hours[index].hour_start)
+            }
+        })
+        .collect()
+}
+
+fn activity_hour_point_labels(hours: &[crate::db::HourlyTraffic]) -> Vec<String> {
+    let last = hours.len().saturating_sub(1);
+    hours
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            if index == last {
+                "now".into()
+            } else {
+                hour_tick_label(row.hour_start)
             }
         })
         .collect()
@@ -3438,8 +3465,13 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
         use_signal(Vec::<crate::firmware::FirmwareOffer>::new);
     let mut flasher_manage_on_disk =
         use_signal(std::collections::BTreeSet::<String>::new);
+    let mut flasher_manage_unavailable =
+        use_signal(std::collections::BTreeSet::<String>::new);
     let mut flasher_manage_family_tags =
         use_signal(std::collections::BTreeMap::<String, Vec<String>>::new);
+    // Expanded device cards in Manage (collapsed by default — full expand freezes WebView).
+    let mut flasher_manage_expanded =
+        use_signal(std::collections::BTreeSet::<String>::new);
     let mut flasher_download_all = use_signal(|| false);
     let mut flasher_sync_enabled = use_signal(|| {
         crate::services::setting_bool(&state().db, "firmware_sync_enabled", true)
@@ -6168,6 +6200,7 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                 let full_set_label = crate::firmware::estimate_full_set_label();
                 // While Manage is open, skip index/catalog/USB work — only the cached offer list.
                 let on_disk_keys = flasher_manage_on_disk();
+                let unavailable_keys = flasher_manage_unavailable();
                 let manage_groups: Vec<(i32, String, String, Vec<crate::firmware::FirmwareOffer>)> =
                     if manage_open {
                         let manage_query = flasher_manage_query();
@@ -6383,28 +6416,47 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                                                 .as_ref()
                                                 .map(crate::firmware::community_offers)
                                                 .unwrap_or_default();
-                                            // Open immediately with a cheap draft; seed/on-disk off UI thread.
-                                            let sel = crate::firmware::load_selection();
+                                            // Open immediately with a cheap draft; disk hints load in background.
+                                            // Do not let background work rewrite draft / Download-all (race).
+                                            let had_selection = crate::firmware::selection_file_exists();
+                                            let sel = if had_selection {
+                                                crate::firmware::load_selection()
+                                            } else {
+                                                crate::firmware::FirmwareSelection::default()
+                                            };
                                             let mut draft = std::collections::BTreeMap::new();
-                                            for entry in sel.entries {
-                                                draft.insert(entry.key.clone(), entry);
+                                            for entry in sel.entries.iter() {
+                                                draft.insert(entry.key.clone(), entry.clone());
                                             }
+                                            let all_selected = sel.download_all
+                                                || crate::firmware::selection_covers_all_offers(
+                                                    &sel,
+                                                    &offers,
+                                                );
                                             flasher_manage_offers.set(offers.clone());
                                             flasher_manage_on_disk.set(std::collections::BTreeSet::new());
+                                            flasher_manage_unavailable
+                                                .set(crate::firmware::load_unavailable_keys());
                                             flasher_manage_family_tags
                                                 .set(std::collections::BTreeMap::new());
                                             flasher_manage_draft.set(draft);
                                             flasher_manage_query.set(String::new());
-                                            flasher_download_all.set(false);
+                                            flasher_manage_expanded
+                                                .set(std::collections::BTreeSet::new());
+                                            flasher_download_all.set(all_selected);
                                             flasher_manage_open.set(true);
                                             spawn(async move {
                                                 let offers_bg = offers;
                                                 let result = tokio::task::spawn_blocking(move || {
                                                     let index = crate::firmware::load_index();
-                                                    let seeded = crate::firmware::load_or_seed_selection(
-                                                        &offers_bg,
-                                                        &index,
-                                                    );
+                                                    let seeded = if had_selection {
+                                                        None
+                                                    } else {
+                                                        Some(crate::firmware::load_or_seed_selection(
+                                                            &offers_bg,
+                                                            &index,
+                                                        ))
+                                                    };
                                                     let on_disk = crate::firmware::local_offer_keys(
                                                         &offers_bg,
                                                         &index,
@@ -6413,21 +6465,43 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                                                         crate::firmware::family_tags_from_index(
                                                             &index,
                                                         );
-                                                    (seeded, on_disk, family_tags)
+                                                    let unavailable =
+                                                        crate::firmware::load_unavailable_keys();
+                                                    (seeded, on_disk, family_tags, unavailable)
                                                 })
                                                 .await;
                                                 match result {
-                                                    Ok((seeded, on_disk, family_tags)) => {
-                                                        let mut draft =
-                                                            std::collections::BTreeMap::new();
-                                                        for entry in seeded.entries {
-                                                            draft.insert(entry.key.clone(), entry);
+                                                    Ok((seeded, on_disk, family_tags, unavailable)) => {
+                                                        if let Some(seeded) = seeded {
+                                                            if !seeded.entries.is_empty()
+                                                                && flasher_manage_draft().is_empty()
+                                                            {
+                                                                let mut draft_map =
+                                                                    std::collections::BTreeMap::new();
+                                                                for entry in seeded.entries {
+                                                                    draft_map.insert(
+                                                                        entry.key.clone(),
+                                                                        entry,
+                                                                    );
+                                                                }
+                                                                let all_selected = crate::firmware::selection_covers_all_offers(
+                                                                    &crate::firmware::FirmwareSelection {
+                                                                        download_all: false,
+                                                                        entries: draft_map
+                                                                            .values()
+                                                                            .cloned()
+                                                                            .collect(),
+                                                                        updated_at: 0,
+                                                                    },
+                                                                    &flasher_manage_offers(),
+                                                                );
+                                                                flasher_manage_draft.set(draft_map);
+                                                                flasher_download_all.set(all_selected);
+                                                            }
                                                         }
-                                                        flasher_manage_draft.set(draft);
                                                         flasher_manage_on_disk.set(on_disk);
+                                                        flasher_manage_unavailable.set(unavailable);
                                                         flasher_manage_family_tags.set(family_tags);
-                                                        flasher_tick
-                                                            .with_mut(|n| *n = n.wrapping_add(1));
                                                     }
                                                     Err(err) => {
                                                         hq_log!(
@@ -6463,8 +6537,12 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                                         kind: ButtonKind::Ghost,
                                         onclick: move |_| {
                                             // Detached file-manager open — never a modal file dialog.
-                                            if let Err(err) = crate::firmware::open_firmware_folder() {
-                                                hq_log!(warn, "open firmware folder: {err}");
+                                            match crate::firmware::open_firmware_folder() {
+                                                Ok(()) => status_note("Opening firmware folder…"),
+                                                Err(err) => {
+                                                    hq_log!(warn, "open firmware folder: {err}");
+                                                    status_note(format!("Open folder failed: {err}"));
+                                                }
                                             }
                                         },
                                         "Open folder"
@@ -6500,7 +6578,33 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                             TextInput {
                                 value: flasher_manage_query(),
                                 placeholder: "Search maker, model, or role…",
-                                oninput: move |event: FormEvent| flasher_manage_query.set(event.value()),
+                                oninput: move |event: FormEvent| {
+                                    let q = event.value();
+                                    flasher_manage_query.set(q.clone());
+                                    // Auto-expand small search results; keep full list collapsed.
+                                    if q.trim().len() >= 2 {
+                                        let offers = flasher_manage_offers();
+                                        let mut devices = std::collections::BTreeSet::new();
+                                        for offer in offers.iter() {
+                                            if fuzzy_score(
+                                                &q,
+                                                &[
+                                                    &offer.maker_label,
+                                                    &offer.device,
+                                                    &offer.role_label,
+                                                    &offer.role_pill,
+                                                ],
+                                            )
+                                            .is_some()
+                                            {
+                                                devices.insert(offer.device.clone());
+                                            }
+                                        }
+                                        if devices.len() <= 8 {
+                                            flasher_manage_expanded.set(devices);
+                                        }
+                                    }
+                                },
                             }
                         }
                         label { class: "mb-2 flex items-center gap-2 text-sm",
@@ -6511,11 +6615,7 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                                     let next = !flasher_download_all();
                                     flasher_download_all.set(next);
                                     if next {
-                                        let catalog = crate::firmware::load_catalog().ok();
-                                        let offers = catalog
-                                            .as_ref()
-                                            .map(crate::firmware::community_offers)
-                                            .unwrap_or_default();
+                                        let offers = flasher_manage_offers();
                                         let mut draft = flasher_manage_draft();
                                         for offer in offers {
                                             draft.insert(
@@ -6531,6 +6631,7 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                                         }
                                         flasher_manage_draft.set(draft);
                                     }
+                                    // Turning off leaves individual checks as-is (plan).
                                 }
                             }
                             "Download all (Latest)"
@@ -6539,6 +6640,9 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                             p { class: "mb-3 text-xs text-amber-200",
                                 "Full set is {full_set_label}. Disk can grow further if Previous versions are kept too."
                             }
+                        }
+                        p { class: "mb-2 text-xs text-muted-foreground",
+                            "Click a board to expand its roles. Cards stay collapsed so the list stays responsive."
                         }
                         div { class: "fw-manage-list mb-3",
                             if manage_groups.is_empty() {
@@ -6553,17 +6657,33 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                                 for (_score, device_name, maker_label, roles) in manage_groups.iter() {
                                     {
                                         let card_key = device_name.clone();
+                                        let card_toggle = card_key.clone();
+                                        let expanded = flasher_manage_expanded().contains(&card_key);
+                                        let draft = flasher_manage_draft();
                                         let selected_n = roles
                                             .iter()
-                                            .filter(|o| flasher_manage_draft().contains_key(&o.key))
+                                            .filter(|o| draft.contains_key(&o.key))
                                             .count();
                                         let role_n = roles.len();
+                                        let chevron = if expanded { "▾" } else { "▸" };
                                         rsx! {
                                             div {
                                                 key: "{card_key}",
                                                 class: "fw-manage-card",
-                                                div { class: "fw-manage-card-head",
-                                                    div { class: "min-w-0",
+                                                button {
+                                                    class: "fw-manage-card-head fw-manage-card-head-btn",
+                                                    r#type: "button",
+                                                    onclick: move |_| {
+                                                        let mut open = flasher_manage_expanded();
+                                                        if open.contains(&card_toggle) {
+                                                            open.remove(&card_toggle);
+                                                        } else {
+                                                            open.insert(card_toggle.clone());
+                                                        }
+                                                        flasher_manage_expanded.set(open);
+                                                    },
+                                                    span { class: "fw-manage-card-chevron", "{chevron}" }
+                                                    div { class: "min-w-0 flex-1",
                                                         p { class: "fw-manage-card-title", "{device_name}" }
                                                         p { class: "fw-manage-card-maker", "{maker_label}" }
                                                     }
@@ -6571,96 +6691,109 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                                                         "{selected_n}/{role_n} roles"
                                                     }
                                                 }
-                                                for (role_idx, offer) in roles.iter().enumerate() {
-                                                    {
-                                                        let key = offer.key.clone();
-                                                        let key_toggle = key.clone();
-                                                        let key_ver = key.clone();
-                                                        let device = offer.device.clone();
-                                                        let maker_id = offer.maker_id.clone();
-                                                        let role = offer.role.clone();
-                                                        let pill = offer.role_pill.clone();
-                                                        let family_tags = flasher_manage_family_tags()
-                                                            .get(&offer.family)
-                                                            .cloned()
-                                                            .unwrap_or_default();
-                                                        let latest_label = crate::firmware::version_policy_option_label(
-                                                            crate::firmware::VersionPolicy::Latest,
-                                                            &family_tags,
-                                                            &offer.static_versions,
-                                                        );
-                                                        let previous_label = crate::firmware::version_policy_option_label(
-                                                            crate::firmware::VersionPolicy::Previous,
-                                                            &family_tags,
-                                                            &offer.static_versions,
-                                                        );
-                                                        let checked = flasher_manage_draft().contains_key(&key);
-                                                        let version = flasher_manage_draft()
-                                                            .get(&key)
-                                                            .map(|e| e.version)
-                                                            .unwrap_or(crate::firmware::VersionPolicy::Latest);
-                                                        let on_disk = on_disk_keys.contains(&key);
-                                                        let row_class = if role_idx % 2 == 0 {
-                                                            "fw-manage-role-row fw-manage-role-row-even"
-                                                        } else {
-                                                            "fw-manage-role-row fw-manage-role-row-odd"
-                                                        };
-                                                        rsx! {
-                                                            div {
-                                                                key: "{key}",
-                                                                class: "{row_class}",
-                                                                input {
-                                                                    r#type: "checkbox",
-                                                                    checked: checked,
-                                                                    oninput: move |_| {
-                                                                        let mut draft = flasher_manage_draft();
-                                                                        if draft.contains_key(&key_toggle) {
-                                                                            draft.remove(&key_toggle);
-                                                                            flasher_download_all.set(false);
+                                                if expanded {
+                                                    for (role_idx, offer) in roles.iter().enumerate() {
+                                                        {
+                                                            let key = offer.key.clone();
+                                                            let key_toggle = key.clone();
+                                                            let key_ver = key.clone();
+                                                            let device = offer.device.clone();
+                                                            let maker_id = offer.maker_id.clone();
+                                                            let role = offer.role.clone();
+                                                            let pill = offer.role_pill.clone();
+                                                            let family_tags = flasher_manage_family_tags()
+                                                                .get(&offer.family)
+                                                                .cloned()
+                                                                .unwrap_or_default();
+                                                            let latest_label = crate::firmware::version_policy_option_label(
+                                                                crate::firmware::VersionPolicy::Latest,
+                                                                &family_tags,
+                                                                &offer.static_versions,
+                                                            );
+                                                            let previous_label = crate::firmware::version_policy_option_label(
+                                                                crate::firmware::VersionPolicy::Previous,
+                                                                &family_tags,
+                                                                &offer.static_versions,
+                                                            );
+                                                            let checked = draft.contains_key(&key);
+                                                            let version = draft
+                                                                .get(&key)
+                                                                .map(|e| e.version)
+                                                                .unwrap_or(crate::firmware::VersionPolicy::Latest);
+                                                            let on_disk = on_disk_keys.contains(&key);
+                                                            let unpublished = unavailable_keys.contains(&key);
+                                                            let row_class = if role_idx % 2 == 0 {
+                                                                "fw-manage-role-row fw-manage-role-row-even"
+                                                            } else {
+                                                                "fw-manage-role-row fw-manage-role-row-odd"
+                                                            };
+                                                            let offers_len = flasher_manage_offers().len();
+                                                            rsx! {
+                                                                div {
+                                                                    key: "{key}",
+                                                                    class: "{row_class}",
+                                                                    input {
+                                                                        r#type: "checkbox",
+                                                                        checked: checked,
+                                                                        oninput: move |_| {
+                                                                            let mut draft = flasher_manage_draft();
+                                                                            if draft.contains_key(&key_toggle) {
+                                                                                draft.remove(&key_toggle);
+                                                                                flasher_download_all.set(false);
+                                                                            } else {
+                                                                                draft.insert(
+                                                                                    key_toggle.clone(),
+                                                                                    crate::firmware::SelectionEntry {
+                                                                                        key: key_toggle.clone(),
+                                                                                        device: device.clone(),
+                                                                                        maker: maker_id.clone(),
+                                                                                        role: role.clone(),
+                                                                                        version: crate::firmware::VersionPolicy::Latest,
+                                                                                    },
+                                                                                );
+                                                                                if offers_len > 0
+                                                                                    && draft.len() == offers_len
+                                                                                {
+                                                                                    flasher_download_all.set(true);
+                                                                                }
+                                                                            }
+                                                                            flasher_manage_draft.set(draft);
+                                                                        }
+                                                                    }
+                                                                    span { class: "fw-manage-pill", "{pill}" }
+                                                                    select {
+                                                                        class: "fw-manage-version",
+                                                                        value: "{version.as_str()}",
+                                                                        disabled: !checked,
+                                                                        onchange: move |event: FormEvent| {
+                                                                            let policy = crate::firmware::VersionPolicy::parse(&event.value());
+                                                                            let mut draft = flasher_manage_draft();
+                                                                            if let Some(entry) = draft.get_mut(&key_ver) {
+                                                                                entry.version = policy;
+                                                                            }
+                                                                            flasher_manage_draft.set(draft);
+                                                                        },
+                                                                        option {
+                                                                            value: "latest",
+                                                                            style: "background-color:#151a20;color:#f4f4f5;",
+                                                                            "{latest_label}"
+                                                                        }
+                                                                        option {
+                                                                            value: "previous",
+                                                                            style: "background-color:#151a20;color:#f4f4f5;",
+                                                                            "{previous_label}"
+                                                                        }
+                                                                    }
+                                                                    span { class: "fw-manage-status",
+                                                                        if on_disk {
+                                                                            span { class: "fw-manage-status-on", "On disk" }
+                                                                        } else if unpublished {
+                                                                            span { class: "fw-manage-status-off", title: "MeshCore did not publish this role for the selected release",
+                                                                                "Not published"
+                                                                            }
                                                                         } else {
-                                                                            draft.insert(
-                                                                                key_toggle.clone(),
-                                                                                crate::firmware::SelectionEntry {
-                                                                                    key: key_toggle.clone(),
-                                                                                    device: device.clone(),
-                                                                                    maker: maker_id.clone(),
-                                                                                    role: role.clone(),
-                                                                                    version: crate::firmware::VersionPolicy::Latest,
-                                                                                },
-                                                                            );
+                                                                            span { class: "fw-manage-status-off", "Missing" }
                                                                         }
-                                                                        flasher_manage_draft.set(draft);
-                                                                    }
-                                                                }
-                                                                span { class: "fw-manage-pill", "{pill}" }
-                                                                select {
-                                                                    class: "fw-manage-version",
-                                                                    value: "{version.as_str()}",
-                                                                    disabled: !checked,
-                                                                    onchange: move |event: FormEvent| {
-                                                                        let policy = crate::firmware::VersionPolicy::parse(&event.value());
-                                                                        let mut draft = flasher_manage_draft();
-                                                                        if let Some(entry) = draft.get_mut(&key_ver) {
-                                                                            entry.version = policy;
-                                                                        }
-                                                                        flasher_manage_draft.set(draft);
-                                                                    },
-                                                                    option {
-                                                                        value: "latest",
-                                                                        style: "background-color:#151a20;color:#f4f4f5;",
-                                                                        "{latest_label}"
-                                                                    }
-                                                                    option {
-                                                                        value: "previous",
-                                                                        style: "background-color:#151a20;color:#f4f4f5;",
-                                                                        "{previous_label}"
-                                                                    }
-                                                                }
-                                                                span { class: "fw-manage-status",
-                                                                    if on_disk {
-                                                                        span { class: "fw-manage-status-on", "On disk" }
-                                                                    } else {
-                                                                        span { class: "fw-manage-status-off", "Missing" }
                                                                     }
                                                                 }
                                                             }
@@ -6678,10 +6811,17 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                                 disabled: sync_busy,
                                 onclick: move |_| {
                                     let draft = flasher_manage_draft();
-                                    let sel = crate::firmware::FirmwareSelection {
+                                    let offers = flasher_manage_offers();
+                                    let entries: Vec<_> = draft.into_values().collect();
+                                    let mut sel = crate::firmware::FirmwareSelection {
                                         updated_at: 0,
-                                        entries: draft.into_values().collect(),
+                                        download_all: flasher_download_all(),
+                                        entries,
                                     };
+                                    // Keep the flag honest if every offer is checked even without the toggle.
+                                    if crate::firmware::selection_covers_all_offers(&sel, &offers) {
+                                        sel.download_all = true;
+                                    }
                                     if let Err(err) = crate::firmware::save_selection(&sel) {
                                         hq_log!(warn, "save firmware selection: {err}");
                                         return;

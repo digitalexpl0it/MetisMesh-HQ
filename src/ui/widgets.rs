@@ -492,34 +492,110 @@ pub fn Sparkline(
     /// When false, scale to the series min/max (battery mV). Traffic stays zero-based.
     #[props(default = true)]
     zero_based: bool,
+    /// Optional per-point labels for hover (e.g. hour ticks).
+    #[props(default)]
+    labels: Vec<String>,
+    /// Shown after the numeric value in the tip (`12 msgs`).
+    #[props(default)]
+    value_suffix: String,
 ) -> Element {
     const W: f32 = 120.0;
     const H: f32 = 40.0;
+    let mut hover = use_signal(|| None::<usize>);
     let color = spark_color(&tone);
     let paths = spark_paths(&values, W, H, zero_based);
+    let n = values.len();
+    let step = if n <= 1 { 0.0 } else { W / (n as f32 - 1.0) };
+    let (floor, span) = spark_scale(&values, zero_based);
+    let tip = hover().and_then(|idx| {
+        values.get(idx).map(|v| {
+            let label = labels
+                .get(idx)
+                .cloned()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| format!("#{idx}"));
+            let suffix = if value_suffix.is_empty() {
+                String::new()
+            } else {
+                format!(" {value_suffix}")
+            };
+            (label, format!("{:.0}{suffix}", *v))
+        })
+    });
+    let tip_style = match hover() {
+        Some(idx) if n > 1 => {
+            let pct = ((idx as f32 / (n as f32 - 1.0)) * 100.0).clamp(10.0, 90.0);
+            format!("left: {pct:.1}%;")
+        }
+        _ => "left: 50%;".to_string(),
+    };
     rsx! {
-        if let Some((line, fill)) = paths {
-            svg {
-                class: "mt-1.5 h-10 w-full",
-                view_box: "0 0 {W} {H}",
-                preserve_aspect_ratio: "none",
-                path {
-                    d: "{fill}",
-                    fill: "{color}",
-                    fill_opacity: "0.22",
-                    stroke: "none",
-                }
-                path {
-                    d: "{line}",
-                    fill: "none",
-                    stroke: "{color}",
-                    stroke_width: "1.75",
-                    stroke_linecap: "round",
-                    stroke_linejoin: "round",
+        div { class: "sparkline-chart",
+            if let Some((label, vals)) = tip {
+                div { class: "chart-tip", style: "{tip_style}",
+                    p { class: "chart-tip-time", "{label}" }
+                    p { class: "chart-tip-vals", "{vals}" }
                 }
             }
-        } else {
-            div { class: "mt-1.5 h-10 w-full rounded bg-muted/40" }
+            if let Some((line, fill)) = paths {
+                svg {
+                    class: "sparkline-chart-svg",
+                    view_box: "0 0 {W} {H}",
+                    preserve_aspect_ratio: "none",
+                    onmouseleave: move |_| hover.set(None),
+                    path {
+                        d: "{fill}",
+                        fill: "{color}",
+                        fill_opacity: "0.22",
+                        stroke: "none",
+                        pointer_events: "none",
+                    }
+                    path {
+                        d: "{line}",
+                        fill: "none",
+                        stroke: "{color}",
+                        stroke_width: "1.75",
+                        stroke_linecap: "round",
+                        stroke_linejoin: "round",
+                        pointer_events: "none",
+                    }
+                    if let Some(idx) = hover() {
+                        {
+                            let x = idx as f32 * step;
+                            let y = H - ((values[idx] - floor) / span) * (H - 2.0) - 1.0;
+                            rsx! {
+                                line {
+                                    x1: "{x}", y1: "0", x2: "{x}", y2: "{H}",
+                                    stroke: "#ffffff33", stroke_width: "1",
+                                    pointer_events: "none",
+                                }
+                                circle {
+                                    cx: "{x}", cy: "{y}", r: "2.8",
+                                    fill: "{color}", stroke: "#101418", stroke_width: "1.1",
+                                    pointer_events: "none",
+                                }
+                            }
+                        }
+                    }
+                    for (idx, _) in values.iter().enumerate() {
+                        {
+                            let x = if n <= 1 { 0.0 } else { idx as f32 * step };
+                            let hit_w = if n <= 1 { W } else { (step * 0.9).max(4.0) };
+                            let hit_x = (x - hit_w / 2.0).max(0.0);
+                            rsx! {
+                                rect {
+                                    key: "{idx}",
+                                    x: "{hit_x}", y: "0", width: "{hit_w}", height: "{H}",
+                                    fill: "transparent",
+                                    onmouseenter: move |_| hover.set(Some(idx)),
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                div { class: "sparkline-chart-svg rounded bg-muted/40" }
+            }
         }
     }
 }
@@ -698,9 +774,15 @@ pub struct ChartSeries {
 pub fn LineChart(
     series: Vec<ChartSeries>,
     #[props(default = 160.0)] height: f32,
-    #[props(default)] labels: Vec<String>,
+    /// Sparse axis labels under the chart (not one per point).
+    #[props(default)]
+    labels: Vec<String>,
+    /// One label per data point for hover tips (falls back to axis labels / index).
+    #[props(default)]
+    point_labels: Vec<String>,
 ) -> Element {
     const W: f32 = 640.0;
+    let mut hover = use_signal(|| None::<usize>);
     let has_data = series
         .iter()
         .any(|row| row.values.iter().any(|value| *value > 0.0));
@@ -715,12 +797,46 @@ pub fn LineChart(
         .fold(0.0_f32, f32::max)
         .max(1.0);
     let plot_bottom = height - 4.0;
+    let n = series
+        .iter()
+        .map(|row| row.values.len())
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let step = if n <= 1 { 0.0 } else { W / (n as f32 - 1.0) };
+    let tip = hover().map(|idx| {
+        let when = point_labels
+            .get(idx)
+            .cloned()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("Point {}", idx + 1));
+        let mut parts = Vec::new();
+        for row in series.iter() {
+            let v = row.values.get(idx).copied().unwrap_or(0.0);
+            parts.push(format!("{} {:.0}", row.label, v));
+        }
+        (when, parts.join(" · "))
+    });
+    let tip_style = match hover() {
+        Some(idx) if n > 1 => {
+            let pct = ((idx as f32 / (n as f32 - 1.0)) * 100.0).clamp(8.0, 92.0);
+            format!("left: {pct:.1}%;")
+        }
+        _ => "left: 50%;".to_string(),
+    };
     rsx! {
-        div { class: "flex flex-col gap-2",
+        div { class: "line-chart flex flex-col gap-2",
+            if let Some((when, vals)) = tip {
+                div { class: "chart-tip", style: "{tip_style}",
+                    p { class: "chart-tip-time", "{when}" }
+                    p { class: "chart-tip-vals", "{vals}" }
+                }
+            }
             svg {
-                class: "h-40 w-full",
+                class: "line-chart-svg",
                 view_box: "0 0 {W} {height}",
                 preserve_aspect_ratio: "none",
+                onmouseleave: move |_| hover.set(None),
                 line {
                     x1: "0",
                     y1: "{plot_bottom}",
@@ -728,12 +844,11 @@ pub fn LineChart(
                     y2: "{plot_bottom}",
                     stroke: "#ffffff14",
                     stroke_width: "1",
+                    pointer_events: "none",
                 }
                 for row in series.iter() {
                     {
                         let color = spark_color(&row.tone);
-                        let n = row.values.len().max(1);
-                        let step = if n <= 1 { 0.0 } else { W / (n as f32 - 1.0) };
                         let mut line = String::new();
                         for (index, value) in row.values.iter().enumerate() {
                             let x = index as f32 * step;
@@ -748,6 +863,7 @@ pub fn LineChart(
                         rsx! {
                             g {
                                 key: "{row.label}",
+                                pointer_events: "none",
                                 path {
                                     d: "{fill}",
                                     fill: "{color}",
@@ -762,6 +878,48 @@ pub fn LineChart(
                                     stroke_linecap: "round",
                                     stroke_linejoin: "round",
                                 }
+                            }
+                        }
+                    }
+                }
+                if let Some(idx) = hover() {
+                    {
+                        let x = idx as f32 * step;
+                        rsx! {
+                            line {
+                                x1: "{x}", y1: "0", x2: "{x}", y2: "{height}",
+                                stroke: "#ffffff33", stroke_width: "1",
+                                pointer_events: "none",
+                            }
+                            for row in series.iter() {
+                                {
+                                    let color = spark_color(&row.tone);
+                                    let value = row.values.get(idx).copied().unwrap_or(0.0);
+                                    let y = plot_bottom - (value / max) * (plot_bottom - 8.0) - 4.0;
+                                    rsx! {
+                                        circle {
+                                            key: "dot-{row.label}",
+                                            cx: "{x}", cy: "{y}", r: "3.2",
+                                            fill: "{color}", stroke: "#101418", stroke_width: "1.25",
+                                            pointer_events: "none",
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                for idx in 0..n {
+                    {
+                        let x = if n <= 1 { 0.0 } else { idx as f32 * step };
+                        let hit_w = if n <= 1 { W } else { (step * 0.9).max(6.0) };
+                        let hit_x = (x - hit_w / 2.0).max(0.0);
+                        rsx! {
+                            rect {
+                                key: "hit-{idx}",
+                                x: "{hit_x}", y: "0", width: "{hit_w}", height: "{height}",
+                                fill: "transparent",
+                                onmouseenter: move |_| hover.set(Some(idx)),
                             }
                         }
                     }
@@ -798,6 +956,7 @@ pub struct BarMixRow {
 
 #[component]
 pub fn BarMix(rows: Vec<BarMixRow>) -> Element {
+    let mut hover = use_signal(|| None::<String>);
     if rows.is_empty() {
         return rsx! {
             p { class: "py-8 text-center text-sm text-muted-foreground", "No data yet" }
@@ -805,9 +964,20 @@ pub fn BarMix(rows: Vec<BarMixRow>) -> Element {
     }
     let max = rows.iter().map(|row| row.count).max().unwrap_or(0).max(1) as f32;
     const CHART_H: f32 = 120.0;
+    let tip = hover().and_then(|key| {
+        rows.iter()
+            .find(|row| row.label == key)
+            .map(|row| (row.label.clone(), row.count))
+    });
     rsx! {
-        div {
+        div { class: "bar-mix-chart",
             style: "display:flex;align-items:flex-end;justify-content:space-around;gap:0.75rem;min-height:10rem;padding:0.25rem 0.15rem 0;",
+            if let Some((label, count)) = tip {
+                div { class: "chart-tip", style: "left: 50%;",
+                    p { class: "chart-tip-time", "{label}" }
+                    p { class: "chart-tip-vals", "{count} messages" }
+                }
+            }
             for row in rows {
                 {
                     let height_pct = ((row.count as f32 / max) * 100.0).clamp(0.0, 100.0);
@@ -817,10 +987,14 @@ pub fn BarMix(rows: Vec<BarMixRow>) -> Element {
                         (CHART_H * height_pct / 100.0).max(6.0)
                     };
                     let color = spark_color(&row.tone);
+                    let label_key = row.label.clone();
+                    let label_enter = row.label.clone();
                     rsx! {
                         div {
-                            key: "{row.label}",
-                            style: "display:flex;flex:1;min-width:0;flex-direction:column;align-items:center;gap:0.4rem;",
+                            key: "{label_key}",
+                            class: "bar-mix-col",
+                            onmouseenter: move |_| hover.set(Some(label_enter.clone())),
+                            onmouseleave: move |_| hover.set(None),
                             span {
                                 style: "font-size:0.75rem;font-weight:600;font-variant-numeric:tabular-nums;color:#f4f4f5;",
                                 "{row.count}"
@@ -828,8 +1002,7 @@ pub fn BarMix(rows: Vec<BarMixRow>) -> Element {
                             div {
                                 style: "display:flex;width:100%;height:{CHART_H}px;align-items:flex-end;justify-content:center;",
                                 div {
-                                    title: "{row.label}: {row.count}",
-                                    style: "width:70%;max-width:2.75rem;height:{bar_h}px;border-radius:0.45rem 0.45rem 0.2rem 0.2rem;background:{color};box-shadow:0 0 10px {color}33;transition:height 0.3s ease;",
+                                    style: "width:70%;max-width:2.75rem;height:{bar_h}px;border-radius:0.45rem 0.45rem 0.2rem 0.2rem;background:{color};box-shadow:0 0 10px {color}33;transition:height 0.3s ease, filter 0.15s ease;cursor:default;",
                                 }
                             }
                             span {

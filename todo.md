@@ -81,6 +81,14 @@ Mirror MeshCore community firmware while online; flash over USB when the interne
 - [x] **G3** Settings → Flasher: device/role/version/port; ESP32 via esptool; nRF52 via adafruit-nrfutil or UF2 path; erase off by default
 - [x] **G4** Selective locker + Manage overlay: `selection.json`, Download-all (~1 GB), Latest/Previous, fuzzy/zebra/pills; sync downloads only the checked set and prunes orphans
 
+## Phase H — Standalone desktop ship
+
+HQ must run offline as a normal desktop app on operator laptops — no Docker, no cloud runtime. One program per OS.
+
+- [ ] **H1** Standalone executables for **Linux**, **Windows**, and **macOS** (`dx` / Cargo desktop release builds); ship with bundled MapLibre assets; document install + first-run `data/` location
+- [ ] **H2** Smoke each target: window opens, SQLite creates under `data/`, BLE/USB paths degrade cleanly when hardware is absent
+- [ ] **H3** SQLite durability: confirm **WAL** journal mode on open (already set in `Db::open`); keep WAL + checkpoint behavior healthy under multi-radio ingest so the DB does not choke or lock up; note `-wal`/`-shm` beside the main file in backup docs
+
 ## Non-goals (for now)
 
 - Potato federation / multi-ingestor dashboard
@@ -100,6 +108,7 @@ Mirror MeshCore community firmware while online; flash over USB when the interne
 7. F1 → F3 (USB + multi-radio; primary companion owns bot)  
 8. E1 → E3 (backup first), then E4 / F4–F5 polish  
 9. G1 → G4 (offline firmware locker + selective Manage overlay + USB flasher)  
+10. H1 → H3 (standalone Linux/Windows/macOS + WAL-safe SQLite)  
 
 ## Success checks
 
@@ -112,3 +121,5 @@ Mirror MeshCore community firmware while online; flash over USB when the interne
 - [x] USB companion + BLE/USB second radio both live under one HQ; bot TX from primary only
 - [x] Backup restores roster + secrets on a fresh machine; import does not flood radio contacts
 - [ ] Map uploader (if on): only infra GPS adverts; companions/tracks stay local
+- [ ] Release artifacts: one standalone binary (or app bundle) each for Linux, Windows, macOS
+- [ ] Fresh launch: `PRAGMA journal_mode` reports `wal`; app survives concurrent radio writes without SQLite lock storms

@@ -976,15 +976,54 @@ fn sync_enabled(db: &Db) -> bool {
         .unwrap_or(true)
 }
 
-fn sync_interval_secs(db: &Db) -> u64 {
+/// Allowed background intervals: 12h, 1 day, 30 days.
+pub fn normalize_sync_interval_hours(hours: u64) -> u64 {
+    match hours {
+        24 | 720 => hours,
+        _ => DEFAULT_SYNC_HOURS,
+    }
+}
+
+pub fn sync_interval_hours(db: &Db) -> u64 {
     let hours = db
         .setting("firmware_sync_interval_hours")
         .ok()
         .flatten()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_SYNC_HOURS)
-        .max(1);
-    hours.saturating_mul(3600)
+        .unwrap_or(DEFAULT_SYNC_HOURS);
+    normalize_sync_interval_hours(hours)
+}
+
+/// True when `last_ok_at` is missing or older than the interval (pure helper for tests).
+pub fn sync_due_at(last_ok_at: i64, now: i64, interval_secs: u64) -> bool {
+    if last_ok_at <= 0 {
+        return true;
+    }
+    now.saturating_sub(last_ok_at) >= interval_secs as i64
+}
+
+fn sync_interval_secs(db: &Db) -> u64 {
+    sync_interval_hours(db).saturating_mul(3600)
+}
+
+/// True when background sync is enabled and the interval has elapsed (or never synced).
+pub fn sync_is_due(db: &Db) -> bool {
+    if !sync_enabled(db) {
+        return false;
+    }
+    let last = {
+        let status_at = sync_status().last_ok_at;
+        if status_at > 0 {
+            status_at
+        } else {
+            db.setting("firmware_last_sync_at")
+                .ok()
+                .flatten()
+                .and_then(|v| v.parse::<i64>().ok())
+                .unwrap_or(0)
+        }
+    };
+    sync_due_at(last, now_unix(), sync_interval_secs(db))
 }
 
 /// Refresh disk totals into the status mutex from the current index.
@@ -1331,7 +1370,7 @@ pub fn start_sync(db: Arc<Db>) {
         .ok();
 }
 
-/// Background loop: startup sync + interval while enabled.
+/// Background loop: sync when due (interval / never-synced), not on every launch.
 pub fn spawn_sync_loop(db: Arc<Db>) {
     refresh_status_from_disk();
     if let Ok(Some(raw)) = db.setting("firmware_last_sync_at") {
@@ -1347,9 +1386,9 @@ pub fn spawn_sync_loop(db: Arc<Db>) {
             // Small delay so the window can open before a multi-GB pull.
             thread::sleep(Duration::from_secs(8));
             loop {
-                if sync_enabled(&db) {
+                if sync_is_due(&db) {
                     start_sync(db.clone());
-                    // Wait until idle before sleeping the interval.
+                    // Wait until idle before polling again.
                     loop {
                         thread::sleep(Duration::from_secs(2));
                         if !sync_status().running {
@@ -1357,8 +1396,8 @@ pub fn spawn_sync_loop(db: Arc<Db>) {
                         }
                     }
                 }
-                let wait = sync_interval_secs(&db);
-                thread::sleep(Duration::from_secs(wait));
+                // Short sleep so Settings interval / enable changes apply without restart.
+                thread::sleep(Duration::from_secs(60));
             }
         })
         .ok();
@@ -1959,5 +1998,23 @@ mod tests {
             version_policy_option_label(VersionPolicy::Previous, &tags[..1], &[]),
             "Previous"
         );
+    }
+
+    #[test]
+    fn sync_interval_hours_normalize() {
+        assert_eq!(normalize_sync_interval_hours(12), 12);
+        assert_eq!(normalize_sync_interval_hours(24), 24);
+        assert_eq!(normalize_sync_interval_hours(720), 720);
+        assert_eq!(normalize_sync_interval_hours(1), 12);
+        assert_eq!(normalize_sync_interval_hours(48), 12);
+    }
+
+    #[test]
+    fn sync_due_respects_interval() {
+        assert!(sync_due_at(0, 1_000, 12 * 3600));
+        assert!(!sync_due_at(1_000, 1_000 + 60, 12 * 3600));
+        assert!(sync_due_at(1_000, 1_000 + 12 * 3600, 12 * 3600));
+        assert!(!sync_due_at(1_000, 1_000 + 23 * 3600, 24 * 3600));
+        assert!(sync_due_at(1_000, 1_000 + 24 * 3600, 24 * 3600));
     }
 }

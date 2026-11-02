@@ -101,7 +101,28 @@ pub fn App() -> Element {
     let _ = tick();
     let toast_frame = toast_tick();
     let radio = state().radio.snapshot();
-    let pending = state().db.pending_nodes().unwrap_or_default().len();
+    let pending_signups = state().db.pending_nodes().unwrap_or_default().len();
+    let pending_alerts = state()
+        .db
+        .list_pending_service_events()
+        .unwrap_or_default()
+        .len();
+    let inbox_badge = (pending_signups + pending_alerts) as u32;
+    let roster_badge = state()
+        .db
+        .count_unnoticed_nodes()
+        .unwrap_or(0)
+        .max(0) as u32;
+    let channel_unread = state()
+        .db
+        .total_channel_unread()
+        .unwrap_or(0)
+        .max(0) as u32;
+    let dm_unread = state()
+        .db
+        .total_dm_unread()
+        .unwrap_or(0)
+        .max(0) as u32;
     let expanded = nav_open();
     let nav_width = if expanded { "w-56" } else { "w-[4.5rem]" };
     let brand_logo = crate::brand::custom_logo_url(&state().db);
@@ -182,14 +203,15 @@ pub fn App() -> Element {
                             label: "Roster".to_string(),
                             expanded,
                             active: page() == Page::Roster,
+                            badge: roster_badge,
                             onclick: move |_| page.set(Page::Roster),
                         }
                         NavButton {
                             icon: IconName::Inbox,
-                            label: if pending > 0 { format!("Inbox ({pending})") } else { "Inbox".into() },
+                            label: "Inbox".to_string(),
                             expanded,
                             active: page() == Page::Inbox,
-                            badge: pending as u32,
+                            badge: inbox_badge,
                             onclick: move |_| page.set(Page::Inbox),
                         }
                         NavButton {
@@ -197,6 +219,8 @@ pub fn App() -> Element {
                             label: "Messages".to_string(),
                             expanded,
                             active: page() == Page::Messages,
+                            badge: channel_unread,
+                            badge_alt: dm_unread,
                             onclick: move |_| page.set(Page::Messages),
                         }
                         NavButton {
@@ -340,7 +364,37 @@ fn status_icon(state: &str) -> IconName {
         "connected" => IconName::Radio,
         "connecting" | "reconnecting" | "scanning" | "pairing" | "disconnecting" => IconName::Scan,
         "error" => IconName::Close,
-        _ => IconName::Bluetooth,
+        _ => IconName::Radio,
+    }
+}
+
+fn transport_icon(transport: &str) -> IconName {
+    match transport {
+        "usb" => IconName::Usb,
+        "ble" => IconName::Bluetooth,
+        _ => IconName::Radio,
+    }
+}
+
+fn transport_label(transport: &str) -> &'static str {
+    match transport {
+        "usb" => "USB",
+        "ble" => "Bluetooth",
+        _ => "Companion",
+    }
+}
+
+/// Short age for overview chips (`12m ago`, `3h ago`, `2d ago`).
+fn format_age_secs(at: i64) -> String {
+    let age = (unix_now() - at).max(0);
+    if age < 60 {
+        "just now".into()
+    } else if age < 3600 {
+        format!("{}m ago", age / 60)
+    } else if age < 86_400 {
+        format!("{}h ago", age / 3600)
+    } else {
+        format!("{}d ago", age / 86_400)
     }
 }
 
@@ -357,6 +411,14 @@ fn status_label(state: &str) -> &'static str {
     }
 }
 
+fn format_nav_badge(count: u32) -> String {
+    if count > 99 {
+        "99+".into()
+    } else {
+        count.to_string()
+    }
+}
+
 #[component]
 fn NavButton(
     icon: IconName,
@@ -364,6 +426,8 @@ fn NavButton(
     expanded: bool,
     active: bool,
     #[props(default)] badge: u32,
+    /// Second badge (e.g. DM unread beside channel unread on Messages).
+    #[props(default)] badge_alt: u32,
     onclick: EventHandler<MouseEvent>,
 ) -> Element {
     let class = if active {
@@ -376,6 +440,9 @@ fn NavButton(
     } else {
         "h-12 w-full justify-center px-0"
     };
+    let show_badges = badge > 0 || badge_alt > 0;
+    let badge_label = format_nav_badge(badge);
+    let badge_alt_label = format_nav_badge(badge_alt);
     rsx! {
         button {
             class: "{class} {layout} cursor-pointer",
@@ -384,11 +451,31 @@ fn NavButton(
             if active {
                 span { class: "absolute left-0 top-2 bottom-2 w-0.5 rounded-full bg-signal" }
             }
-            Icon { name: icon, size: 24 }
+            span { class: "relative inline-flex shrink-0",
+                Icon { name: icon, size: 24 }
+                if !expanded && show_badges {
+                    span { class: "absolute -right-2 -top-1.5 flex items-center gap-0.5",
+                        if badge > 0 {
+                            span { class: "nav-count-badge", "{badge_label}" }
+                        }
+                        if badge_alt > 0 {
+                            span { class: "nav-count-badge nav-count-badge-alt", "{badge_alt_label}" }
+                        }
+                    }
+                }
+            }
             if expanded {
-                span { class: "truncate text-sm font-medium", "{label}" }
-            } else if badge > 0 {
-                span { class: "absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-signal" }
+                span { class: "min-w-0 flex-1 truncate text-sm font-medium", "{label}" }
+                if show_badges {
+                    span { class: "ml-auto flex shrink-0 items-center gap-1",
+                        if badge > 0 {
+                            span { class: "nav-count-badge", "{badge_label}" }
+                        }
+                        if badge_alt > 0 {
+                            span { class: "nav-count-badge nav-count-badge-alt", "{badge_alt_label}" }
+                        }
+                    }
+                }
             }
         }
     }
@@ -459,7 +546,12 @@ fn companion_display_name(row: &crate::db::RadioRow, devices: &[BleRadio]) -> St
 }
 
 fn companion_option_label(row: &crate::db::RadioRow, devices: &[BleRadio]) -> String {
-    companion_display_name(row, devices)
+    let name = companion_display_name(row, devices);
+    match row.transport.as_str() {
+        "usb" => format!("{name} · USB"),
+        "ble" => format!("{name} · BLE"),
+        _ => name,
+    }
 }
 
 /// Always-visible companion control in the page header.
@@ -496,6 +588,16 @@ fn HeaderRadioControls(radio: RadioStatus) -> Element {
         "connecting" | "reconnecting" | "pairing" | "scanning" | "disconnecting"
     );
     let show_live = linked || busy || !radio.connected_name.is_empty();
+    let selected_transport = saved_radios
+        .iter()
+        .find(|row| row.address == selected())
+        .map(|row| row.transport.as_str())
+        .unwrap_or("");
+    let connect_icon = if !radio.transport.is_empty() {
+        transport_icon(&radio.transport)
+    } else {
+        transport_icon(selected_transport)
+    };
 
     if show_live {
         let label = if !radio.connected_name.is_empty() {
@@ -503,11 +605,16 @@ fn HeaderRadioControls(radio: RadioStatus) -> Element {
         } else {
             selected()
         };
+        let live_icon = if linked && !radio.transport.is_empty() {
+            transport_icon(&radio.transport)
+        } else {
+            status_icon(&radio.state)
+        };
         return rsx! {
             div { class: "inline-flex items-center gap-2",
                 div { class: "inline-flex items-center gap-3 rounded-md border border-border bg-card px-3 py-1.5 text-xs text-muted-foreground",
                     span { class: "inline-flex min-w-0 items-center gap-2",
-                        Icon { name: status_icon(&radio.state), size: 14 }
+                        Icon { name: live_icon, size: 14 }
                         span { class: "text-foreground", "{status_label(&radio.state)}" }
                         if !label.is_empty() {
                             span { class: "max-w-[9rem] truncate text-muted-foreground", "· {label}" }
@@ -559,7 +666,7 @@ fn HeaderRadioControls(radio: RadioStatus) -> Element {
                     kind: ButtonKind::Ghost,
                     disabled: true,
                     onclick: move |_| {},
-                    Icon { name: IconName::Bluetooth, size: 14 }
+                    Icon { name: IconName::Radio, size: 14 }
                     "Connect"
                 }
             } else {
@@ -581,7 +688,7 @@ fn HeaderRadioControls(radio: RadioStatus) -> Element {
                     }
                 } else if let Some(row) = saved_radios.first() {
                     div { class: "inline-flex max-w-[12rem] items-center gap-2 rounded-md border border-border bg-card px-3 py-1.5 text-xs text-muted-foreground",
-                        Icon { name: IconName::Radio, size: 14 }
+                        Icon { name: transport_icon(&row.transport), size: 14 }
                         span { class: "truncate text-foreground",
                             "{companion_display_name(row, &radio.devices)}"
                         }
@@ -602,7 +709,7 @@ fn HeaderRadioControls(radio: RadioStatus) -> Element {
                             state().radio.reconnect(target);
                         }
                     },
-                    Icon { name: IconName::Bluetooth, size: 14 }
+                    Icon { name: connect_icon, size: 14 }
                     "Connect"
                 }
             }
@@ -805,13 +912,135 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
     };
     let battery_pct = radio.battery_pct.unwrap_or(0);
     let battery_width = if linked { battery_pct } else { 0 };
+    let selected_transport = saved_radios
+        .iter()
+        .find(|row| row.address == selected_radio())
+        .map(|row| row.transport.as_str())
+        .unwrap_or("");
+    let companion_transport = if !radio.transport.is_empty() {
+        radio.transport.as_str()
+    } else {
+        selected_transport
+    };
+    let companion_icon = transport_icon(companion_transport);
+    let companion_transport_chip = transport_label(companion_transport);
+    let pending_alerts = state()
+        .db
+        .list_pending_service_events()
+        .unwrap_or_default()
+        .len();
+    let primary_id = state().db.primary_radio_id().ok().flatten();
+    let primary_row = primary_id.and_then(|id| saved_radios.iter().find(|row| row.id == id));
+    let pool_live = if linked {
+        1u32 + radio.others_connected
+    } else {
+        radio.others_connected
+    };
+    let pool_hint = if saved_radios.is_empty() {
+        "No companions saved".to_string()
+    } else if let Some(row) = primary_row {
+        format!(
+            "{} primary · {} live",
+            companion_display_name(row, &radio.devices),
+            pool_live
+        )
+    } else {
+        format!(
+            "{} saved · {} live · no primary",
+            saved_radios.len(),
+            pool_live
+        )
+    };
+    let latest_backup = crate::backup::list_backup_entries(&crate::data_dir())
+        .into_iter()
+        .next();
+    let backup_hint = match latest_backup.as_ref() {
+        Some(entry) if entry.created_at > 0 => format_age_secs(entry.created_at),
+        Some(_) => "Backup on disk".to_string(),
+        None => "No backup yet".to_string(),
+    };
+    let fw_sync = crate::firmware::sync_status();
+    let firmware_hint = if fw_sync.running {
+        if fw_sync.phase.is_empty() {
+            "Syncing…".to_string()
+        } else {
+            format!("Syncing · {}", fw_sync.phase)
+        }
+    } else if fw_sync.last_ok_at > 0 {
+        format!(
+            "{} · {}",
+            format_age_secs(fw_sync.last_ok_at),
+            crate::firmware::format_bytes(fw_sync.bytes_on_disk)
+        )
+    } else if fw_sync.asset_count > 0 {
+        format!(
+            "{} assets · {}",
+            fw_sync.asset_count,
+            crate::firmware::format_bytes(fw_sync.bytes_on_disk)
+        )
+    } else {
+        "Locker empty".to_string()
+    };
+    let alerts_hint = if pending_alerts == 0 {
+        "No pending alerts".to_string()
+    } else if pending_alerts == 1 {
+        "1 alert waiting".to_string()
+    } else {
+        format!("{pending_alerts} alerts waiting")
+    };
 
     rsx! {
         div {
-            class: "mx-auto flex w-full max-w-7xl flex-col gap-4 rounded-xl p-1",
+            class: "mx-auto flex w-full max-w-7xl flex-col gap-4 rounded-2xl p-4 sm:p-5",
             style: "background: linear-gradient(180deg, #0c0f12 0%, #12171c 100%);",
             PageHeading { icon: IconName::Dashboard, title: "Overview".to_string(),
                 "Live status for the headquarters radio, roster, and recent mesh traffic."
+            }
+            section { class: "flex flex-wrap items-stretch gap-2",
+                button {
+                    class: "inline-flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-left hover:bg-muted/40 cursor-pointer",
+                    onclick: move |_| on_navigate.call(Page::Inbox),
+                    span { class: "flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-accent text-signal",
+                        Icon { name: IconName::Inbox, size: 14 }
+                    }
+                    span { class: "min-w-0",
+                        span { class: "block text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground", "Alerts" }
+                        span { class: "block truncate text-sm text-foreground", "{alerts_hint}" }
+                    }
+                }
+                button {
+                    class: "inline-flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-left hover:bg-muted/40 cursor-pointer",
+                    onclick: move |_| on_navigate.call(Page::Settings),
+                    span { class: "flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-accent text-signal",
+                        Icon { name: IconName::Radio, size: 14 }
+                    }
+                    span { class: "min-w-0",
+                        span { class: "block text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground", "Radio pool" }
+                        span { class: "block truncate text-sm text-foreground", "{pool_hint}" }
+                    }
+                }
+                button {
+                    class: "inline-flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-left hover:bg-muted/40 cursor-pointer",
+                    onclick: move |_| on_navigate.call(Page::Settings),
+                    span { class: "flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-accent text-signal",
+                        Icon { name: IconName::Key, size: 14 }
+                    }
+                    span { class: "min-w-0",
+                        span { class: "block text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground", "Backup" }
+                        span { class: "block truncate text-sm text-foreground", "{backup_hint}" }
+                    }
+                }
+                button {
+                    class: "inline-flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-left hover:bg-muted/40 cursor-pointer",
+                    onclick: move |_| on_navigate.call(Page::Settings),
+                    span { class: "flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-accent text-signal",
+                        Icon { name: IconName::Scan, size: 14 }
+                    }
+                    span { class: "min-w-0",
+                        span { class: "block text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground", "Firmware" }
+                        span { class: "block truncate text-sm text-foreground", "{firmware_hint}" }
+                    }
+                }
             }
             div { class: "grid grid-cols-2 gap-3 lg:grid-cols-4",
                 OverviewStat {
@@ -875,14 +1104,22 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
                                 "Offline"
                             }
                         }
-                        span { class: "spec-chip",
-                            Icon { name: IconName::Radio, size: 12 }
-                            span { class: "ml-1", "HQ" }
+                        div { class: "inline-flex flex-wrap items-center gap-1.5",
+                            if companion_transport == "usb" || companion_transport == "ble" {
+                                span { class: "spec-chip",
+                                    Icon { name: companion_icon, size: 12 }
+                                    span { class: "ml-1", "{companion_transport_chip}" }
+                                }
+                            }
+                            span { class: "spec-chip",
+                                Icon { name: IconName::Radio, size: 12 }
+                                span { class: "ml-1", "HQ" }
+                            }
                         }
                     }
                     div { class: "flex items-start gap-3",
                         div { class: "flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-accent text-signal",
-                            Icon { name: IconName::Bluetooth, size: 22 }
+                            Icon { name: companion_icon, size: 22 }
                         }
                         div { class: "min-w-0 flex-1",
                             p { class: "truncate text-xl font-semibold tracking-tight", "{radio_label}" }
@@ -895,9 +1132,15 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
                                 if radio.sync_phase.is_active() {
                                     "{radio.sync_label}"
                                 } else if linked {
-                                    "Companion linked · synced"
+                                    if companion_transport == "usb" {
+                                        "USB companion linked · synced"
+                                    } else if companion_transport == "ble" {
+                                        "Bluetooth companion linked · synced"
+                                    } else {
+                                        "Companion linked · synced"
+                                    }
                                 } else {
-                                    "Pick a saved radio and connect"
+                                    "Pick a saved companion and connect"
                                 }
                             }
                         }
@@ -974,7 +1217,7 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
                     div { class: "mt-3 flex flex-col gap-2 border-t border-border pt-3",
                         if saved_radios.is_empty() {
                             p { class: "text-xs text-muted-foreground",
-                                "No saved companions yet. Pair one from Settings."
+                                "No saved companions yet. Add one from Settings."
                             }
                         } else {
                             div { class: "flex items-end gap-2",
@@ -1009,7 +1252,7 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
                                     Button {
                                         disabled: busy || selected_radio().trim().is_empty(),
                                         onclick: move |_| state().radio.reconnect(selected_radio()),
-                                        Icon { name: IconName::Bluetooth, size: 14 }
+                                        Icon { name: companion_icon, size: 14 }
                                         if busy { "Working" } else { "Connect" }
                                     }
                                 }
@@ -1019,7 +1262,7 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
                             kind: ButtonKind::Ghost,
                             onclick: move |_| on_navigate.call(Page::Settings),
                             Icon { name: IconName::Settings, size: 14 }
-                            "Pair new radio"
+                            "Add companion"
                         }
                     }
                 }
@@ -1667,7 +1910,12 @@ fn RosterPage() -> Element {
                         for (_score, node, title) in ranked {
                             tr { class: "border-t border-border",
                                 td { class: "px-3 py-2",
-                                    div { class: "font-medium", "{title}" }
+                                    div { class: "flex flex-wrap items-center gap-2",
+                                        span { class: "font-medium", "{title}" }
+                                        if !node.noticed {
+                                            span { class: "roster-new-pill", "NEW" }
+                                        }
+                                    }
                                     div { class: "font-mono text-xs text-muted-foreground", "{node.prefix}" }
                                 }
                                 td { class: "px-3 py-2", Badge { tone: node.enrollment.as_str().to_string(), "{node.enrollment.label()}" } }
@@ -1686,6 +1934,7 @@ fn RosterPage() -> Element {
                                             onclick: {
                                                 let pubkey = node.pubkey.clone();
                                                 move |_| {
+                                                    let _ = state().db.mark_node_noticed(&pubkey);
                                                     details_pubkey.set(Some(pubkey.clone()));
                                                 }
                                             },
@@ -1953,14 +2202,14 @@ fn InboxPage() -> Element {
     let secrets = state().secrets.clone();
     rsx! {
         div { class: "flex flex-col gap-3",
-            PageHeading { icon: IconName::Inbox, title: "Signup inbox".to_string(),
-                "A direct message of signup asks to join. Approval sends the bot-home and peer-net channel secrets. NWS alerts wait here when auto-relay is off."
+            PageHeading { icon: IconName::Inbox, title: "Inbox".to_string(),
+                "Operator queue for join requests and held community alerts. A node DMs signup to ask to join; approval sends the bot-home and peer-net secrets. Weather and Amber wait here when auto-relay is off. Ordinary chats are under Messages → Direct."
             }
             if pending.is_empty() {
                 Card { title: "Waiting", icon: Some(IconName::Inbox),
                     p { class: "inline-flex items-center gap-2 text-sm text-muted-foreground",
                         Icon { name: IconName::Check, size: 16 }
-                        "No pending signup requests."
+                        "No pending join requests."
                     }
                 }
             }
@@ -2046,7 +2295,9 @@ fn InboxPage() -> Element {
 fn MessagesPage() -> Element {
     // Select by name, not slot: radio sync remaps slots and used to make a
     // click on Public open METIS-INFO when both rows shared slot 1.
+    let mut messages_tab = use_signal(|| "channels".to_string());
     let mut selected_channel = use_signal(|| None::<String>);
+    let mut selected_dm = use_signal(|| None::<String>);
     let mut draft = use_signal(String::new);
     let mut create_name = use_signal(String::new);
     let mut create_visibility = use_signal(|| "private".to_string());
@@ -2091,6 +2342,9 @@ fn MessagesPage() -> Element {
         }
     }
     let channels = state().db.list_channels().unwrap_or_default();
+    let dm_threads = state().db.list_dm_threads().unwrap_or_default();
+    let channel_unread_total: i64 = channels.iter().map(|c| c.unread_count).sum();
+    let dm_unread_total: i64 = dm_threads.iter().map(|t| t.unread_count).sum();
     // Only enable Send once the live session loop is up (sync_phase Ready).
     // Mid-sync used to report state=connected while the command lock was held,
     // so Send did nothing.
@@ -2099,6 +2353,168 @@ fn MessagesPage() -> Element {
             radio.sync_phase,
             crate::radio::SyncPhase::Ready | crate::radio::SyncPhase::Idle
         );
+
+    if let Some(dm_pubkey) = selected_dm() {
+        let thread = dm_threads
+            .iter()
+            .find(|row| row.pubkey == dm_pubkey)
+            .cloned();
+        let node = state().db.get_node(&dm_pubkey).ok().flatten();
+        let title = node
+            .as_ref()
+            .map(|n| node_title(&n.name, &n.requested_name))
+            .or_else(|| thread.as_ref().map(|t| t.name.clone()))
+            .unwrap_or_else(|| {
+                dm_pubkey.chars().take(12).collect::<String>()
+            });
+        let messages = state()
+            .db
+            .list_dm_messages(&dm_pubkey, 400)
+            .unwrap_or_default();
+        let latest_id = messages.last().map(|m| m.id);
+        let anchor = state()
+            .db
+            .dm_last_read(&dm_pubkey)
+            .ok()
+            .flatten()
+            .filter(|id| messages.iter().any(|m| m.id == *id));
+        let new_count = match anchor {
+            Some(id) => messages.iter().filter(|m| m.id > id).count(),
+            None => 0,
+        };
+        let show_banner = anchor.is_some() && new_count > 0;
+        if !show_banner {
+            if let Some(id) = latest_id {
+                let _ = state().db.set_dm_last_read(&dm_pubkey, id);
+            }
+        }
+        let dm_key = dm_pubkey.clone();
+        return rsx! {
+            div { class: "mx-auto flex h-[calc(100vh-8rem)] max-w-4xl flex-col gap-3",
+                div { class: "flex flex-wrap items-center justify-between gap-3",
+                    div { class: "flex min-w-0 items-center gap-3",
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| {
+                                let _ = state().db.mark_dm_caught_up(&dm_key);
+                                selected_dm.set(None);
+                                draft.set(String::new());
+                                note.set(String::new());
+                            },
+                            Icon { name: IconName::ChevronRight, size: 14 }
+                            "Direct"
+                        }
+                        div { class: "min-w-0",
+                            h3 { class: "truncate text-lg font-semibold", "{title}" }
+                            p { class: "font-mono text-xs text-muted-foreground",
+                                "{dm_pubkey.chars().take(12).collect::<String>()}"
+                            }
+                        }
+                    }
+                }
+                div { class: "flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border bg-card",
+                    div { class: "min-h-0 flex-1 space-y-3 overflow-auto p-4",
+                        if messages.is_empty() {
+                            p { class: "text-sm text-muted-foreground", "No direct messages yet." }
+                        }
+                        for message in messages {
+                            {
+                                let outgoing = message.direction == "tx";
+                                let show_new = show_banner && anchor == Some(message.id);
+                                rsx! {
+                                    div {
+                                        key: "{message.id}",
+                                        class: if outgoing {
+                                            "ml-auto flex max-w-[85%] flex-col items-end gap-1"
+                                        } else {
+                                            "mr-auto flex max-w-[85%] flex-col items-start gap-1"
+                                        },
+                                        div {
+                                            class: if outgoing {
+                                                "min-w-[12rem] rounded-2xl rounded-br-md border border-sky-500/30 bg-[#16324f] px-3 py-2.5 text-sm text-sky-50"
+                                            } else {
+                                                "min-w-[12rem] rounded-2xl rounded-bl-md bg-muted px-3 py-2.5 text-sm"
+                                            },
+                                            p { class: "whitespace-pre-wrap break-words", "{message.text}" }
+                                            p { class: "mt-1 text-[0.65rem] text-muted-foreground",
+                                                "{format_time(Some(message.received_at))}"
+                                            }
+                                        }
+                                        if show_new {
+                                            span { class: "text-[0.7rem] font-medium text-signal",
+                                                if new_count == 1 { "New messages · 1" } else { "New messages · {new_count}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    div { class: "border-t border-border p-3",
+                        div { class: "flex gap-2",
+                            input {
+                                class: "h-10 min-w-0 flex-1 rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none",
+                                value: draft(),
+                                placeholder: "Direct message…",
+                                maxlength: "160",
+                                oninput: move |event: FormEvent| draft.set(event.value()),
+                                onkeydown: {
+                                    let peer = dm_pubkey.clone();
+                                    move |event: KeyboardEvent| {
+                                        if event.key() == Key::Enter {
+                                            event.prevent_default();
+                                            let body = draft().trim().to_string();
+                                            if body.is_empty() || !linked {
+                                                return;
+                                            }
+                                            match state().db.queue_text(&peer, &body, &body) {
+                                                Ok(_) => {
+                                                    draft.set(String::new());
+                                                    note.set(String::new());
+                                                    refresh.set(refresh() + 1);
+                                                }
+                                                Err(err) => note.set(err.to_string()),
+                                            }
+                                        }
+                                    }
+                                },
+                            }
+                            Button {
+                                disabled: !linked || draft().trim().is_empty(),
+                                onclick: {
+                                    let peer = dm_pubkey.clone();
+                                    move |_| {
+                                        let body = draft().trim().to_string();
+                                        if body.is_empty() {
+                                            return;
+                                        }
+                                        match state().db.queue_text(&peer, &body, &body) {
+                                            Ok(_) => {
+                                                draft.set(String::new());
+                                                note.set(String::new());
+                                                refresh.set(refresh() + 1);
+                                            }
+                                            Err(err) => note.set(err.to_string()),
+                                        }
+                                    }
+                                },
+                                Icon { name: IconName::Messages, size: 14 }
+                                "Send"
+                            }
+                        }
+                        if !note().is_empty() {
+                            p { class: "mt-2 text-xs text-amber-200", "{note}" }
+                        }
+                        if !linked {
+                            p { class: "mt-2 text-xs text-muted-foreground",
+                                "Connect a companion to send direct messages."
+                            }
+                        }
+                    }
+                }
+            }
+        };
+    }
 
     if let Some(selected_name) = selected_channel() {
         let channel = channels
@@ -2565,11 +2981,45 @@ fn MessagesPage() -> Element {
         };
     }
 
+    let on_channels_tab = messages_tab() == "channels";
     rsx! {
         div { class: "mx-auto flex max-w-6xl flex-col gap-4",
-            PageHeading { icon: IconName::Messages, title: "Channels".to_string(),
-                "Public and private channels on the headquarters companion. Secrets are never shown here."
+            PageHeading { icon: IconName::Messages, title: "Messages".to_string(),
+                "Channels on the headquarters companion, plus direct message threads. Channel secrets are never shown here."
             }
+            div { class: "settings-subtabs",
+                button {
+                    class: if on_channels_tab { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
+                    onclick: move |_| {
+                        messages_tab.set("channels".into());
+                        selected_dm.set(None);
+                    },
+                    span { class: "inline-flex items-center gap-2",
+                        "Channels"
+                        if channel_unread_total > 0 {
+                            span { class: "channel-unread-badge",
+                                if channel_unread_total > 99 { "99+" } else { "{channel_unread_total}" }
+                            }
+                        }
+                    }
+                }
+                button {
+                    class: if !on_channels_tab { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
+                    onclick: move |_| {
+                        messages_tab.set("direct".into());
+                        selected_channel.set(None);
+                    },
+                    span { class: "inline-flex items-center gap-2",
+                        "Direct"
+                        if dm_unread_total > 0 {
+                            span { class: "channel-unread-badge",
+                                if dm_unread_total > 99 { "99+" } else { "{dm_unread_total}" }
+                            }
+                        }
+                    }
+                }
+            }
+            if on_channels_tab {
             Card { title: "Default keep".to_string(), icon: Some(IconName::Clock),
                 p { class: "mb-3 text-sm text-muted-foreground",
                     "System default for channels and DMs. Each channel can override this on its card or while open. Roster, secrets, and audit stay."
@@ -2823,6 +3273,66 @@ fn MessagesPage() -> Element {
                                                 "Delete"
                                             }
                                         }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            } else {
+                if dm_threads.is_empty() {
+                    Card { title: "Direct messages".to_string(), icon: Some(IconName::Messages),
+                        p { class: "text-sm text-muted-foreground",
+                            "No direct message threads yet. When a node DMs this companion, or you send from Roster, the conversation appears here."
+                        }
+                    }
+                } else {
+                    div { class: "grid grid-cols-[repeat(auto-fill,minmax(16rem,1fr))] gap-3",
+                        for thread in dm_threads {
+                            {
+                                let pubkey = thread.pubkey.clone();
+                                let open_key = pubkey.clone();
+                                rsx! {
+                                    button {
+                                        key: "{pubkey}",
+                                        class: "flex flex-col rounded-lg border border-border bg-card p-4 text-left hover:bg-muted/40 cursor-pointer",
+                                        onclick: move |_| {
+                                            note.set(String::new());
+                                            draft.set(String::new());
+                                            selected_dm.set(Some(open_key.clone()));
+                                        },
+                                        div { class: "flex w-full items-start justify-between gap-2",
+                                            div { class: "flex min-w-0 items-center gap-2",
+                                                span { class: "text-muted-foreground",
+                                                    Icon { name: IconName::Messages, size: 18 }
+                                                }
+                                                p { class: "truncate font-semibold", "{thread.name}" }
+                                                if thread.unread_count > 0 {
+                                                    span { class: "channel-unread-badge",
+                                                        if thread.unread_count > 99 {
+                                                            "99+"
+                                                        } else {
+                                                            "{thread.unread_count}"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        p { class: "mt-1 font-mono text-xs text-muted-foreground",
+                                            "{pubkey.chars().take(12).collect::<String>()}"
+                                        }
+                                        p { class: "mt-2 line-clamp-2 text-sm text-muted-foreground",
+                                            if let Some(text) = thread.last_text.as_ref() {
+                                                "{text}"
+                                            } else {
+                                                "No messages yet"
+                                            }
+                                        }
+                                        div { class: "mt-auto flex w-full items-center justify-between pt-3 text-xs text-muted-foreground",
+                                            span { "{thread.message_count} messages" }
+                                            span { "{format_time(thread.last_message_at)}" }
                                         }
                                     }
                                 }
@@ -3475,6 +3985,9 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
     let mut flasher_download_all = use_signal(|| false);
     let mut flasher_sync_enabled = use_signal(|| {
         crate::services::setting_bool(&state().db, "firmware_sync_enabled", true)
+    });
+    let mut flasher_sync_interval = use_signal(|| {
+        crate::firmware::sync_interval_hours(&state().db).to_string()
     });
     let mut device_tab = use_signal(|| DeviceTab::Identity);
     let mut var_drafts = use_signal(std::collections::BTreeMap::<String, String>::new);
@@ -6550,21 +7063,60 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                                 }
                             }
                         }
-                        label { class: "flex items-center gap-2 text-sm",
-                            input {
-                                r#type: "checkbox",
-                                checked: flasher_sync_enabled(),
-                                oninput: move |_| {
-                                    let next = !flasher_sync_enabled();
-                                    flasher_sync_enabled.set(next);
-                                    crate::services::set_setting_bool(
-                                        &state().db,
-                                        "firmware_sync_enabled",
-                                        next,
-                                    );
+                        div { class: "flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center",
+                            label { class: "flex items-center gap-2 text-sm",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: flasher_sync_enabled(),
+                                    oninput: move |_| {
+                                        let next = !flasher_sync_enabled();
+                                        flasher_sync_enabled.set(next);
+                                        crate::services::set_setting_bool(
+                                            &state().db,
+                                            "firmware_sync_enabled",
+                                            next,
+                                        );
+                                    }
+                                }
+                                "Background sync when online"
+                            }
+                            div { class: "flex min-w-0 items-center gap-2 text-sm",
+                                label {
+                                    class: "shrink-0 text-muted-foreground",
+                                    r#for: "firmware-sync-interval",
+                                    "Check every"
+                                }
+                                SelectInput {
+                                    id: "firmware-sync-interval".to_string(),
+                                    value: flasher_sync_interval(),
+                                    onchange: move |event: FormEvent| {
+                                        let raw = event.value();
+                                        let hours = crate::firmware::normalize_sync_interval_hours(
+                                            raw.parse::<u64>().unwrap_or(12),
+                                        );
+                                        flasher_sync_interval.set(hours.to_string());
+                                        let _ = state().db.set_setting(
+                                            "firmware_sync_interval_hours",
+                                            &hours.to_string(),
+                                        );
+                                    },
+                                    option {
+                                        value: "12",
+                                        style: "background-color: #101418; color: #f4f4f5;",
+                                        "12 hours"
+                                    }
+                                    option {
+                                        value: "24",
+                                        style: "background-color: #101418; color: #f4f4f5;",
+                                        "1 day"
+                                    }
+                                    option {
+                                        value: "720",
+                                        style: "background-color: #101418; color: #f4f4f5;",
+                                        "30 days"
+                                    }
                                 }
                             }
-                            "Background sync every 12 hours when online"
                         }
                     }
                     SlideDownPanel {

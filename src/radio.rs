@@ -1688,6 +1688,7 @@ async fn run_node_discover(
                 0,
                 unix_now(),
                 &raw,
+                false, // live discover → Roster NEW
             )
             .is_ok()
         {
@@ -3660,6 +3661,7 @@ async fn sync_contacts(
             contact.adv_lon,
             contact.last_modification_timestamp as i64,
             &raw,
+            true, // bootstrap contact sync → stay noticed
         )
         .map_err(|err| err.to_string())?;
         contact_qr::enqueue_contact_qr(&pubkey);

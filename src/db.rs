@@ -81,6 +81,18 @@ pub struct NodeRow {
     pub qr_file: Option<String>,
     /// Exact `meshcore://contact/add…` URI the file encodes (stale if name/type changes).
     pub qr_uri: Option<String>,
+    /// False until the operator opens the node on Roster (live-heard only).
+    pub noticed: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DmThreadRow {
+    pub pubkey: String,
+    pub name: String,
+    pub last_text: Option<String>,
+    pub last_message_at: Option<i64>,
+    pub message_count: i64,
+    pub unread_count: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -292,6 +304,11 @@ impl Db {
             "ALTER TABLE nodes ADD COLUMN qr_uri TEXT",
             [],
         );
+        // Existing rows stay noticed; only live inserts set noticed=0.
+        let _ = conn.execute(
+            "ALTER TABLE nodes ADD COLUMN noticed INTEGER NOT NULL DEFAULT 1",
+            [],
+        );
         let _ = conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS rf_samples (
                 id INTEGER PRIMARY KEY,
@@ -449,6 +466,10 @@ impl Db {
             "ALTER TABLE nodes ADD COLUMN qr_uri TEXT",
             [],
         );
+        let _ = conn.execute(
+            "ALTER TABLE nodes ADD COLUMN noticed INTEGER NOT NULL DEFAULT 1",
+            [],
+        );
         let _ = conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS rf_samples (
                 id INTEGER PRIMARY KEY,
@@ -565,11 +586,13 @@ impl Db {
         } else {
             name.trim().chars().take(32).collect()
         };
+        // Bulk import is operator-driven — do not flood Roster with NEW pills.
+        let noticed = 1i64;
         conn.execute(
             "INSERT INTO nodes (
                 pubkey, name, contact_type, flags, path_len, hop_bytes, last_advert,
-                lat, lon, lastmod, enrollment, prefix, last_heard, raw_json
-             ) VALUES (?1, ?2, ?3, 0, -1, x'', NULL, ?4, ?5, ?6, ?7, ?8, ?6, '{}')
+                lat, lon, lastmod, enrollment, prefix, last_heard, raw_json, noticed
+             ) VALUES (?1, ?2, ?3, 0, -1, x'', NULL, ?4, ?5, ?6, ?7, ?8, ?6, '{}', ?9)
              ON CONFLICT(pubkey) DO UPDATE SET
                 name = excluded.name,
                 contact_type = excluded.contact_type,
@@ -586,7 +609,8 @@ impl Db {
                 store_lon,
                 heard,
                 merged.as_str(),
-                prefix
+                prefix,
+                noticed
             ],
         )?;
         Ok(if is_new { "new" } else { "updated" })
@@ -638,6 +662,24 @@ impl Db {
             .optional()?;
         if let Some(id) = latest {
             self.set_channel_last_read(slot, id)?;
+        }
+        Ok(())
+    }
+
+    pub fn mark_dm_caught_up(&self, pubkey: &str) -> Result<()> {
+        let latest: Option<i64> = self
+            .lock()
+            .query_row(
+                "SELECT id FROM messages
+                 WHERE kind = 'direct' AND sender_pubkey = ?1
+                 ORDER BY received_at DESC, id DESC
+                 LIMIT 1",
+                params![pubkey],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(id) = latest {
+            self.set_dm_last_read(pubkey, id)?;
         }
         Ok(())
     }
@@ -1616,6 +1658,9 @@ impl Db {
             .map_err(Error::from)
     }
 
+    /// Upsert a radio contact. When `quiet` is true (bootstrap contact sync), new
+    /// rows stay noticed so Roster is not flooded. Live discover/advert paths pass
+    /// `quiet = false` so NEW pills appear until the operator opens the node.
     pub fn upsert_contact(
         &self,
         pubkey: &str,
@@ -1629,6 +1674,7 @@ impl Db {
         lon_micro: i32,
         lastmod: i64,
         raw: &Value,
+        quiet: bool,
     ) -> Result<()> {
         let now = unix_now();
         let (lat, lon) = coords_from_micro(lat_micro, lon_micro);
@@ -1641,6 +1687,7 @@ impl Db {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
+        let is_new = existing.is_none();
         let enrollment = existing
             .as_ref()
             .map(|(value, _, _)| value.clone())
@@ -1652,11 +1699,12 @@ impl Db {
                 .map(|(_, old_lat, old_lon)| (*old_lat, *old_lon))
                 .unwrap_or((None, None)),
         };
+        let noticed = if is_new && !quiet { 0i64 } else { 1i64 };
         conn.execute(
             "INSERT INTO nodes (
                 pubkey, name, contact_type, flags, path_len, hop_bytes, last_advert,
-                lat, lon, lastmod, enrollment, prefix, last_heard, raw_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                lat, lon, lastmod, enrollment, prefix, last_heard, raw_json, noticed
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(pubkey) DO UPDATE SET
                 name = excluded.name,
                 contact_type = excluded.contact_type,
@@ -1684,7 +1732,8 @@ impl Db {
                 enrollment,
                 prefix,
                 now,
-                raw.to_string()
+                raw.to_string(),
+                noticed
             ],
         )?;
         if let (Some(lat), Some(lon)) = (lat, lon) {
@@ -1711,8 +1760,8 @@ impl Db {
         self.lock().execute(
             "INSERT INTO nodes (
                 pubkey, name, contact_type, flags, path_len, hop_bytes, last_advert,
-                lat, lon, lastmod, enrollment, prefix, last_heard, raw_json
-             ) VALUES (?1, ?2, 1, 0, -1, x'', ?3, ?4, ?5, ?3, 'hq', ?6, ?3, ?7)
+                lat, lon, lastmod, enrollment, prefix, last_heard, raw_json, noticed
+             ) VALUES (?1, ?2, 1, 0, -1, x'', ?3, ?4, ?5, ?3, 'hq', ?6, ?3, ?7, 1)
              ON CONFLICT(pubkey) DO UPDATE SET
                 name = excluded.name,
                 lat = COALESCE(excluded.lat, nodes.lat),
@@ -1729,7 +1778,8 @@ impl Db {
         let conn = self.lock();
         let mut stmt = conn.prepare(
             "SELECT pubkey, name, requested_name, contact_type, enrollment, last_heard,
-                    last_advert, lat, lon, prefix, hop_bytes, path_len, qr_file, qr_uri
+                    last_advert, lat, lon, prefix, hop_bytes, path_len, qr_file, qr_uri,
+                    COALESCE(noticed, 1)
              FROM nodes WHERE pubkey LIKE ?1 || '%'",
         )?;
         let rows = stmt.query_map(params![prefix_hex], map_node)?;
@@ -1740,7 +1790,8 @@ impl Db {
         let conn = self.lock();
         let mut stmt = conn.prepare(
             "SELECT pubkey, name, requested_name, contact_type, enrollment, last_heard,
-                    last_advert, lat, lon, prefix, hop_bytes, path_len, qr_file, qr_uri
+                    last_advert, lat, lon, prefix, hop_bytes, path_len, qr_file, qr_uri,
+                    COALESCE(noticed, 1)
              FROM nodes
              ORDER BY CASE enrollment
                 WHEN 'pending' THEN 0
@@ -1757,7 +1808,8 @@ impl Db {
         let conn = self.lock();
         let mut stmt = conn.prepare(
             "SELECT pubkey, name, requested_name, contact_type, enrollment, last_heard,
-                    last_advert, lat, lon, prefix, hop_bytes, path_len, qr_file, qr_uri
+                    last_advert, lat, lon, prefix, hop_bytes, path_len, qr_file, qr_uri,
+                    COALESCE(noticed, 1)
              FROM nodes WHERE enrollment = 'hq' LIMIT 1",
         )?;
         Ok(stmt.query_row([], map_node).optional()?)
@@ -1767,7 +1819,8 @@ impl Db {
         let conn = self.lock();
         let mut stmt = conn.prepare(
             "SELECT pubkey, name, requested_name, contact_type, enrollment, last_heard,
-                    last_advert, lat, lon, prefix, hop_bytes, path_len, qr_file, qr_uri
+                    last_advert, lat, lon, prefix, hop_bytes, path_len, qr_file, qr_uri,
+                    COALESCE(noticed, 1)
              FROM nodes WHERE pubkey = ?1",
         )?;
         Ok(stmt.query_row(params![pubkey], map_node).optional()?)
@@ -1796,13 +1849,131 @@ impl Db {
              LEFT JOIN paths p ON p.id = (
                 SELECT id FROM paths WHERE message_id = m.id ORDER BY id DESC LIMIT 1
              )
-             WHERE m.sender_pubkey = ?1
+             WHERE m.kind = 'direct' AND m.sender_pubkey = ?1
              ORDER BY m.received_at DESC, m.id DESC
              LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![pubkey, limit], Self::map_message_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Error::from)
+    }
+
+    /// Direct messages for a contact thread (oldest → newest for the chat pane).
+    pub fn list_dm_messages(&self, pubkey: &str, limit: i64) -> Result<Vec<MessageRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT m.id, m.direction, m.kind,
+                    COALESCE(n.name, m.sender_prefix, 'direct'),
+                    m.sender_pubkey, m.channel_idx, m.hop_count, m.display_text, m.delivery, m.received_at,
+                    p.source, COALESCE(p.path, x''), COALESCE(p.hash_size, 1), m.snr
+             FROM messages m
+             LEFT JOIN nodes n ON n.pubkey = m.sender_pubkey
+             LEFT JOIN paths p ON p.id = (
+                SELECT id FROM paths WHERE message_id = m.id ORDER BY id DESC LIMIT 1
+             )
+             WHERE m.kind = 'direct' AND m.sender_pubkey = ?1
+             ORDER BY m.received_at ASC, m.id ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![pubkey, limit], Self::map_message_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::from)
+    }
+
+    fn dm_last_read_key(pubkey: &str) -> String {
+        format!("dm_last_read_{}", pubkey.trim().to_ascii_lowercase())
+    }
+
+    pub fn dm_last_read(&self, pubkey: &str) -> Result<Option<i64>> {
+        Ok(self
+            .setting(&Self::dm_last_read_key(pubkey))?
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|id| *id > 0))
+    }
+
+    pub fn set_dm_last_read(&self, pubkey: &str, message_id: i64) -> Result<()> {
+        self.set_setting(&Self::dm_last_read_key(pubkey), &message_id.to_string())
+    }
+
+    pub fn list_dm_threads(&self) -> Result<Vec<DmThreadRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT m.sender_pubkey,
+                    COALESCE(NULLIF(n.name, ''), m.sender_prefix, substr(m.sender_pubkey, 1, 12)),
+                    COUNT(*),
+                    MAX(m.received_at),
+                    (SELECT m2.display_text FROM messages m2
+                     WHERE m2.kind = 'direct' AND m2.sender_pubkey = m.sender_pubkey
+                     ORDER BY m2.received_at DESC, m2.id DESC LIMIT 1),
+                    CASE
+                      WHEN EXISTS (
+                        SELECT 1 FROM settings s
+                        WHERE s.key = 'dm_last_read_' || lower(m.sender_pubkey)
+                      ) THEN (
+                        SELECT COUNT(*) FROM messages m3
+                        WHERE m3.kind = 'direct'
+                          AND m3.sender_pubkey = m.sender_pubkey
+                          AND m3.id > COALESCE(
+                            (SELECT CAST(s.value AS INTEGER) FROM settings s
+                             WHERE s.key = 'dm_last_read_' || lower(m.sender_pubkey)),
+                            0
+                          )
+                      )
+                      ELSE 0
+                    END
+             FROM messages m
+             LEFT JOIN nodes n ON n.pubkey = m.sender_pubkey
+             WHERE m.kind = 'direct' AND m.sender_pubkey IS NOT NULL AND m.sender_pubkey != ''
+             GROUP BY m.sender_pubkey
+             ORDER BY MAX(m.received_at) DESC, m.sender_pubkey",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(DmThreadRow {
+                    pubkey: row.get(0)?,
+                    name: row.get(1)?,
+                    message_count: row.get(2)?,
+                    last_message_at: row.get(3)?,
+                    last_text: row.get(4)?,
+                    unread_count: row.get(5)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn total_channel_unread(&self) -> Result<i64> {
+        Ok(self
+            .list_channels()?
+            .into_iter()
+            .map(|c| c.unread_count)
+            .sum())
+    }
+
+    pub fn total_dm_unread(&self) -> Result<i64> {
+        Ok(self
+            .list_dm_threads()?
+            .into_iter()
+            .map(|t| t.unread_count)
+            .sum())
+    }
+
+    pub fn count_unnoticed_nodes(&self) -> Result<i64> {
+        let conn = self.lock();
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM nodes
+             WHERE COALESCE(noticed, 1) = 0 AND enrollment != 'hq'",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn mark_node_noticed(&self, pubkey: &str) -> Result<()> {
+        self.lock().execute(
+            "UPDATE nodes SET noticed = 1 WHERE pubkey = ?1",
+            params![pubkey],
+        )?;
+        Ok(())
     }
 
     pub fn rf_samples_for_pubkey(&self, pubkey: &str, limit: i64) -> Result<Vec<(i64, i64, f64, i64)>> {
@@ -2996,6 +3167,7 @@ fn map_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRow> {
     let lat: Option<f64> = row.get(7)?;
     let lon: Option<f64> = row.get(8)?;
     let enrollment: String = row.get(4)?;
+    let noticed_i: i64 = row.get(14)?;
     Ok(NodeRow {
         pubkey: row.get(0)?,
         name: row.get(1)?,
@@ -3012,6 +3184,7 @@ fn map_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRow> {
         path_len: row.get(11)?,
         qr_file: row.get(12)?,
         qr_uri: row.get(13)?,
+        noticed: noticed_i != 0,
     })
 }
 
@@ -3321,7 +3494,7 @@ mod tests {
     #[test]
     fn purge_keeps_roster() {
         let (db, secrets, dir) = test_db();
-        db.upsert_contact("abcd", "Ada", 1, 0, -1, &[], 1, 37_000_000, -122_000_000, 1, &json!({}))
+        db.upsert_contact("abcd", "Ada", 1, 0, -1, &[], 1, 37_000_000, -122_000_000, 1, &json!({}), true)
             .unwrap();
         db.approve("abcd", &secrets).unwrap();
         db.insert_message(
@@ -3376,7 +3549,7 @@ mod tests {
     #[test]
     fn approve_queues_both_channel_secrets() {
         let (db, secrets, dir) = test_db();
-        db.upsert_contact("aa11", "Ada", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}))
+        db.upsert_contact("aa11", "Ada", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), true)
             .unwrap();
         db.set_enrollment("aa11", Enrollment::Pending, None).unwrap();
         db.approve("aa11", &secrets).unwrap();
@@ -3394,7 +3567,7 @@ mod tests {
     fn revoke_rotates_both_and_resends_to_remaining() {
         let (db, secrets, dir) = test_db();
         for (key, name) in [("aa11", "Ada"), ("bb22", "Bob")] {
-            db.upsert_contact(key, name, 1, 0, -1, &[], 1, 0, 0, 1, &json!({}))
+            db.upsert_contact(key, name, 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), true)
                 .unwrap();
             db.set_enrollment(key, Enrollment::Pending, None).unwrap();
             db.approve(key, &secrets).unwrap();
@@ -3418,7 +3591,7 @@ mod tests {
     #[test]
     fn rename_info_migrates_secret_and_alerts_use_bot_home() {
         let (db, secrets, dir) = test_db();
-        db.upsert_contact("aa11", "Ada", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}))
+        db.upsert_contact("aa11", "Ada", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), true)
             .unwrap();
         db.set_enrollment("aa11", Enrollment::Pending, None).unwrap();
         db.approve("aa11", &secrets).unwrap();
@@ -3451,6 +3624,62 @@ mod tests {
         assert_eq!(queued.len(), 1);
         assert!(queued[0].0.contains("HQ-BOT"));
         assert_eq!(queued[0].1, REDACTED_SECRET);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn live_upsert_marks_unnoticed_until_opened() {
+        let (db, _, dir) = test_db();
+        db.upsert_contact("aa11", "Ada", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), false)
+            .unwrap();
+        assert_eq!(db.count_unnoticed_nodes().unwrap(), 1);
+        assert!(!db.get_node("aa11").unwrap().unwrap().noticed);
+        db.mark_node_noticed("aa11").unwrap();
+        assert_eq!(db.count_unnoticed_nodes().unwrap(), 0);
+        assert!(db.get_node("aa11").unwrap().unwrap().noticed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn quiet_upsert_stays_noticed() {
+        let (db, _, dir) = test_db();
+        db.upsert_contact("aa11", "Ada", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), true)
+            .unwrap();
+        assert_eq!(db.count_unnoticed_nodes().unwrap(), 0);
+        assert!(db.get_node("aa11").unwrap().unwrap().noticed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dm_thread_unread_clears_after_last_read() {
+        let (db, _, dir) = test_db();
+        db.upsert_contact("aa11", "Ada", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), true)
+            .unwrap();
+        let raw = json!({});
+        let id1 = db
+            .insert_message(
+                "direct", "rx", Some("aa11"), "aa11", None, Some(1), 10, "hi", "hi",
+                None, None, &raw, "received", None,
+            )
+            .unwrap()
+            .unwrap();
+        let id2 = db
+            .insert_message(
+                "direct", "rx", Some("aa11"), "aa11", None, Some(1), 11, "again", "again",
+                None, None, &raw, "received", None,
+            )
+            .unwrap()
+            .unwrap();
+        // No cursor yet → unread stays 0 (same as channels: first open marks caught up).
+        let threads = db.list_dm_threads().unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].message_count, 2);
+        assert_eq!(threads[0].unread_count, 0);
+        db.set_dm_last_read("aa11", id1).unwrap();
+        let threads = db.list_dm_threads().unwrap();
+        assert_eq!(threads[0].unread_count, 1);
+        db.set_dm_last_read("aa11", id2).unwrap();
+        assert_eq!(db.total_dm_unread().unwrap(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

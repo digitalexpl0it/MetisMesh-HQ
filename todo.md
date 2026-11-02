@@ -67,10 +67,11 @@ HQ durability and sharing. One-off contact QR already exists (`meshcore://contac
 BLE, USB serial, and TCP (Wi-Fi / Ethernet companions) share one radio pool. Cookbook USB/serial patterns: [agessaman/meshcore-bot](https://github.com/agessaman/meshcore-bot). One HQ, several attached MeshCore devices (e.g. companion + room server + repeater).
 
 - [x] **F1** USB serial transport beside BLE: discover ports, connect/disconnect, same session pipeline (appstart → contacts → drain → subscribe); reuse `meshcore-rs` USB path where available; study bot USB code for quirks
-- [x] **F2** Multi-radio pool: N concurrent radio tasks (one per device); shared SQLite; UI shows each radio with transport (BLE/USB), name, battery/role, connect state
+- [x] **F2** Multi-radio pool: N concurrent radio tasks (one per device); shared SQLite; UI shows each radio with transport (BLE/USB/TCP), name, battery/role, connect state
 - [x] **F3** Operator roles per radio: label as companion / room server / repeater (and similar); clarify which radio owns METIS-INFO TX, enrollment, and bot replies (default: primary companion)
 - [ ] **F4** Contact/message ingest tagged by `radio_id`; map + roster stay unified; avoid double-counting the same pubkey heard on two HQ radios
-- [ ] **F5** Settings: pick primary radio; optional auto-reconnect per device; USB prefer sticky port/serial identity when the OS renumerates
+- [x] **F5** Settings: pick primary radio (`primary_radio_id`); reconnect-with-backoff unless the operator disconnected
+- [ ] **F5b** USB prefer sticky port/serial identity when the OS renumerates (optional polish)
 - [x] **F6** TCP companion (Wi-Fi / Ethernet): same session pool as BLE/USB; Settings host + port (default **5000**); Ethernet companions use this path too; no mDNS / Wi-Fi credential wizard in the first cut
 
 ## Phase G — Offline firmware locker + USB flasher
@@ -100,6 +101,14 @@ Heard nodes stay on Roster/Map. **Claimed** nodes are HQ-owned mesh infrastructu
 - [x] **I4** Roster Claim / Claimed badge for types 2/3/4
 - [x] **I5** Verify-on-claim: `CMD_SEND_LOGIN` + admin ACL proof via primary companion; fail closed (guest/wrong password never inserts); day-to-day stats use node ACL, re-login only when ACL expires
 
+## Phase J — Nav / list UX
+
+- [x] **J1** Sidebar order by use: Overview → Messages → Inbox → Roster → Map → Infrastructure → Tracker → CLI; Settings stays bottom
+- [x] **J2** Expanded-only fuzzy jump: pages + in-page tabs/keywords (not live roster/message bodies)
+- [x] **J3** Zebra rows on Roster, Infrastructure (claimed + claim-from-roster), Tracker (tracked + add-from-roster) via `.row-zebra` in `form.css` (frozen Tailwind lacks `bg-muted/40`)
+- [x] **J4** GPS locate icon: green within 7 days of `last_heard`, red when older / never
+- [x] **J5** Shell: opaque top banner + `min-h-0` / `overflow-hidden` so page content does not paint under the bar
+
 ## Non-goals (for now)
 
 - Potato federation / multi-ingestor dashboard
@@ -117,10 +126,11 @@ Heard nodes stay on Roster/Map. **Claimed** nodes are HQ-owned mesh infrastructu
 5. D1 → D3  
 6. D4 · D1c (local MQTT station vs Open-Meteo)  
 7. F1 → F3 (USB + multi-radio; primary companion owns bot)  
-8. E1 → E3 (backup first), then E4 / F4–F5 polish  
+8. E1 → E3 (backup first), then E4 / F4–F5b polish  
 9. G1 → G4 (offline firmware locker + selective Manage overlay + USB flasher)  
 10. H1 → H3 (standalone Linux/Windows/macOS + WAL-safe SQLite)  
-11. I1 → I4 (claimed infrastructure + gated Overview)
+11. I1 → I5 (claimed infrastructure + verify-on-claim + gated Overview)  
+12. J1 → J5 (nav order, fuzzy jump, zebra, heard-week icon, shell layout)
 
 ## Success checks
 
@@ -130,9 +140,12 @@ Heard nodes stay on Roster/Map. **Claimed** nodes are HQ-owned mesh infrastructu
 - [x] First-seen coords: warp-in once (not every refresh)
 - [x] Weather/quake: compact, sourced, enrolled-only, audited
 - [ ] MQTT station fresh → mesh WX uses it; stale/down → Open-Meteo fallback
-- [x] USB companion + BLE/USB second radio both live under one HQ; bot TX from primary only
+- [x] USB companion + BLE/USB/TCP second radio both live under one HQ; bot TX from primary only
 - [x] Backup restores roster + secrets on a fresh machine; import does not flood radio contacts
 - [ ] Map uploader (if on): only infra GPS adverts; companions/tracks stay local
 - [ ] Release artifacts: one standalone binary (or app bundle) each for Linux, Windows, macOS
 - [ ] Fresh launch: `PRAGMA journal_mode` reports `wal`; app survives concurrent radio writes without SQLite lock storms
 - [x] Claim repeater → Infrastructure page + Overview strip; probe/CLI via linked companion; empty claim list hides Overview infra chrome
+- [x] Claim requires admin login proof; guest/wrong password never inserts; Unclaim then reclaim asks for password again
+- [x] Expanded nav search finds Settings for “device” / tab keywords; Roster zebra rows visible; pages clear the top banner
+

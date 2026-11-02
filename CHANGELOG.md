@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased — 2026-11-02
+
+### Radio pool
+
+- USB serial companions on the same pool as BLE
+- TCP companions (Wi-Fi / Ethernet firmware, default port **5000**); Settings Network card
+- Multi-radio pool with primary-radio pick; bot / enrollment TX from primary companion
+
+### Infrastructure
+
+- Claimed repeaters / rooms / sensors (`claimed_infra`) with Infrastructure page
+- Verify-on-claim via `CMD_SEND_LOGIN` + admin ACL proof; passwords never stored
+- Status probe + remote CLI through the primary companion; Overview strip only when claims exist
+
+### Tracker, map, services
+
+- Tracker whitelist + map trails / stale styling
+- Message sonar / warp-in map presence
+- Weather, NWS/Amber alerts, earthquakes on METIS-INFO; optional METIS-NET peer channel
+- Encrypted backup/restore; contact bulk import/export
+- Offline firmware locker + selective Manage overlay + USB flasher
+
+### UX
+
+- Nav order by use (Overview → Messages → Inbox → Roster → Map → Infrastructure → Tracker → CLI; Settings bottom)
+- Expanded-nav fuzzy jump (pages + tab/keyword index)
+- Zebra rows on Roster / Infrastructure / Tracker (`.row-zebra` in `form.css`)
+- GPS locate icon green within a week of last heard, red when older
+- Shell layout: opaque top bar + flex overflow so pages do not paint under the banner
+
 ## 0.1.0 — 2026-10-31
 
 First cut you can actually run as a headquarters.
@@ -38,4 +68,4 @@ First cut you can actually run as a headquarters.
 - Audit log for operator sends
 - Settings for HQ name, radio presets, purge, and keyring status
 
-Still ahead: HQ-to-HQ linking, USB companions on the same pool, and packaging polish (signed installers, etc.).
+Still ahead: HQ-to-HQ linking, local MQTT weather station, map.meshcore.dev uploader (optional), ingest tagged by `radio_id`, standalone signed installers, packaging polish.

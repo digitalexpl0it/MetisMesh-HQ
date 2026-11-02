@@ -6,10 +6,13 @@ Churches, neighborhoods, and volunteer groups run this on a regular computer sit
 
 ## What it does
 
-- Talks to a MeshCore companion over Bluetooth (USB is on the same path later)
+- Talks to MeshCore companions over **Bluetooth**, **USB serial**, or **TCP** (Wi-Fi / Ethernet, default port 5000) on one radio pool
 - Enrolls devices, hands out private channel secrets, and runs a local bot
 - Keeps a roster of everyone heard on the mesh, whether they enrolled or not
+- Claims and admin-verifies infrastructure (repeaters / rooms / sensors) over LoRa through the primary companion
 - Maps nodes with MapLibre + a local style (and optional PMTiles offline packs)
+- Tracks an operator whitelist of devices expected to share GPS (Tracker)
+- Offline firmware locker + USB flasher; encrypted HQ backup/restore
 - Stores messages and contacts in SQLite under `data/`
 - Puts channel secrets in the OS keyring when it can; otherwise a locked-down file
 
@@ -34,7 +37,7 @@ sudo apt-get install -y \
   libdbus-1-dev
 ```
 
-Bluetooth needs BlueZ running. Disconnect the MeshCore phone app before HQ connects — the companion only allows one BLE client.
+Bluetooth needs BlueZ running. Disconnect the MeshCore phone app before HQ connects over BLE — the companion only allows one GATT client. USB and TCP do not use a companion PIN.
 
 ## Run it
 

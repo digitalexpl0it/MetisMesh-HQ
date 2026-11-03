@@ -9,6 +9,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
 use crate::mesh_text::text_mentions_name;
+use crate::messages_appearance::{
+    parse_appearance_json, MessagesAppearance, APPEARANCE_SETTING,
+};
 use crate::path::dedupe_key;
 use crate::secrets::{
     SecretStoreKind, Secrets, CHANNEL_NAME, MAX_CHANNEL_NAME_BYTES, NET_CHANNEL_NAME,
@@ -175,6 +178,8 @@ pub struct ChannelRow {
     pub last_text: Option<String>,
     /// Per-channel override: `1h`…`forever`, or `None` to use the global default.
     pub message_keep: Option<String>,
+    /// True when this channel has a local appearance override JSON.
+    pub has_appearance_override: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -321,6 +326,10 @@ impl Db {
         );
         let _ = conn.execute(
             "ALTER TABLE channels ADD COLUMN message_keep TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE channels ADD COLUMN appearance_json TEXT",
             [],
         );
         let _ = conn.execute(
@@ -515,6 +524,10 @@ impl Db {
         );
         let _ = conn.execute(
             "ALTER TABLE channels ADD COLUMN message_keep TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE channels ADD COLUMN appearance_json TEXT",
             [],
         );
         let _ = conn.execute(
@@ -1683,7 +1696,8 @@ impl Db {
                     (SELECT m.display_text FROM messages m
                      WHERE m.kind = 'channel' AND m.channel_idx = c.slot
                      ORDER BY m.received_at DESC, m.id DESC LIMIT 1),
-                    NULLIF(TRIM(COALESCE(c.message_keep, '')), '')
+                    NULLIF(TRIM(COALESCE(c.message_keep, '')), ''),
+                    NULLIF(TRIM(COALESCE(c.appearance_json, '')), '')
              FROM channels c
              WHERE COALESCE(c.active, 1) = 1
              ORDER BY
@@ -1702,6 +1716,7 @@ impl Db {
                 let message_keep = keep_raw.and_then(|v| {
                     Self::normalize_message_keep(&v).map(str::to_string)
                 });
+                let appearance_raw: Option<String> = row.get(11)?;
                 Ok(ChannelRow {
                     name: row.get(0)?,
                     slot: row.get(1)?,
@@ -1717,10 +1732,67 @@ impl Db {
                     last_message_at: row.get(8)?,
                     last_text: row.get(9)?,
                     message_keep,
+                    has_appearance_override: appearance_raw.is_some(),
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    pub fn messages_appearance(&self) -> Result<MessagesAppearance> {
+        Ok(self
+            .setting(APPEARANCE_SETTING)?
+            .map(|raw| parse_appearance_json(&raw))
+            .unwrap_or_default())
+    }
+
+    pub fn set_messages_appearance(&self, appearance: &MessagesAppearance) -> Result<()> {
+        let clamped = appearance.clone().clamp();
+        let json = serde_json::to_string(&clamped).map_err(|e| Error::Msg(e.to_string()))?;
+        self.set_setting(APPEARANCE_SETTING, &json)
+    }
+
+    pub fn channel_appearance(&self, name: &str) -> Result<Option<MessagesAppearance>> {
+        let conn = self.lock();
+        let raw: Option<Option<String>> = conn
+            .query_row(
+                "SELECT NULLIF(TRIM(COALESCE(appearance_json, '')), '') FROM channels WHERE name = ?1",
+                params![name],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        Ok(raw.flatten().map(|text| parse_appearance_json(&text)))
+    }
+
+    pub fn set_channel_appearance(
+        &self,
+        name: &str,
+        appearance: Option<&MessagesAppearance>,
+    ) -> Result<()> {
+        let value = match appearance {
+            Some(a) => {
+                let json =
+                    serde_json::to_string(&a.clone().clamp()).map_err(|e| Error::Msg(e.to_string()))?;
+                Some(json)
+            }
+            None => None,
+        };
+        let changed = self.lock().execute(
+            "UPDATE channels SET appearance_json = ?2 WHERE name = ?1",
+            params![name, value],
+        )?;
+        if changed == 0 {
+            return Err(Error::Msg(format!("Channel '{name}' not found.")));
+        }
+        Ok(())
+    }
+
+    /// Channel override when set; otherwise global Messages appearance.
+    pub fn resolved_appearance(&self, channel_name: &str) -> Result<MessagesAppearance> {
+        if let Some(over) = self.channel_appearance(channel_name)? {
+            return Ok(over);
+        }
+        self.messages_appearance()
     }
 
     pub fn ensure_channel_row(
@@ -2125,6 +2197,8 @@ impl Db {
                 )?;
             }
         }
+        drop(conn);
+        let _ = self.promote_name_block_to_pubkey(pubkey, name);
         Ok(())
     }
 
@@ -3625,6 +3699,20 @@ impl Db {
         )?)
     }
 
+    /// All-time stored message count for a kind (`channel`, `direct`, …).
+    pub fn count_messages_kind(&self, kind: &str) -> Result<i64> {
+        let kind = kind.trim();
+        if kind.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.lock();
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE kind = ?1",
+            params![kind],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn list_tracked_nodes(&self) -> Result<Vec<TrackedNodeRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
@@ -3702,6 +3790,27 @@ impl Db {
         Ok(n > 0)
     }
 
+    /// True when this channel sender is blocked by pubkey and/or display name.
+    pub fn is_channel_sender_blocked(
+        &self,
+        display_name: Option<&str>,
+        pubkey: Option<&str>,
+    ) -> Result<bool> {
+        if let Some(pk) = pubkey.map(str::trim).filter(|s| !s.is_empty()) {
+            if self.is_blocked(pk)? {
+                return Ok(true);
+            }
+        }
+        if let Some(name) = display_name.map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(nk) = name_block_key(name) {
+                if self.is_blocked(&nk)? {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     /// Drop future channel/DM traffic from this pubkey (does not change enrollment).
     pub fn block_node(&self, pubkey: &str, label: &str) -> Result<()> {
         let key = pubkey.trim();
@@ -3718,6 +3827,55 @@ impl Db {
             params![key, stored, unix_now()],
         )?;
         self.audit("block", key, stored)
+    }
+
+    /// Block a channel/DM sender. Channel frames often lack a pubkey — in that
+    /// case we store a stable `name:<alnum>` key so matching channel traffic drops.
+    /// When a pubkey is known (or uniquely resolvable from the roster), that is
+    /// blocked too so DMs are covered.
+    pub fn block_sender(&self, pubkey: Option<&str>, label: &str) -> Result<()> {
+        let name = label.trim();
+        if name.is_empty() && pubkey.map(str::trim).unwrap_or("").is_empty() {
+            return Err(Error::Msg("Missing sender to block.".into()));
+        }
+        let mut resolved = pubkey
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.starts_with(NAME_BLOCK_PREFIX))
+            .map(str::to_string);
+        if resolved.is_none() && !name.is_empty() {
+            resolved = self
+                .unique_node_by_display_name(name)?
+                .map(|n| n.pubkey);
+        }
+        if let Some(ref pk) = resolved {
+            self.block_node(pk, if name.is_empty() { pk } else { name })?;
+        }
+        if !name.is_empty() {
+            if let Some(nk) = name_block_key(name) {
+                self.block_node(&nk, name)?;
+            } else if resolved.is_none() {
+                return Err(Error::Msg("Missing sender to block.".into()));
+            }
+        } else if resolved.is_none() {
+            return Err(Error::Msg("Missing sender to block.".into()));
+        }
+        Ok(())
+    }
+
+    /// If this display name was blocked from a channel, also block the real pubkey
+    /// once the node appears on the roster (so DMs drop too).
+    pub fn promote_name_block_to_pubkey(&self, pubkey: &str, name: &str) -> Result<()> {
+        let key = pubkey.trim();
+        if key.is_empty() || key.starts_with(NAME_BLOCK_PREFIX) {
+            return Ok(());
+        }
+        let Some(nk) = name_block_key(name) else {
+            return Ok(());
+        };
+        if !self.is_blocked(&nk)? || self.is_blocked(key)? {
+            return Ok(());
+        }
+        self.block_node(key, name.trim())
     }
 
     pub fn unblock_node(&self, pubkey: &str) -> Result<()> {
@@ -3998,9 +4156,16 @@ pub struct TrackedNodeRow {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockedNodeRow {
+    /// Real 32-byte hex pubkey, or `name:<alnum>` for channel display-name blocks.
     pub pubkey: String,
     pub label: String,
     pub added_at: i64,
+}
+
+impl BlockedNodeRow {
+    pub fn is_name_block(&self) -> bool {
+        self.pubkey.starts_with(NAME_BLOCK_PREFIX)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -4117,6 +4282,9 @@ pub fn normalize_channel_name(raw: &str) -> Option<String> {
     Some(name.to_string())
 }
 
+/// Prefix for channel display-name blocks stored in `blocked_nodes.pubkey`.
+const NAME_BLOCK_PREFIX: &str = "name:";
+
 /// Lowercase ASCII letters/digits only — strip emoji and punctuation for name match.
 fn ascii_alnum_key(value: &str) -> String {
     value
@@ -4124,6 +4292,16 @@ fn ascii_alnum_key(value: &str) -> String {
         .filter(|c| c.is_ascii_alphanumeric())
         .flat_map(|c| c.to_lowercase())
         .collect()
+}
+
+/// Stable key for channel-name blocks (`name:ryinescondido`).
+pub fn name_block_key(display_name: &str) -> Option<String> {
+    let key = ascii_alnum_key(display_name);
+    if key.is_empty() {
+        None
+    } else {
+        Some(format!("{NAME_BLOCK_PREFIX}{key}"))
+    }
 }
 
 pub fn unix_now() -> i64 {
@@ -4746,6 +4924,64 @@ mod tests {
     }
 
     #[test]
+    fn count_messages_kind_totals() {
+        let (db, _, dir) = test_db();
+        let raw = json!({});
+        assert_eq!(db.count_messages_kind("channel").unwrap(), 0);
+        assert_eq!(db.count_messages_kind("direct").unwrap(), 0);
+        db.insert_message(
+            "channel", "rx", None, "Ada", Some(0), Some(0), 1, "hi", "Ada: hi",
+            None, None, &raw, "received", None,
+        )
+        .unwrap();
+        db.insert_message(
+            "channel", "rx", None, "Bob", Some(0), Some(0), 2, "yo", "Bob: yo",
+            None, None, &raw, "received", None,
+        )
+        .unwrap();
+        db.insert_message(
+            "direct", "rx", Some("aa11"), "aa11", None, Some(1), 3, "dm", "dm",
+            None, None, &raw, "received", None,
+        )
+        .unwrap();
+        assert_eq!(db.count_messages_kind("channel").unwrap(), 2);
+        assert_eq!(db.count_messages_kind("direct").unwrap(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn block_sender_by_channel_name_and_promote() {
+        let (db, _, dir) = test_db();
+        db.block_sender(None, "Ry-in-escondido 🚜").unwrap();
+        let nk = name_block_key("Ry-in-escondido🚜").unwrap();
+        assert!(db.is_blocked(&nk).unwrap());
+        assert!(db
+            .is_channel_sender_blocked(Some("Ry-in-escondido🚜"), None)
+            .unwrap());
+        // Later advert promotes the real pubkey while keeping the name block.
+        db.upsert_contact(
+            "bb22",
+            "Ry-in-escondido🚜",
+            1,
+            0,
+            -1,
+            &[],
+            1,
+            0,
+            0,
+            1,
+            &json!({}),
+            true,
+            None,
+        )
+        .unwrap();
+        assert!(db.is_blocked("bb22").unwrap());
+        db.unblock_node(&nk).unwrap();
+        db.unblock_node("bb22").unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn clear_dm_thread_removes_messages_and_unread() {
         let (db, _, dir) = test_db();
         db.upsert_contact("aa11", "Ada", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), true, None)
@@ -5014,6 +5250,30 @@ mod tests {
             .unwrap();
         assert_eq!(public.unread_mentions, 1);
         assert_eq!(db.total_unread_mentions().unwrap(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn messages_appearance_global_and_channel_override() {
+        let (db, _, dir) = test_db();
+        let mut global = crate::messages_appearance::MessagesAppearance::default();
+        global.bg_opacity = 30;
+        global.text_size = crate::messages_appearance::TextSize::Lg;
+        db.set_messages_appearance(&global).unwrap();
+        let loaded = db.messages_appearance().unwrap();
+        assert_eq!(loaded.bg_opacity, 30);
+        assert_eq!(loaded.text_size, crate::messages_appearance::TextSize::Lg);
+
+        let mut over = global.clone();
+        over.bg_opacity = 10;
+        over.bg_color = "#112233".into();
+        db.set_channel_appearance("Public", Some(&over)).unwrap();
+        let resolved = db.resolved_appearance("Public").unwrap();
+        assert_eq!(resolved.bg_opacity, 10);
+        assert_eq!(resolved.bg_color, "#112233");
+        db.set_channel_appearance("Public", None).unwrap();
+        let back = db.resolved_appearance("Public").unwrap();
+        assert_eq!(back.bg_opacity, 30);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

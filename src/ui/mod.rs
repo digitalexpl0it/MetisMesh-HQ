@@ -1531,6 +1531,43 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
     } else {
         format!("{pending_alerts} alerts waiting")
     };
+    let mention_unread = state()
+        .db
+        .total_unread_mentions()
+        .unwrap_or(0)
+        .max(0);
+    let channel_total = state().db.count_messages_kind("channel").unwrap_or(0);
+    let direct_total = state().db.count_messages_kind("direct").unwrap_or(0);
+    let dm_unread = state().db.total_dm_unread().unwrap_or(0).max(0);
+    let unread_total = state().db.total_channel_unread().unwrap_or(0).max(0) + dm_unread;
+    let mentions_hint = if mention_unread > 0 {
+        if mention_unread == 1 {
+            "1 unread @mention".to_string()
+        } else {
+            format!("{mention_unread} unread @mentions")
+        }
+    } else {
+        "No unread @mentions".to_string()
+    };
+    let unread_hint = if unread_total > 0 {
+        if unread_total == 1 {
+            "1 unread message".to_string()
+        } else {
+            format!("{unread_total} unread messages")
+        }
+    } else {
+        "No unread messages".to_string()
+    };
+    let channels_hint = if channel_total == 1 {
+        "1 channel message".to_string()
+    } else {
+        format!("{channel_total} channel messages")
+    };
+    let direct_hint = if direct_total == 1 {
+        "1 direct message".to_string()
+    } else {
+        format!("{direct_total} direct messages")
+    };
 
     rsx! {
         div {
@@ -1594,130 +1631,181 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
                     rsx! {}
                 }
             }
-            section { class: "flex flex-wrap items-stretch gap-2",
-                button {
-                    class: "inline-flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-left hover:bg-muted/40 cursor-pointer",
-                    onclick: move |_| on_navigate.call(Page::Inbox),
-                    span { class: "flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-accent text-signal",
-                        Icon { name: IconName::Inbox, size: 14 }
+            div { class: "overview-chip-stack",
+                section { class: "overview-chip-row", aria_label: "System status",
+                    button {
+                        class: "overview-chip overview-chip-alerts",
+                        onclick: move |_| on_navigate.call(Page::Inbox),
+                        span { class: "overview-chip__icon",
+                            Icon { name: IconName::Inbox, size: 14 }
+                        }
+                        span { class: "min-w-0",
+                            span { class: "block text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground", "Alerts" }
+                            span { class: "block truncate text-sm text-foreground", "{alerts_hint}" }
+                        }
                     }
-                    span { class: "min-w-0",
-                        span { class: "block text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground", "Alerts" }
-                        span { class: "block truncate text-sm text-foreground", "{alerts_hint}" }
+                    button {
+                        class: "overview-chip overview-chip-radio",
+                        onclick: move |_| on_navigate.call(Page::Settings),
+                        span { class: "overview-chip__icon",
+                            Icon { name: IconName::Radio, size: 14 }
+                        }
+                        span { class: "min-w-0",
+                            span { class: "block text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground", "Radio pool" }
+                            span { class: "block truncate text-sm text-foreground", "{pool_hint}" }
+                        }
+                    }
+                    button {
+                        class: "overview-chip overview-chip-backup",
+                        onclick: move |_| on_navigate.call(Page::Settings),
+                        span { class: "overview-chip__icon",
+                            Icon { name: IconName::Key, size: 14 }
+                        }
+                        span { class: "min-w-0",
+                            span { class: "block text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground", "Backup" }
+                            span { class: "block truncate text-sm text-foreground", "{backup_hint}" }
+                        }
+                    }
+                    button {
+                        class: "overview-chip overview-chip-firmware",
+                        onclick: move |_| on_navigate.call(Page::Settings),
+                        span { class: "overview-chip__icon",
+                            Icon { name: IconName::Scan, size: 14 }
+                        }
+                        span { class: "min-w-0",
+                            span { class: "block text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground", "Firmware" }
+                            span { class: "block truncate text-sm text-foreground", "{firmware_hint}" }
+                        }
                     }
                 }
-                button {
-                    class: "inline-flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-left hover:bg-muted/40 cursor-pointer",
-                    onclick: move |_| on_navigate.call(Page::Settings),
-                    span { class: "flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-accent text-signal",
-                        Icon { name: IconName::Radio, size: 14 }
+                section { class: "overview-chip-row", aria_label: "Messages",
+                    button {
+                        class: if unread_total > 0 {
+                            "overview-chip overview-chip-unread overview-chip-unread-live"
+                        } else {
+                            "overview-chip overview-chip-unread"
+                        },
+                        onclick: move |_| on_navigate.call(Page::Messages),
+                        span { class: "overview-chip__icon",
+                            Icon { name: IconName::Inbox, size: 14 }
+                        }
+                        span { class: "min-w-0",
+                            span { class: "block text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground", "Unread" }
+                            span {
+                                class: if unread_total > 0 {
+                                    "block truncate text-sm overview-chip-unread__value"
+                                } else {
+                                    "block truncate text-sm text-foreground"
+                                },
+                                "{unread_hint}"
+                            }
+                        }
                     }
-                    span { class: "min-w-0",
-                        span { class: "block text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground", "Radio pool" }
-                        span { class: "block truncate text-sm text-foreground", "{pool_hint}" }
+                    button {
+                        class: if mention_unread > 0 {
+                            "overview-chip overview-chip-mentions overview-chip-mentions-live"
+                        } else {
+                            "overview-chip overview-chip-mentions"
+                        },
+                        onclick: move |_| on_navigate.call(Page::Messages),
+                        span { class: "overview-chip__icon",
+                            Icon { name: IconName::Messages, size: 14 }
+                        }
+                        span { class: "min-w-0",
+                            span { class: "block text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground", "Mentions" }
+                            span {
+                                class: if mention_unread > 0 {
+                                    "block truncate text-sm text-amber-200"
+                                } else {
+                                    "block truncate text-sm text-foreground"
+                                },
+                                "{mentions_hint}"
+                            }
+                        }
                     }
-                }
-                button {
-                    class: "inline-flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-left hover:bg-muted/40 cursor-pointer",
-                    onclick: move |_| on_navigate.call(Page::Settings),
-                    span { class: "flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-accent text-signal",
-                        Icon { name: IconName::Key, size: 14 }
+                    button {
+                        class: "overview-chip overview-chip-channels",
+                        onclick: move |_| on_navigate.call(Page::Messages),
+                        span { class: "overview-chip__icon",
+                            Icon { name: IconName::Messages, size: 14 }
+                        }
+                        span { class: "min-w-0",
+                            span { class: "block text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground", "Channels" }
+                            span { class: "block truncate text-sm text-foreground", "{channels_hint}" }
+                        }
                     }
-                    span { class: "min-w-0",
-                        span { class: "block text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground", "Backup" }
-                        span { class: "block truncate text-sm text-foreground", "{backup_hint}" }
-                    }
-                }
-                button {
-                    class: "inline-flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-left hover:bg-muted/40 cursor-pointer",
-                    onclick: move |_| on_navigate.call(Page::Settings),
-                    span { class: "flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-accent text-signal",
-                        Icon { name: IconName::Scan, size: 14 }
-                    }
-                    span { class: "min-w-0",
-                        span { class: "block text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground", "Firmware" }
-                        span { class: "block truncate text-sm text-foreground", "{firmware_hint}" }
+                    button {
+                        class: if dm_unread > 0 {
+                            "overview-chip overview-chip-direct overview-chip-direct-live"
+                        } else {
+                            "overview-chip overview-chip-direct"
+                        },
+                        onclick: move |_| on_navigate.call(Page::Messages),
+                        span { class: "overview-chip__icon",
+                            Icon { name: IconName::Inbox, size: 14 }
+                        }
+                        span { class: "min-w-0",
+                            span { class: "block text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground", "Direct" }
+                            span {
+                                class: if dm_unread > 0 {
+                                    "block truncate text-sm overview-chip-direct__value"
+                                } else {
+                                    "block truncate text-sm text-foreground"
+                                },
+                                "{direct_hint}"
+                            }
+                        }
                     }
                 }
             }
-            {
-                let mention_unread = state()
-                    .db
-                    .total_unread_mentions()
-                    .unwrap_or(0)
-                    .max(0);
-                rsx! {
-                    div { class: "grid grid-cols-2 gap-3 lg:grid-cols-5",
-                        OverviewStat {
-                            icon: IconName::Users,
-                            label: "Enrolled".to_string(),
-                            value: enrolled.to_string(),
-                            hint: format!("{heard} heard, {total} known"),
-                            tone: "signal".to_string(),
-                            series: senders_hourly.clone(),
-                            delta: last_hour_delta(&senders_hourly),
-                        }
-                        OverviewStat {
-                            icon: IconName::Inbox,
-                            label: "Pending signup".to_string(),
-                            value: pending_count.to_string(),
-                            hint: if pending_count == 0 {
-                                "Inbox is clear".to_string()
-                            } else {
-                                "Waiting for operator approval".to_string()
-                            },
-                            tone: if pending_count == 0 {
-                                "muted".to_string()
-                            } else {
-                                "pending".to_string()
-                            },
-                            series: direct_hourly.clone(),
-                            delta: last_hour_delta(&direct_hourly),
-                        }
-                        OverviewStat {
-                            icon: IconName::Locate,
-                            label: "GPS coverage".to_string(),
-                            value: format!("{coverage}%"),
-                            hint: format!("{with_gps} of {total} nodes with a fix"),
-                            tone: "ok".to_string(),
-                            series: position_hourly.clone(),
-                            delta: last_hour_delta(&position_hourly),
-                        }
-                        OverviewStat {
-                            icon: IconName::Messages,
-                            label: "Recent traffic".to_string(),
-                            value: messages_24h.to_string(),
-                            hint: "Messages in the last 24h".to_string(),
-                            tone: "muted".to_string(),
-                            series: messages_hourly.clone(),
-                            delta: last_hour_delta(&messages_hourly),
-                        }
-                        button {
-                            class: "rounded-lg border border-border bg-card px-3 py-2.5 text-left hover:bg-muted/40 cursor-pointer",
-                            onclick: move |_| on_navigate.call(Page::Messages),
-                            div { class: "mb-1 flex items-center justify-between gap-2 text-muted-foreground",
-                                span { class: "truncate text-[0.65rem] uppercase tracking-[0.14em]", "Mentions" }
-                                Icon { name: IconName::Messages, size: 14 }
-                            }
-                            div { class: "flex items-baseline justify-between gap-2",
-                                p {
-                                    class: if mention_unread > 0 {
-                                        "text-xl font-semibold tracking-tight text-amber-200"
-                                    } else {
-                                        "text-xl font-semibold tracking-tight text-foreground"
-                                    },
-                                    "{mention_unread}"
-                                }
-                            }
-                            p { class: "mt-0.5 truncate text-[0.7rem] text-muted-foreground",
-                                if mention_unread > 0 {
-                                    "Unread @mentions of this companion"
-                                } else {
-                                    "No unread @mentions"
-                                }
-                            }
-                        }
-                    }
+            div { class: "grid grid-cols-2 gap-3 lg:grid-cols-4",
+                OverviewStat {
+                    icon: IconName::Users,
+                    label: "Enrolled".to_string(),
+                    value: enrolled.to_string(),
+                    hint: format!("{heard} heard, {total} known"),
+                    tone: "signal".to_string(),
+                    series: senders_hourly.clone(),
+                    delta: last_hour_delta(&senders_hourly),
+                    onclick: move |_| on_navigate.call(Page::Roster),
+                }
+                OverviewStat {
+                    icon: IconName::Inbox,
+                    label: "Pending signup".to_string(),
+                    value: pending_count.to_string(),
+                    hint: if pending_count == 0 {
+                        "Inbox is clear".to_string()
+                    } else {
+                        "Waiting for operator approval".to_string()
+                    },
+                    tone: if pending_count == 0 {
+                        "muted".to_string()
+                    } else {
+                        "pending".to_string()
+                    },
+                    series: direct_hourly.clone(),
+                    delta: last_hour_delta(&direct_hourly),
+                    onclick: move |_| on_navigate.call(Page::Inbox),
+                }
+                OverviewStat {
+                    icon: IconName::Locate,
+                    label: "GPS coverage".to_string(),
+                    value: format!("{coverage}%"),
+                    hint: format!("{with_gps} of {total} nodes with a fix"),
+                    tone: "ok".to_string(),
+                    series: position_hourly.clone(),
+                    delta: last_hour_delta(&position_hourly),
+                    onclick: move |_| on_navigate.call(Page::Map),
+                }
+                OverviewStat {
+                    icon: IconName::Messages,
+                    label: "Recent traffic".to_string(),
+                    value: messages_24h.to_string(),
+                    hint: "Messages in the last 24h".to_string(),
+                    tone: "muted".to_string(),
+                    series: messages_hourly.clone(),
+                    delta: last_hour_delta(&messages_hourly),
+                    onclick: move |_| on_navigate.call(Page::Messages),
                 }
             }
             div {
@@ -2253,6 +2341,7 @@ fn OverviewStat(
     tone: String,
     #[props(default)] series: Vec<f32>,
     #[props(default)] delta: Option<i64>,
+    onclick: EventHandler<MouseEvent>,
 ) -> Element {
     let value_class = match tone.as_str() {
         "signal" => "text-signal",
@@ -2260,8 +2349,16 @@ fn OverviewStat(
         "ok" => "text-sky-200",
         _ => "text-foreground",
     };
+    let shell_class = match tone.as_str() {
+        "signal" => "overview-stat overview-stat-signal",
+        "pending" => "overview-stat overview-stat-pending",
+        "ok" => "overview-stat overview-stat-ok",
+        _ => "overview-stat overview-stat-muted",
+    };
     rsx! {
-        section { class: "rounded-lg border border-border bg-card px-3 py-2.5",
+        button {
+            class: "{shell_class}",
+            onclick: move |event| onclick.call(event),
             div { class: "mb-1 flex items-center justify-between gap-2 text-muted-foreground",
                 span { class: "truncate text-[0.65rem] uppercase tracking-[0.14em]", "{label}" }
                 Icon { name: icon, size: 14 }
@@ -3325,6 +3422,9 @@ fn BlockContactDialog(
         .as_ref()
         .map(|(_, name)| name.clone())
         .unwrap_or_default();
+    let name_only = target()
+        .as_ref()
+        .is_some_and(|(key, _)| key.starts_with("name:"));
     rsx! {
         Dialog {
             open: open,
@@ -3332,7 +3432,11 @@ fn BlockContactDialog(
             on_close: move |_| target.set(None),
             div { class: "flex flex-col gap-3",
                 p { class: "text-sm text-muted-foreground",
-                    "Block {label}? Future channel and direct messages from them will be dropped. Enrollment stays the same — you can unblock under Messages → Blocked."
+                    if name_only {
+                        "Block {label}? Future channel messages from this display name will be dropped. If HQ later hears their node, DMs from that pubkey are blocked too. Enrollment stays the same — unblock under Messages → Blocked."
+                    } else {
+                        "Block {label}? Future channel and direct messages from them will be dropped. Enrollment stays the same — you can unblock under Messages → Blocked."
+                    }
                 }
                 div { class: "flex justify-end gap-2",
                     Button {
@@ -3343,8 +3447,13 @@ fn BlockContactDialog(
                     Button {
                         kind: ButtonKind::Danger,
                         onclick: move |_| {
-                            let Some((pubkey, name)) = target() else { return; };
-                            match state().db.block_node(&pubkey, &name) {
+                            let Some((key, name)) = target() else { return; };
+                            let pubkey = if key.starts_with("name:") {
+                                None
+                            } else {
+                                Some(key.as_str())
+                            };
+                            match state().db.block_sender(pubkey, &name) {
                                 Ok(()) => {
                                     target.set(None);
                                     status_note(format!(
@@ -3367,12 +3476,11 @@ fn BlockContactDialog(
     }
 }
 
-/// Shown when channel Block cannot resolve a display name to one roster pubkey.
+/// Shown when channel Block has no display name to key off (rare malformed frame).
 #[component]
 fn BlockResolveFailDialog(target: Signal<Option<String>>) -> Element {
     let mut target = target;
     let open = target().is_some();
-    let name = target().unwrap_or_default();
     rsx! {
         Dialog {
             open: open,
@@ -3380,7 +3488,7 @@ fn BlockResolveFailDialog(target: Signal<Option<String>>) -> Element {
             on_close: move |_| target.set(None),
             div { class: "flex flex-col gap-3",
                 p { class: "text-sm text-muted-foreground",
-                    "No unique roster match for \"{name}\". Channel frames only carry a display name — open Roster and confirm exactly one node uses that name (or wait until HQ hears them). This does not require a live companion link."
+                    "This channel message has no sender name to block. Open a DM with the node, or wait until a named channel frame arrives."
                 }
                 div { class: "flex justify-end",
                     Button {
@@ -3403,6 +3511,7 @@ fn MessagesRail(
     on_select_dm: EventHandler<String>,
     on_delete_channel: EventHandler<String>,
     on_clear_dm: EventHandler<(String, String)>,
+    on_channel_appearance: EventHandler<String>,
 ) -> Element {
     rsx! {
         nav { class: "messages-rail", aria_label: "Conversations",
@@ -3419,8 +3528,10 @@ fn MessagesRail(
                             let can_delete = !name.eq_ignore_ascii_case("Public")
                                 && !state().db.is_reserved_private(&name);
                             let unread = channel.unread_count;
+                            let has_look = channel.has_appearance_override;
                             let select_name = name.clone();
                             let delete_name = name.clone();
+                            let appear_name = name.clone();
                             rsx! {
                                 div {
                                     key: "ch-{name}",
@@ -3438,11 +3549,29 @@ fn MessagesRail(
                                             seed: name.clone(),
                                         }
                                         span { class: "messages-rail-item-label", "{name}" }
+                                        if has_look {
+                                            span {
+                                                class: "text-[0.6rem] uppercase tracking-wide text-muted-foreground",
+                                                title: "Custom appearance",
+                                                "Aa"
+                                            }
+                                        }
                                         if unread > 0 {
                                             span { class: "{unread_badge_class(channel.unread_mentions)}",
                                                 if unread > 99 { "99+" } else { "{unread}" }
                                             }
                                         }
+                                    }
+                                    button {
+                                        r#type: "button",
+                                        class: "messages-rail-item-action",
+                                        title: "Channel appearance",
+                                        onclick: move |event: MouseEvent| {
+                                            event.prevent_default();
+                                            event.stop_propagation();
+                                            on_channel_appearance.call(appear_name.clone());
+                                        },
+                                        Icon { name: IconName::Settings, size: 12 }
                                     }
                                     if can_delete {
                                         button {
@@ -3534,6 +3663,7 @@ fn MessagesThreadShell(
     on_select_dm: EventHandler<String>,
     on_after_delete_channel: EventHandler<String>,
     on_after_clear_dm: EventHandler<String>,
+    on_channel_appearance: EventHandler<String>,
     children: Element,
 ) -> Element {
     let mut confirm = use_signal(|| None::<MessagesRailConfirm>);
@@ -3552,6 +3682,7 @@ fn MessagesThreadShell(
                 on_clear_dm: move |(pubkey, name)| {
                     confirm.set(Some(MessagesRailConfirm::ClearDm { pubkey, name }));
                 },
+                on_channel_appearance: move |name| on_channel_appearance.call(name),
             }
             div { class: "messages-convo",
                 {children}
@@ -3676,6 +3807,7 @@ fn MessagesPage() -> Element {
     let mut new_dm_body = use_signal(String::new);
     let mut block_confirm = use_signal(|| None::<(String, String)>);
     let mut block_resolve_fail = use_signal(|| None::<String>);
+    let mut appearance_edit = use_signal(|| None::<AppearanceEditTarget>);
     let mut msg_window = use_signal(|| None::<MsgWindowState>);
     let mut loading_older = use_signal(|| false);
     let mut scroll_preserve_height = use_signal(|| None::<f64>);
@@ -3804,6 +3936,18 @@ fn MessagesPage() -> Element {
             }
         }
         let dm_key = dm_pubkey.clone();
+        let dm_appearance = state()
+            .db
+            .messages_appearance()
+            .unwrap_or_default();
+        let dm_pane_style = dm_appearance.pane_style();
+        let dm_pane_class = if dm_appearance.bg_opacity > 0 {
+            "min-h-0 flex-1 space-y-3 overflow-auto p-4 messages-pane-themed message-pane-boost-bubbles"
+        } else if dm_appearance.themed() {
+            "min-h-0 flex-1 space-y-3 overflow-auto p-4 messages-pane-themed"
+        } else {
+            "min-h-0 flex-1 space-y-3 overflow-auto p-4"
+        };
         return rsx! {
             MessagesThreadShell {
                 channels: channels.clone(),
@@ -3846,6 +3990,13 @@ fn MessagesPage() -> Element {
                     }
                     refresh.set(refresh() + 1);
                 },
+                on_channel_appearance: move |name: String| {
+                    appearance_edit.set(Some(AppearanceEditTarget::Channel(name)));
+                },
+                AppearanceEditor {
+                    target: appearance_edit,
+                    on_saved: move |_| refresh.set(refresh() + 1),
+                }
                 div { class: "flex flex-wrap items-center justify-between gap-3",
                     div { class: "flex min-w-0 items-center gap-3",
                         Button {
@@ -3892,7 +4043,8 @@ fn MessagesPage() -> Element {
                 div { class: "flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border bg-card",
                     div {
                         id: "dm-scroller",
-                        class: "min-h-0 flex-1 space-y-3 overflow-auto p-4",
+                        class: "{dm_pane_class}",
+                        style: "{dm_pane_style}",
                         onscroll: {
                             let peer = dm_pubkey.clone();
                             move |_| {
@@ -4216,6 +4368,19 @@ fn MessagesPage() -> Element {
             .into_iter()
             .map(|row| row.pubkey)
             .collect();
+        let channel_appearance = state()
+            .db
+            .resolved_appearance(&channel.name)
+            .unwrap_or_default();
+        let channel_pane_style = channel_appearance.pane_style();
+        let channel_pane_class = if channel_appearance.bg_opacity > 0 {
+            "min-h-0 flex-1 space-y-3 overflow-auto p-4 messages-pane-themed message-pane-boost-bubbles"
+        } else if channel_appearance.themed() {
+            "min-h-0 flex-1 space-y-3 overflow-auto p-4 messages-pane-themed"
+        } else {
+            "min-h-0 flex-1 space-y-3 overflow-auto p-4"
+        };
+        let appear_channel_name = channel.name.clone();
         return rsx! {
             MessagesThreadShell {
                 channels: channels.clone(),
@@ -4259,6 +4424,13 @@ fn MessagesPage() -> Element {
                     }
                     refresh.set(refresh() + 1);
                 },
+                on_channel_appearance: move |name: String| {
+                    appearance_edit.set(Some(AppearanceEditTarget::Channel(name)));
+                },
+                AppearanceEditor {
+                    target: appearance_edit,
+                    on_saved: move |_| refresh.set(refresh() + 1),
+                }
                 div { class: "flex flex-wrap items-center justify-between gap-3",
                     div { class: "flex min-w-0 items-center gap-3",
                         Button {
@@ -4296,7 +4468,7 @@ fn MessagesPage() -> Element {
                             }
                         }
                     }
-                    div { class: "flex flex-wrap items-center gap-2",
+                    div { class: "channel-header-actions",
                         ChannelKeepSelect {
                             channel_name: channel.name.clone(),
                             current: channel
@@ -4308,6 +4480,16 @@ fn MessagesPage() -> Element {
                                 status_note(msg);
                             },
                         }
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| {
+                                appearance_edit.set(Some(AppearanceEditTarget::Channel(
+                                    appear_channel_name.clone(),
+                                )));
+                            },
+                            Icon { name: IconName::Settings, size: 14 }
+                            "Look"
+                        }
                     }
                 }
                 div {
@@ -4318,7 +4500,8 @@ fn MessagesPage() -> Element {
                     },
                     div {
                         id: "channel-scroller",
-                        class: "min-h-0 flex-1 space-y-3 overflow-auto p-4",
+                        class: "{channel_pane_class}",
+                        style: "{channel_pane_style}",
                         onscroll: move |_| {
                             if read_session().as_ref().is_some_and(|session| session.show_banner) {
                                 spawn(async move {
@@ -4423,11 +4606,15 @@ fn MessagesPage() -> Element {
                                     sender_name: device_name.clone(),
                                     text: bubble_text.clone(),
                                 };
-                                // Use stored pubkey only at paint time; name→key resolve is click-only.
+                                // Prefer stored pubkey; channel frames often only have a display name.
                                 let known_pk = message.sender_pubkey.clone();
+                                let name_block = crate::db::name_block_key(&device_name);
                                 let already_blocked = known_pk
                                     .as_ref()
-                                    .is_some_and(|pk| blocked_set.contains(pk));
+                                    .is_some_and(|pk| blocked_set.contains(pk))
+                                    || name_block
+                                        .as_ref()
+                                        .is_some_and(|nk| blocked_set.contains(nk));
                                 let block_label = device_name.clone();
                                 let avatar_seed = known_pk
                                     .clone()
@@ -4598,14 +4785,17 @@ fn MessagesPage() -> Element {
                                                                                 .flatten()
                                                                                 .map(|n| n.pubkey)
                                                                         });
-                                                                        let Some(pubkey) = pubkey else {
+                                                                        let key = pubkey.or_else(|| {
+                                                                            crate::db::name_block_key(&resolve_name)
+                                                                        });
+                                                                        let Some(key) = key else {
                                                                             block_resolve_fail.set(Some(
                                                                                 resolve_name.clone(),
                                                                             ));
                                                                             return;
                                                                         };
                                                                         block_confirm.set(Some((
-                                                                            pubkey,
+                                                                            key,
                                                                             block_label.clone(),
                                                                         )));
                                                                     },
@@ -4820,7 +5010,7 @@ fn MessagesPage() -> Element {
             if on_channels_tab {
             Card { title: "Default keep".to_string(), icon: Some(IconName::Clock),
                 p { class: "mb-3 text-sm text-muted-foreground",
-                    "System default for channels and DMs. Each channel can override this on its card or while open. Roster, secrets, and audit stay."
+                    "System default for channels and DMs. Each channel can override this on its card or while open. Roster, secrets, and audit stay. Global pane colors live under Settings → Messages appearance."
                 }
                 div { class: "flex flex-wrap gap-2",
                     RetentionChoice { label: "1 hour", value: "1h", current: message_keep(), onpick: move |value: String| {
@@ -5369,25 +5559,30 @@ fn MessagesPage() -> Element {
             } else {
                 Card { title: "Blocked contacts".to_string(), icon: Some(IconName::Ban),
                     p { class: "mb-3 text-sm text-muted-foreground",
-                        "Blocked nodes are dropped on receive for both channels and DMs. Enrollment is unchanged — unblock here to hear them again."
+                        "Blocked senders are dropped on receive. Channel blocks can use a display name when the frame has no pubkey; DMs need a pubkey (promoted once HQ hears them). Enrollment is unchanged — unblock here to hear them again."
                     }
                     if blocked_nodes.is_empty() {
                         p { class: "text-sm text-muted-foreground",
-                            "No blocked contacts. Use Block on an incoming channel message (when the sender can be resolved), or Block from an open DM."
+                            "No blocked contacts. Use Block on an incoming channel message, or Block from an open DM."
                         }
                     } else {
                         div { class: "flex flex-col gap-2",
                             for row in blocked_nodes {
                                 {
                                     let pubkey = row.pubkey.clone();
-                                    let short = pubkey.chars().take(12).collect::<String>();
+                                    let name_only = row.is_name_block();
+                                    let short = if name_only {
+                                        "channel name".to_string()
+                                    } else {
+                                        pubkey.chars().take(12).collect::<String>()
+                                    };
                                     rsx! {
                                         div {
                                             key: "{pubkey}",
                                             class: "flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-background/60 px-3 py-2",
                                             div { class: "min-w-0",
                                                 p { class: "truncate text-sm font-medium", "{row.label}" }
-                                                p { class: "font-mono text-xs text-muted-foreground", "{short}" }
+                                                p { class: if name_only { "text-xs text-muted-foreground" } else { "font-mono text-xs text-muted-foreground" }, "{short}" }
                                             }
                                             Button {
                                                 kind: ButtonKind::Ghost,
@@ -5596,7 +5791,7 @@ fn MessageBody(text: String, #[props(default)] outgoing: bool) -> Element {
     };
     rsx! {
         // `div` so meshcore:// chips can be block-level without invalid nesting.
-        div { class: "whitespace-pre-wrap break-words",
+        div { class: "message-body whitespace-pre-wrap break-words",
             for (idx, part) in parts.into_iter().enumerate() {
                 {
                     match part {
@@ -6243,6 +6438,7 @@ fn SettingsPage(
             .message_keep()
             .unwrap_or_else(|_| "forever".into())
     });
+    let mut appearance_edit = use_signal(|| None::<AppearanceEditTarget>);
     let mut regions_tick = use_signal(|| 0u32);
     let mut confirm_purge = use_signal(|| false);
     let mut purge_note = use_signal(String::new);
@@ -8056,6 +8252,23 @@ fn SettingsPage(
                             }
                         }
                     }
+                }
+            }
+            AppearanceEditor {
+                target: appearance_edit,
+                on_saved: move |_| {},
+            }
+            Card { title: "Messages appearance".to_string(), icon: Some(IconName::Messages),
+                p { class: "mb-3 text-sm text-muted-foreground",
+                    "Global pane background, opacity, and text size for channels and DMs. Each channel can still override with Look (or the rail gear)."
+                }
+                Button {
+                    kind: ButtonKind::Ghost,
+                    onclick: move |_| {
+                        appearance_edit.set(Some(AppearanceEditTarget::Global));
+                    },
+                    Icon { name: IconName::Settings, size: 14 }
+                    "Edit appearance"
                 }
             }
             Card { title: "History", icon: Some(IconName::Clock),
@@ -11574,6 +11787,301 @@ fn RetentionChoice(
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+enum AppearanceEditTarget {
+    Global,
+    Channel(String),
+}
+
+/// Edit global or per-channel Messages pane appearance.
+#[component]
+fn AppearanceEditor(
+    target: Signal<Option<AppearanceEditTarget>>,
+    on_saved: EventHandler<()>,
+) -> Element {
+    use crate::messages_appearance::{
+        BgAngle, BgMode, MessagesAppearance, TextSize, BG_OPACITY_MAX,
+    };
+    let mut target = target;
+    let open = target().is_some();
+    let mut draft = use_signal(MessagesAppearance::default);
+    let mut loaded_for = use_signal(|| None::<AppearanceEditTarget>);
+    if open {
+        let current = target();
+        if current != loaded_for() {
+            let next = match current.clone() {
+                Some(AppearanceEditTarget::Global) => {
+                    state().db.messages_appearance().unwrap_or_default()
+                }
+                Some(AppearanceEditTarget::Channel(name)) => state()
+                    .db
+                    .channel_appearance(&name)
+                    .ok()
+                    .flatten()
+                    .or_else(|| state().db.messages_appearance().ok())
+                    .unwrap_or_default(),
+                None => MessagesAppearance::default(),
+            };
+            draft.set(next);
+            loaded_for.set(current);
+        }
+    } else if loaded_for().is_some() {
+        loaded_for.set(None);
+    }
+    let title = match target() {
+        Some(AppearanceEditTarget::Global) => "Messages appearance".to_string(),
+        Some(AppearanceEditTarget::Channel(name)) => format!("Appearance · {name}"),
+        None => "Appearance".to_string(),
+    };
+    let is_channel = matches!(target(), Some(AppearanceEditTarget::Channel(_)));
+    let preview = draft();
+    let preview_style = preview.pane_style();
+    rsx! {
+        Dialog {
+            open: open,
+            title: title,
+            on_close: move |_| target.set(None),
+            div { class: "flex flex-col gap-3",
+                p { class: "text-sm text-muted-foreground",
+                    if is_channel {
+                        "Overrides the global Messages look for this channel only. HQ-local — not sent on the mesh."
+                    } else {
+                        "Default look for channel panes (and DMs). Each channel can override. HQ-local — not sent on the mesh."
+                    }
+                }
+                div { class: "appearance-preview", style: "{preview_style}",
+                    span { "Preview · The quick brown fox" }
+                }
+                div { class: "flex flex-wrap items-center justify-between gap-2",
+                    span { class: "text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground", "Background" }
+                    div { class: "appearance-seg",
+                        button {
+                            class: if draft().bg_mode == BgMode::Solid { "appearance-seg-active" } else { "" },
+                            onclick: move |_| {
+                                let mut d = draft();
+                                d.bg_mode = BgMode::Solid;
+                                draft.set(d);
+                            },
+                            "Solid"
+                        }
+                        button {
+                            class: if draft().bg_mode == BgMode::Gradient { "appearance-seg-active" } else { "" },
+                            onclick: move |_| {
+                                let mut d = draft();
+                                d.bg_mode = BgMode::Gradient;
+                                draft.set(d);
+                            },
+                            "Gradient"
+                        }
+                    }
+                }
+                div { class: "grid gap-2 sm:grid-cols-2",
+                    label { class: "flex flex-col gap-1 text-xs text-muted-foreground",
+                        "Color A"
+                        div { class: "flex items-center gap-2",
+                            input {
+                                r#type: "color",
+                                class: "h-9 w-12 cursor-pointer rounded border border-border bg-card",
+                                value: "{draft().bg_color}",
+                                oninput: move |event: FormEvent| {
+                                    let mut d = draft();
+                                    d.bg_color = event.value();
+                                    draft.set(d);
+                                },
+                            }
+                            input {
+                                class: "h-9 min-w-0 flex-1 rounded-md border border-border bg-card px-2 font-mono text-xs text-foreground",
+                                value: "{draft().bg_color}",
+                                oninput: move |event: FormEvent| {
+                                    let mut d = draft();
+                                    d.bg_color = event.value();
+                                    draft.set(d);
+                                },
+                            }
+                        }
+                    }
+                    if draft().bg_mode == BgMode::Gradient {
+                        label { class: "flex flex-col gap-1 text-xs text-muted-foreground",
+                            "Color B"
+                            div { class: "flex items-center gap-2",
+                                input {
+                                    r#type: "color",
+                                    class: "h-9 w-12 cursor-pointer rounded border border-border bg-card",
+                                    value: "{draft().bg_color_b.clone().unwrap_or_else(|| \"#16324f\".into())}",
+                                    oninput: move |event: FormEvent| {
+                                        let mut d = draft();
+                                        d.bg_color_b = Some(event.value());
+                                        draft.set(d);
+                                    },
+                                }
+                                input {
+                                    class: "h-9 min-w-0 flex-1 rounded-md border border-border bg-card px-2 font-mono text-xs text-foreground",
+                                    value: "{draft().bg_color_b.clone().unwrap_or_else(|| \"#16324f\".into())}",
+                                    oninput: move |event: FormEvent| {
+                                        let mut d = draft();
+                                        d.bg_color_b = Some(event.value());
+                                        draft.set(d);
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+                if draft().bg_mode == BgMode::Gradient {
+                    div { class: "flex flex-wrap items-center justify-between gap-2",
+                        span { class: "text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground", "Angle" }
+                        div { class: "appearance-seg",
+                            button {
+                                class: if draft().bg_angle == BgAngle::Vertical { "appearance-seg-active" } else { "" },
+                                onclick: move |_| {
+                                    let mut d = draft();
+                                    d.bg_angle = BgAngle::Vertical;
+                                    draft.set(d);
+                                },
+                                "Vertical"
+                            }
+                            button {
+                                class: if draft().bg_angle == BgAngle::Diagonal { "appearance-seg-active" } else { "" },
+                                onclick: move |_| {
+                                    let mut d = draft();
+                                    d.bg_angle = BgAngle::Diagonal;
+                                    draft.set(d);
+                                },
+                                "Diagonal"
+                            }
+                        }
+                    }
+                }
+                label { class: "flex flex-col gap-1 text-xs text-muted-foreground",
+                    "Opacity · {draft().bg_opacity}% (max {BG_OPACITY_MAX})"
+                    input {
+                        r#type: "range",
+                        min: "0",
+                        max: "{BG_OPACITY_MAX}",
+                        value: "{draft().bg_opacity}",
+                        class: "w-full",
+                        oninput: move |event: FormEvent| {
+                            let mut d = draft();
+                            d.bg_opacity = event.value().parse().unwrap_or(0).min(BG_OPACITY_MAX);
+                            draft.set(d);
+                        },
+                    }
+                }
+                div { class: "flex flex-wrap items-center justify-between gap-2",
+                    span { class: "text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground", "Text size" }
+                    div { class: "appearance-seg",
+                        button {
+                            class: if draft().text_size == TextSize::Sm { "appearance-seg-active" } else { "" },
+                            onclick: move |_| {
+                                let mut d = draft();
+                                d.text_size = TextSize::Sm;
+                                draft.set(d);
+                            },
+                            "Sm"
+                        }
+                        button {
+                            class: if draft().text_size == TextSize::Md { "appearance-seg-active" } else { "" },
+                            onclick: move |_| {
+                                let mut d = draft();
+                                d.text_size = TextSize::Md;
+                                draft.set(d);
+                            },
+                            "Md"
+                        }
+                        button {
+                            class: if draft().text_size == TextSize::Lg { "appearance-seg-active" } else { "" },
+                            onclick: move |_| {
+                                let mut d = draft();
+                                d.text_size = TextSize::Lg;
+                                draft.set(d);
+                            },
+                            "Lg"
+                        }
+                    }
+                }
+                label { class: "flex flex-col gap-1 text-xs text-muted-foreground",
+                    "Text color"
+                    div { class: "flex flex-wrap items-center gap-2",
+                        input {
+                            r#type: "color",
+                            class: "h-9 w-12 cursor-pointer rounded border border-border bg-card",
+                            value: "{draft().text_color.clone().unwrap_or_else(|| \"#f4f4f5\".into())}",
+                            oninput: move |event: FormEvent| {
+                                let mut d = draft();
+                                d.text_color = Some(event.value());
+                                draft.set(d);
+                            },
+                        }
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| {
+                                let mut d = draft();
+                                d.text_color = None;
+                                draft.set(d);
+                            },
+                            "Theme default"
+                        }
+                    }
+                }
+                div { class: "flex flex-wrap justify-end gap-2",
+                    if is_channel {
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| {
+                                if let Some(AppearanceEditTarget::Channel(name)) = target() {
+                                    match state().db.set_channel_appearance(&name, None) {
+                                        Ok(()) => {
+                                            target.set(None);
+                                            status_note(format!("{name} appearance reset to global."));
+                                            on_saved.call(());
+                                        }
+                                        Err(err) => status_note(err.to_string()),
+                                    }
+                                }
+                            },
+                            "Reset to global"
+                        }
+                    }
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        onclick: move |_| target.set(None),
+                        "Cancel"
+                    }
+                    Button {
+                        onclick: move |_| {
+                            let appearance = draft().clamp();
+                            match target() {
+                                Some(AppearanceEditTarget::Global) => {
+                                    match state().db.set_messages_appearance(&appearance) {
+                                        Ok(()) => {
+                                            target.set(None);
+                                            status_note("Messages appearance saved.");
+                                            on_saved.call(());
+                                        }
+                                        Err(err) => status_note(err.to_string()),
+                                    }
+                                }
+                                Some(AppearanceEditTarget::Channel(name)) => {
+                                    match state().db.set_channel_appearance(&name, Some(&appearance)) {
+                                        Ok(()) => {
+                                            target.set(None);
+                                            status_note(format!("{name} appearance saved."));
+                                            on_saved.call(());
+                                        }
+                                        Err(err) => status_note(err.to_string()),
+                                    }
+                                }
+                                None => target.set(None),
+                            }
+                        },
+                        "Save"
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Per-channel keep override (`default` = inherit global `message_keep`).
 #[component]
 fn ChannelKeepSelect(
@@ -11583,71 +12091,73 @@ fn ChannelKeepSelect(
 ) -> Element {
     let select_id = format!("channel-keep-{}", channel_name.replace(' ', "-"));
     rsx! {
-        div { class: "flex min-w-0 flex-wrap items-center gap-2",
+        div { class: "channel-keep-select",
             label {
-                class: "text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground",
+                class: "channel-keep-select__label",
                 r#for: "{select_id.clone()}",
                 "Keep"
             }
-            SelectInput {
-                id: select_id.clone(),
-                value: current.clone(),
-                onchange: {
-                    let channel_name = channel_name.clone();
-                    move |event: FormEvent| {
-                        let value = event.value();
-                        let keep = if value == "default" {
-                            None
-                        } else {
-                            Some(value.as_str())
-                        };
-                        match state().db.set_channel_message_keep(&channel_name, keep) {
-                            Ok(()) => {
-                                let _ = state().db.apply_message_keep();
-                                let label = match value.as_str() {
-                                    "default" => "default".into(),
-                                    other => other.to_string(),
-                                };
-                                on_done.call(format!("{channel_name} keep → {label}."));
+            div { class: "channel-keep-select__control",
+                SelectInput {
+                    id: select_id.clone(),
+                    value: current.clone(),
+                    onchange: {
+                        let channel_name = channel_name.clone();
+                        move |event: FormEvent| {
+                            let value = event.value();
+                            let keep = if value == "default" {
+                                None
+                            } else {
+                                Some(value.as_str())
+                            };
+                            match state().db.set_channel_message_keep(&channel_name, keep) {
+                                Ok(()) => {
+                                    let _ = state().db.apply_message_keep();
+                                    let label = match value.as_str() {
+                                        "default" => "default".into(),
+                                        other => other.to_string(),
+                                    };
+                                    on_done.call(format!("{channel_name} keep → {label}."));
+                                }
+                                Err(err) => on_done.call(err.to_string()),
                             }
-                            Err(err) => on_done.call(err.to_string()),
                         }
+                    },
+                    option {
+                        value: "default",
+                        style: "background-color: #151a20; color: #f4f4f5;",
+                        "Use default"
                     }
-                },
-                option {
-                    value: "default",
-                    style: "background-color: #151a20; color: #f4f4f5;",
-                    "Use default"
-                }
-                option {
-                    value: "1h",
-                    style: "background-color: #151a20; color: #f4f4f5;",
-                    "1 hour"
-                }
-                option {
-                    value: "6h",
-                    style: "background-color: #151a20; color: #f4f4f5;",
-                    "6 hours"
-                }
-                option {
-                    value: "24h",
-                    style: "background-color: #151a20; color: #f4f4f5;",
-                    "24 hours"
-                }
-                option {
-                    value: "7d",
-                    style: "background-color: #151a20; color: #f4f4f5;",
-                    "1 week"
-                }
-                option {
-                    value: "30d",
-                    style: "background-color: #151a20; color: #f4f4f5;",
-                    "30 days"
-                }
-                option {
-                    value: "forever",
-                    style: "background-color: #151a20; color: #f4f4f5;",
-                    "Forever"
+                    option {
+                        value: "1h",
+                        style: "background-color: #151a20; color: #f4f4f5;",
+                        "1 hour"
+                    }
+                    option {
+                        value: "6h",
+                        style: "background-color: #151a20; color: #f4f4f5;",
+                        "6 hours"
+                    }
+                    option {
+                        value: "24h",
+                        style: "background-color: #151a20; color: #f4f4f5;",
+                        "24 hours"
+                    }
+                    option {
+                        value: "7d",
+                        style: "background-color: #151a20; color: #f4f4f5;",
+                        "1 week"
+                    }
+                    option {
+                        value: "30d",
+                        style: "background-color: #151a20; color: #f4f4f5;",
+                        "30 days"
+                    }
+                    option {
+                        value: "forever",
+                        style: "background-color: #151a20; color: #f4f4f5;",
+                        "Forever"
+                    }
                 }
             }
         }

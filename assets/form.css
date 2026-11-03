@@ -113,6 +113,233 @@
   }
 }
 
+/* Top OverviewStat cards — soft tone wash + left accent (frozen Tailwind lacks these). */
+.overview-stat {
+  border-radius: 0.5rem;
+  border: 1px solid #ffffff14;
+  border-left-width: 3px;
+  background: #151a20;
+  padding: 0.625rem 0.75rem;
+}
+
+.overview-stat-signal {
+  border-left-color: #3dd68c;
+  background: linear-gradient(135deg, rgba(61, 214, 140, 0.14) 0%, #151a20 55%);
+}
+
+.overview-stat-pending {
+  border-left-color: #fbbf24;
+  background: linear-gradient(135deg, rgba(251, 191, 36, 0.14) 0%, #151a20 55%);
+}
+
+.overview-stat-ok {
+  border-left-color: #7dd3fc;
+  background: linear-gradient(135deg, rgba(125, 211, 252, 0.14) 0%, #151a20 55%);
+}
+
+.overview-stat-muted {
+  border-left-color: #4b5563;
+  background: linear-gradient(135deg, rgba(75, 85, 99, 0.18) 0%, #151a20 55%);
+}
+
+button.overview-stat {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+button.overview-stat:hover {
+  filter: brightness(1.08);
+}
+
+/* Overview utility strips — system row + messages row so chips stay even. */
+.overview-chip-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.overview-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+
+/* Overview utility strip chips — distinct tone wash + icon badge. */
+.overview-chip {
+  display: inline-flex;
+  min-width: 9.5rem;
+  flex: 1 1 0;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: 0.5rem;
+  border: 1px solid #ffffff14;
+  border-left-width: 3px;
+  background: #151a20;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.overview-chip:hover {
+  filter: brightness(1.08);
+}
+
+.overview-chip__icon {
+  display: flex;
+  height: 2rem;
+  width: 2rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.375rem;
+}
+
+.overview-chip-alerts {
+  border-left-color: #fbbf24;
+  background: linear-gradient(135deg, rgba(251, 191, 36, 0.14) 0%, #151a20 60%);
+}
+.overview-chip-alerts .overview-chip__icon {
+  background: rgba(251, 191, 36, 0.18);
+  color: #fbbf24;
+}
+
+.overview-chip-radio {
+  border-left-color: #3dd68c;
+  background: linear-gradient(135deg, rgba(61, 214, 140, 0.14) 0%, #151a20 60%);
+}
+.overview-chip-radio .overview-chip__icon {
+  background: rgba(61, 214, 140, 0.18);
+  color: #3dd68c;
+}
+
+.overview-chip-backup {
+  border-left-color: #2dd4bf;
+  background: linear-gradient(135deg, rgba(45, 212, 191, 0.14) 0%, #151a20 60%);
+}
+.overview-chip-backup .overview-chip__icon {
+  background: rgba(45, 212, 191, 0.18);
+  color: #2dd4bf;
+}
+
+.overview-chip-firmware {
+  border-left-color: #7dd3fc;
+  background: linear-gradient(135deg, rgba(125, 211, 252, 0.14) 0%, #151a20 60%);
+}
+.overview-chip-firmware .overview-chip__icon {
+  background: rgba(125, 211, 252, 0.18);
+  color: #7dd3fc;
+}
+
+.overview-chip-unread {
+  border-left-color: #fb7185;
+  background: linear-gradient(135deg, rgba(251, 113, 133, 0.14) 0%, #151a20 60%);
+}
+.overview-chip-unread .overview-chip__icon {
+  background: rgba(251, 113, 133, 0.18);
+  color: #fb7185;
+}
+.overview-chip-unread__value {
+  color: #fecdd3;
+}
+
+@keyframes overview-unread-sonar {
+  0% {
+    box-shadow: 0 0 0 0 rgba(251, 113, 133, 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 0.75rem rgba(251, 113, 133, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(251, 113, 133, 0);
+  }
+}
+
+@keyframes overview-mentions-sonar {
+  0% {
+    box-shadow: 0 0 0 0 rgba(251, 146, 60, 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 0.75rem rgba(251, 146, 60, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(251, 146, 60, 0);
+  }
+}
+
+@keyframes overview-direct-sonar {
+  0% {
+    box-shadow: 0 0 0 0 rgba(96, 165, 250, 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 0.75rem rgba(96, 165, 250, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(96, 165, 250, 0);
+  }
+}
+
+.overview-chip-unread-live {
+  animation: overview-unread-sonar 1.85s ease-out infinite;
+}
+
+.overview-chip-mentions-live {
+  animation: overview-mentions-sonar 1.85s ease-out infinite;
+}
+
+.overview-chip-direct-live {
+  animation: overview-direct-sonar 1.85s ease-out infinite;
+}
+
+.overview-chip-direct__value {
+  color: #bfdbfe;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .overview-chip-unread-live {
+    animation: none;
+    box-shadow: 0 0 0 1px rgba(251, 113, 133, 0.5);
+  }
+  .overview-chip-mentions-live {
+    animation: none;
+    box-shadow: 0 0 0 1px rgba(251, 146, 60, 0.5);
+  }
+  .overview-chip-direct-live {
+    animation: none;
+    box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.5);
+  }
+}
+
+.overview-chip-mentions {
+  border-left-color: #fb923c;
+  background: linear-gradient(135deg, rgba(251, 146, 60, 0.14) 0%, #151a20 60%);
+}
+.overview-chip-mentions .overview-chip__icon {
+  background: rgba(251, 146, 60, 0.18);
+  color: #fb923c;
+}
+
+.overview-chip-channels {
+  border-left-color: #34d399;
+  background: linear-gradient(135deg, rgba(52, 211, 153, 0.14) 0%, #151a20 60%);
+}
+.overview-chip-channels .overview-chip__icon {
+  background: rgba(52, 211, 153, 0.18);
+  color: #34d399;
+}
+
+.overview-chip-direct {
+  border-left-color: #60a5fa;
+  background: linear-gradient(135deg, rgba(96, 165, 250, 0.14) 0%, #151a20 60%);
+}
+.overview-chip-direct .overview-chip__icon {
+  background: rgba(96, 165, 250, 0.18);
+  color: #60a5fa;
+}
+
 /* Settings HQ / Device tab strip */
 .settings-tabs {
   display: flex;
@@ -1854,6 +2081,42 @@ option {
   color: #9aa3af;
 }
 
+/*
+ * Channel keep control. Frozen assets/tailwind.css lacks flex-nowrap and
+ * arbitrary widths (w-[8.5rem]), and SelectInput is w-full — together those
+ * wrap the Keep label above the dropdown in the channel header.
+ */
+.channel-keep-select {
+  display: inline-flex;
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: nowrap;
+}
+
+.channel-keep-select__label {
+  flex-shrink: 0;
+  font-size: 0.65rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #9aa3af;
+}
+
+.channel-keep-select__control {
+  flex: 0 0 8.5rem;
+  width: 8.5rem;
+  max-width: 8.5rem;
+}
+
+.channel-header-actions {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .messages-convo {
   display: flex;
   min-width: 0;
@@ -1925,6 +2188,76 @@ option {
 .message-bubble-tone-7 {
   background: rgba(15, 118, 110, 0.22);
   border: 1px solid rgba(15, 118, 110, 0.35);
+}
+
+/* Messages pane appearance (global / per-channel CSS vars via inline style). */
+.messages-pane-themed {
+  background-clip: padding-box;
+}
+
+.messages-pane-themed .message-bubble {
+  font-size: var(--msg-text-size, 0.875rem);
+}
+
+.messages-pane-themed .message-bubble .message-body,
+.messages-pane-themed .message-bubble p {
+  color: var(--msg-text-color, inherit);
+}
+
+.messages-pane-themed.message-pane-boost-bubbles .message-bubble-tone-0 {
+  background: rgba(14, 116, 144, 0.34);
+}
+.messages-pane-themed.message-pane-boost-bubbles .message-bubble-tone-1 {
+  background: rgba(4, 120, 87, 0.34);
+}
+.messages-pane-themed.message-pane-boost-bubbles .message-bubble-tone-2 {
+  background: rgba(180, 83, 9, 0.34);
+}
+.messages-pane-themed.message-pane-boost-bubbles .message-bubble-tone-3 {
+  background: rgba(124, 58, 237, 0.34);
+}
+.messages-pane-themed.message-pane-boost-bubbles .message-bubble-tone-4 {
+  background: rgba(190, 18, 60, 0.34);
+}
+.messages-pane-themed.message-pane-boost-bubbles .message-bubble-tone-5 {
+  background: rgba(29, 78, 216, 0.34);
+}
+.messages-pane-themed.message-pane-boost-bubbles .message-bubble-tone-6 {
+  background: rgba(161, 98, 7, 0.34);
+}
+.messages-pane-themed.message-pane-boost-bubbles .message-bubble-tone-7 {
+  background: rgba(15, 118, 110, 0.34);
+}
+
+.appearance-preview {
+  height: 3.25rem;
+  border-radius: 0.5rem;
+  border: 1px solid #ffffff22;
+  display: flex;
+  align-items: center;
+  padding: 0 0.75rem;
+  font-size: 0.8rem;
+}
+
+.appearance-seg {
+  display: inline-flex;
+  border: 1px solid #ffffff22;
+  border-radius: 0.4rem;
+  overflow: hidden;
+}
+
+.appearance-seg button {
+  border: 0;
+  background: transparent;
+  color: #a1a1aa;
+  padding: 0.3rem 0.65rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.appearance-seg button.appearance-seg-active {
+  background: rgba(61, 214, 140, 0.18);
+  color: #3dd68c;
 }
 
 /* Channel bubble hover actions — pill on the bubble's bottom-right.

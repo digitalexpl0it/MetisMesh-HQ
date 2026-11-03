@@ -4436,11 +4436,21 @@ async fn handle_event(
                     .or_else(|| db.unique_node_by_name(name).ok().flatten())
             });
             let sender_pubkey = resolved.as_ref().map(|n| n.pubkey.clone());
-            if let Some(ref pubkey) = sender_pubkey {
-                if db.is_blocked(pubkey).unwrap_or(false) {
-                    hq_log!(debug, "dropping channel RX from blocked {pubkey}");
-                    return Ok(());
+            if db
+                .is_channel_sender_blocked(sender_name.as_deref(), sender_pubkey.as_deref())
+                .unwrap_or(false)
+            {
+                // Name-only blocks promote onto a resolved pubkey so later DMs drop too.
+                if let (Some(name), Some(pubkey)) = (sender_name.as_deref(), sender_pubkey.as_deref())
+                {
+                    let _ = db.promote_name_block_to_pubkey(pubkey, name);
                 }
+                hq_log!(
+                    debug,
+                    "dropping channel RX from blocked sender {:?}",
+                    sender_name.as_deref().or(sender_pubkey.as_deref())
+                );
+                return Ok(());
             }
             let display = if let Some(name) = sender_name.as_ref() {
                 format!("{name}: {body}")

@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
+use crate::mesh_text::text_mentions_name;
 use crate::path::dedupe_key;
 use crate::secrets::{
     SecretStoreKind, Secrets, CHANNEL_NAME, MAX_CHANNEL_NAME_BYTES, NET_CHANNEL_NAME,
@@ -115,6 +116,8 @@ pub struct DmThreadRow {
     pub last_message_at: Option<i64>,
     pub message_count: i64,
     pub unread_count: i64,
+    /// Unread RX messages that @mention the HQ companion.
+    pub unread_mentions: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -166,6 +169,8 @@ pub struct ChannelRow {
     /// Received (`rx`) messages newer than `channel_last_read_{slot}`; 0 if never opened.
     /// Outbound HQ/bot posts do not count.
     pub unread_count: i64,
+    /// Unread RX messages that @mention the HQ companion.
+    pub unread_mentions: i64,
     pub last_message_at: Option<i64>,
     pub last_text: Option<String>,
     /// Per-channel override: `1h`…`forever`, or `None` to use the global default.
@@ -405,6 +410,10 @@ impl Db {
                 at INTEGER NOT NULL
             );",
         );
+        let _ = conn.execute(
+            "ALTER TABLE messages ADD COLUMN mentions_hq INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -566,6 +575,10 @@ impl Db {
                 label TEXT NOT NULL DEFAULT '',
                 added_at INTEGER NOT NULL
             );",
+        );
+        let _ = conn.execute(
+            "ALTER TABLE messages ADD COLUMN mentions_hq INTEGER NOT NULL DEFAULT 0",
+            [],
         );
         Ok(())
     }
@@ -1646,6 +1659,24 @@ impl Db {
                       )
                       ELSE 0
                     END,
+                    CASE
+                      WHEN EXISTS (
+                        SELECT 1 FROM settings s
+                        WHERE s.key = 'channel_last_read_' || c.slot
+                      ) THEN (
+                        SELECT COUNT(*) FROM messages m
+                        WHERE m.kind = 'channel'
+                          AND m.channel_idx = c.slot
+                          AND m.direction = 'rx'
+                          AND COALESCE(m.mentions_hq, 0) = 1
+                          AND m.id > COALESCE(
+                            (SELECT CAST(s.value AS INTEGER) FROM settings s
+                             WHERE s.key = 'channel_last_read_' || c.slot),
+                            0
+                          )
+                      )
+                      ELSE 0
+                    END,
                     (SELECT m.received_at FROM messages m
                      WHERE m.kind = 'channel' AND m.channel_idx = c.slot
                      ORDER BY m.received_at DESC, m.id DESC LIMIT 1),
@@ -1667,7 +1698,7 @@ impl Db {
         )?;
         let rows = stmt
             .query_map([], |row| {
-                let keep_raw: Option<String> = row.get(9)?;
+                let keep_raw: Option<String> = row.get(10)?;
                 let message_keep = keep_raw.and_then(|v| {
                     Self::normalize_message_keep(&v).map(str::to_string)
                 });
@@ -1682,8 +1713,9 @@ impl Db {
                     },
                     message_count: row.get(5)?,
                     unread_count: row.get(6)?,
-                    last_message_at: row.get(7)?,
-                    last_text: row.get(8)?,
+                    unread_mentions: row.get(7)?,
+                    last_message_at: row.get(8)?,
+                    last_text: row.get(9)?,
                     message_keep,
                 })
             })?
@@ -1909,25 +1941,83 @@ impl Db {
         Ok(true)
     }
 
-    pub fn list_channel_messages(&self, slot: i64, limit: i64) -> Result<Vec<MessageRow>> {
+    /// Newest `limit` channel messages, ordered oldest → newest for the chat pane.
+    /// Second value is true when older history exists beyond this page.
+    pub fn list_channel_messages(
+        &self,
+        slot: i64,
+        limit: i64,
+    ) -> Result<(Vec<MessageRow>, bool)> {
+        self.list_channel_messages_page(slot, None, limit)
+    }
+
+    /// Older channel messages strictly before `before_id` (newest-of-older page), ASC.
+    pub fn list_channel_messages_before(
+        &self,
+        slot: i64,
+        before_id: i64,
+        limit: i64,
+    ) -> Result<(Vec<MessageRow>, bool)> {
+        self.list_channel_messages_page(slot, Some(before_id), limit)
+    }
+
+    fn list_channel_messages_page(
+        &self,
+        slot: i64,
+        before_id: Option<i64>,
+        limit: i64,
+    ) -> Result<(Vec<MessageRow>, bool)> {
+        let limit = limit.max(0);
+        let fetch = limit + 1;
         let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT m.id, m.direction, m.kind,
-                    COALESCE(n.name, m.sender_prefix, 'channel'),
-                    m.sender_pubkey, m.channel_idx, m.hop_count, m.display_text, m.delivery, m.received_at,
-                    p.source, COALESCE(p.path, x''), COALESCE(p.hash_size, 1), m.snr
-             FROM messages m
-             LEFT JOIN nodes n ON n.pubkey = m.sender_pubkey
-             LEFT JOIN paths p ON p.id = (
-                SELECT id FROM paths WHERE message_id = m.id ORDER BY id DESC LIMIT 1
+        let sql = if before_id.is_some() {
+            "SELECT id, direction, kind, sender_name, sender_pubkey, channel_idx, hop_count,
+                    display_text, delivery, received_at, route_source, path, hash_size, snr
+             FROM (
+               SELECT m.id, m.direction, m.kind,
+                      COALESCE(n.name, m.sender_prefix, 'channel') AS sender_name,
+                      m.sender_pubkey, m.channel_idx, m.hop_count, m.display_text, m.delivery,
+                      m.received_at, p.source AS route_source, COALESCE(p.path, x'') AS path,
+                      COALESCE(p.hash_size, 1) AS hash_size, m.snr
+               FROM messages m
+               LEFT JOIN nodes n ON n.pubkey = m.sender_pubkey
+               LEFT JOIN paths p ON p.id = (
+                  SELECT id FROM paths WHERE message_id = m.id ORDER BY id DESC LIMIT 1
+               )
+               WHERE m.kind = 'channel' AND m.channel_idx = ?1 AND m.id < ?2
+               ORDER BY m.received_at DESC, m.id DESC
+               LIMIT ?3
              )
-             WHERE m.kind = 'channel' AND m.channel_idx = ?1
-             ORDER BY m.received_at ASC, m.id ASC
-             LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![slot, limit], Self::map_message_row)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Error::from)
+             ORDER BY received_at ASC, id ASC"
+        } else {
+            "SELECT id, direction, kind, sender_name, sender_pubkey, channel_idx, hop_count,
+                    display_text, delivery, received_at, route_source, path, hash_size, snr
+             FROM (
+               SELECT m.id, m.direction, m.kind,
+                      COALESCE(n.name, m.sender_prefix, 'channel') AS sender_name,
+                      m.sender_pubkey, m.channel_idx, m.hop_count, m.display_text, m.delivery,
+                      m.received_at, p.source AS route_source, COALESCE(p.path, x'') AS path,
+                      COALESCE(p.hash_size, 1) AS hash_size, m.snr
+               FROM messages m
+               LEFT JOIN nodes n ON n.pubkey = m.sender_pubkey
+               LEFT JOIN paths p ON p.id = (
+                  SELECT id FROM paths WHERE message_id = m.id ORDER BY id DESC LIMIT 1
+               )
+               WHERE m.kind = 'channel' AND m.channel_idx = ?1
+               ORDER BY m.received_at DESC, m.id DESC
+               LIMIT ?2
+             )
+             ORDER BY received_at ASC, id ASC"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = if let Some(before) = before_id {
+            stmt.query_map(params![slot, before, fetch], Self::map_message_row)?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map(params![slot, fetch], Self::map_message_row)?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        Ok(trim_message_page(rows, limit))
     }
 
     /// Upsert a radio contact. When `quiet` is true (bootstrap contact sync), new
@@ -2142,26 +2232,81 @@ impl Db {
             .map_err(Error::from)
     }
 
-    /// Direct messages for a contact thread (oldest → newest for the chat pane).
-    pub fn list_dm_messages(&self, pubkey: &str, limit: i64) -> Result<Vec<MessageRow>> {
+    /// Newest `limit` DMs for a contact, oldest → newest. `has_older` when more exist.
+    pub fn list_dm_messages(
+        &self,
+        pubkey: &str,
+        limit: i64,
+    ) -> Result<(Vec<MessageRow>, bool)> {
+        self.list_dm_messages_page(pubkey, None, limit)
+    }
+
+    pub fn list_dm_messages_before(
+        &self,
+        pubkey: &str,
+        before_id: i64,
+        limit: i64,
+    ) -> Result<(Vec<MessageRow>, bool)> {
+        self.list_dm_messages_page(pubkey, Some(before_id), limit)
+    }
+
+    fn list_dm_messages_page(
+        &self,
+        pubkey: &str,
+        before_id: Option<i64>,
+        limit: i64,
+    ) -> Result<(Vec<MessageRow>, bool)> {
+        let limit = limit.max(0);
+        let fetch = limit + 1;
         let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT m.id, m.direction, m.kind,
-                    COALESCE(n.name, m.sender_prefix, 'direct'),
-                    m.sender_pubkey, m.channel_idx, m.hop_count, m.display_text, m.delivery, m.received_at,
-                    p.source, COALESCE(p.path, x''), COALESCE(p.hash_size, 1), m.snr
-             FROM messages m
-             LEFT JOIN nodes n ON n.pubkey = m.sender_pubkey
-             LEFT JOIN paths p ON p.id = (
-                SELECT id FROM paths WHERE message_id = m.id ORDER BY id DESC LIMIT 1
+        let sql = if before_id.is_some() {
+            "SELECT id, direction, kind, sender_name, sender_pubkey, channel_idx, hop_count,
+                    display_text, delivery, received_at, route_source, path, hash_size, snr
+             FROM (
+               SELECT m.id, m.direction, m.kind,
+                      COALESCE(n.name, m.sender_prefix, 'direct') AS sender_name,
+                      m.sender_pubkey, m.channel_idx, m.hop_count, m.display_text, m.delivery,
+                      m.received_at, p.source AS route_source, COALESCE(p.path, x'') AS path,
+                      COALESCE(p.hash_size, 1) AS hash_size, m.snr
+               FROM messages m
+               LEFT JOIN nodes n ON n.pubkey = m.sender_pubkey
+               LEFT JOIN paths p ON p.id = (
+                  SELECT id FROM paths WHERE message_id = m.id ORDER BY id DESC LIMIT 1
+               )
+               WHERE m.kind = 'direct' AND m.sender_pubkey = ?1 AND m.id < ?2
+               ORDER BY m.received_at DESC, m.id DESC
+               LIMIT ?3
              )
-             WHERE m.kind = 'direct' AND m.sender_pubkey = ?1
-             ORDER BY m.received_at ASC, m.id ASC
-             LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![pubkey, limit], Self::map_message_row)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Error::from)
+             ORDER BY received_at ASC, id ASC"
+        } else {
+            "SELECT id, direction, kind, sender_name, sender_pubkey, channel_idx, hop_count,
+                    display_text, delivery, received_at, route_source, path, hash_size, snr
+             FROM (
+               SELECT m.id, m.direction, m.kind,
+                      COALESCE(n.name, m.sender_prefix, 'direct') AS sender_name,
+                      m.sender_pubkey, m.channel_idx, m.hop_count, m.display_text, m.delivery,
+                      m.received_at, p.source AS route_source, COALESCE(p.path, x'') AS path,
+                      COALESCE(p.hash_size, 1) AS hash_size, m.snr
+               FROM messages m
+               LEFT JOIN nodes n ON n.pubkey = m.sender_pubkey
+               LEFT JOIN paths p ON p.id = (
+                  SELECT id FROM paths WHERE message_id = m.id ORDER BY id DESC LIMIT 1
+               )
+               WHERE m.kind = 'direct' AND m.sender_pubkey = ?1
+               ORDER BY m.received_at DESC, m.id DESC
+               LIMIT ?2
+             )
+             ORDER BY received_at ASC, id ASC"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = if let Some(before) = before_id {
+            stmt.query_map(params![pubkey, before, fetch], Self::map_message_row)?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map(params![pubkey, fetch], Self::map_message_row)?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        Ok(trim_message_page(rows, limit))
     }
 
     fn dm_last_read_key(pubkey: &str) -> String {
@@ -2228,6 +2373,24 @@ impl Db {
                           )
                       )
                       ELSE 0
+                    END,
+                    CASE
+                      WHEN EXISTS (
+                        SELECT 1 FROM settings s
+                        WHERE s.key = 'dm_last_read_' || lower(m.sender_pubkey)
+                      ) THEN (
+                        SELECT COUNT(*) FROM messages m3
+                        WHERE m3.kind = 'direct'
+                          AND m3.sender_pubkey = m.sender_pubkey
+                          AND m3.direction = 'rx'
+                          AND COALESCE(m3.mentions_hq, 0) = 1
+                          AND m3.id > COALESCE(
+                            (SELECT CAST(s.value AS INTEGER) FROM settings s
+                             WHERE s.key = 'dm_last_read_' || lower(m.sender_pubkey)),
+                            0
+                          )
+                      )
+                      ELSE 0
                     END
              FROM messages m
              LEFT JOIN nodes n ON n.pubkey = m.sender_pubkey
@@ -2246,6 +2409,7 @@ impl Db {
                     last_message_at: row.get(3)?,
                     last_text: row.get(4)?,
                     unread_count: row.get(5)?,
+                    unread_mentions: row.get(6)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -2268,6 +2432,20 @@ impl Db {
             .sum())
     }
 
+    pub fn total_unread_mentions(&self) -> Result<i64> {
+        let channels: i64 = self
+            .list_channels()?
+            .into_iter()
+            .map(|c| c.unread_mentions)
+            .sum();
+        let dms: i64 = self
+            .list_dm_threads()?
+            .into_iter()
+            .map(|t| t.unread_mentions)
+            .sum();
+        Ok(channels + dms)
+    }
+
     pub fn count_unnoticed_nodes(&self) -> Result<i64> {
         let conn = self.lock();
         Ok(conn.query_row(
@@ -2284,6 +2462,61 @@ impl Db {
             params![pubkey],
         )?;
         Ok(())
+    }
+
+    /// Clear all NEW pills on Roster (mark every node noticed).
+    pub fn mark_all_nodes_noticed(&self) -> Result<u64> {
+        let conn = self.lock();
+        let changed = conn.execute(
+            "UPDATE nodes SET noticed = 1 WHERE COALESCE(noticed, 1) = 0",
+            [],
+        )? as u64;
+        if changed > 0 {
+            conn.execute(
+                "INSERT INTO audit (at, action, pubkey, detail) VALUES (?1, 'roster_clear_new', '', ?2)",
+                params![unix_now(), changed.to_string()],
+            )?;
+        }
+        Ok(changed)
+    }
+
+    /// Count heard-only nodes (eligible for roster prune).
+    pub fn count_heard_only_nodes(&self) -> Result<i64> {
+        let conn = self.lock();
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM nodes WHERE enrollment = 'heard'",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Remove heard-only roster rows and related tracker/block/claim rows.
+    /// Keeps enrolled, pending, denied, and HQ. Does not delete message history.
+    pub fn prune_heard_nodes(&self) -> Result<u64> {
+        let conn = self.lock();
+        let keys: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT pubkey FROM nodes WHERE enrollment = 'heard'",
+            )?;
+            let mapped = stmt.query_map([], |row| row.get(0))?;
+            mapped.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        for key in &keys {
+            conn.execute("DELETE FROM tracked_nodes WHERE pubkey = ?1", params![key])?;
+            conn.execute("DELETE FROM blocked_nodes WHERE pubkey = ?1", params![key])?;
+            conn.execute("DELETE FROM claimed_infra WHERE pubkey = ?1", params![key])?;
+            conn.execute("DELETE FROM node_radios WHERE pubkey = ?1", params![key])?;
+            conn.execute("DELETE FROM nodes WHERE pubkey = ?1", params![key])?;
+        }
+        let n = keys.len() as u64;
+        conn.execute(
+            "INSERT INTO audit (at, action, pubkey, detail) VALUES (?1, 'roster_prune_heard', '', ?2)",
+            params![unix_now(), n.to_string()],
+        )?;
+        Ok(n)
     }
 
     pub fn rf_samples_for_pubkey(&self, pubkey: &str, limit: i64) -> Result<Vec<(i64, i64, f64, i64)>> {
@@ -2518,13 +2751,25 @@ impl Db {
     ) -> Result<Option<i64>> {
         let sender_key = sender_pubkey.unwrap_or(sender_prefix);
         let dedupe = dedupe_key(kind, sender_key, sender_timestamp, text);
+        let mentions_hq = if direction == "rx" {
+            let hq = self.hq_advert_name().unwrap_or_default();
+            if !hq.is_empty()
+                && (text_mentions_name(text, &hq) || text_mentions_name(display_text, &hq))
+            {
+                1i64
+            } else {
+                0
+            }
+        } else {
+            0
+        };
         let conn = self.lock();
         let changed = conn.execute(
             "INSERT OR IGNORE INTO messages (
                 dedupe_key, kind, direction, sender_pubkey, sender_prefix, channel_idx,
                 hop_count, sender_timestamp, text, display_text, snr, signature, raw_json,
-                delivery, received_at, radio_id, origin
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 'local')",
+                delivery, received_at, radio_id, origin, mentions_hq
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 'local', ?17)",
             params![
                 dedupe,
                 kind,
@@ -2541,7 +2786,8 @@ impl Db {
                 raw.to_string(),
                 delivery,
                 unix_now(),
-                radio_id
+                radio_id,
+                mentions_hq
             ],
         )?;
         if changed == 0 {
@@ -3781,6 +4027,15 @@ pub struct PositionPoint {
     pub lon: f64,
 }
 
+/// Drop the extra oldest row when we fetched `limit + 1` to detect has_older.
+fn trim_message_page(mut rows: Vec<MessageRow>, limit: i64) -> (Vec<MessageRow>, bool) {
+    let has_older = (rows.len() as i64) > limit;
+    if has_older && !rows.is_empty() {
+        rows.remove(0);
+    }
+    (rows, has_older)
+}
+
 fn map_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRow> {
     let lat: Option<f64> = row.get(7)?;
     let lon: Option<f64> = row.get(8)?;
@@ -4005,7 +4260,8 @@ CREATE TABLE IF NOT EXISTS messages (
     delivery TEXT NOT NULL,
     received_at INTEGER NOT NULL,
     radio_id INTEGER,
-    origin TEXT NOT NULL DEFAULT 'local'
+    origin TEXT NOT NULL DEFAULT 'local',
+    mentions_hq INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS messages_time ON messages(received_at);
 CREATE INDEX IF NOT EXISTS messages_sender ON messages(sender_pubkey);
@@ -4506,7 +4762,7 @@ mod tests {
         assert_eq!(db.list_dm_threads().unwrap().len(), 1);
         assert_eq!(db.clear_dm_thread("aa11").unwrap(), 1);
         assert!(db.list_dm_threads().unwrap().is_empty());
-        assert!(db.list_dm_messages("aa11", 50).unwrap().is_empty());
+        assert!(db.list_dm_messages("aa11", 50).unwrap().0.is_empty());
         assert_eq!(db.dm_last_read("aa11").unwrap(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4652,6 +4908,138 @@ mod tests {
         db.set_contacts_since_for_radio(a, 99).unwrap();
         assert_eq!(db.contacts_since_for_radio(a).unwrap(), 99);
         assert_eq!(db.contacts_since_for_radio(b).unwrap(), 42);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn channel_message_window_returns_newest_and_before() {
+        let (db, _, dir) = test_db();
+        let raw = json!({});
+        let mut ids = Vec::new();
+        for i in 0..5 {
+            let id = db
+                .insert_message(
+                    "channel",
+                    "rx",
+                    Some("aa"),
+                    "aa",
+                    Some(0),
+                    Some(1),
+                    100 + i,
+                    &format!("m{i}"),
+                    &format!("m{i}"),
+                    None,
+                    None,
+                    &raw,
+                    "received",
+                    None,
+                )
+                .unwrap()
+                .unwrap();
+            ids.push(id);
+        }
+        let (page, has_older) = db.list_channel_messages(0, 2).unwrap();
+        assert!(has_older);
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].id, ids[3]);
+        assert_eq!(page[1].id, ids[4]);
+        let (older, still) = db
+            .list_channel_messages_before(0, page[0].id, 2)
+            .unwrap();
+        assert!(still);
+        assert_eq!(older.len(), 2);
+        assert_eq!(older[0].id, ids[1]);
+        assert_eq!(older[1].id, ids[2]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mentions_hq_sets_flag_and_unread_count() {
+        let (db, _, dir) = test_db();
+        db.set_setting("hq_name", "MetisHQ").unwrap();
+        let raw = json!({});
+        let id1 = db
+            .insert_message(
+                "channel",
+                "rx",
+                Some("aa"),
+                "aa",
+                Some(0),
+                Some(1),
+                20,
+                "hello @[MetisHQ]",
+                "hello @[MetisHQ]",
+                None,
+                None,
+                &raw,
+                "received",
+                None,
+            )
+            .unwrap()
+            .unwrap();
+        let _id2 = db
+            .insert_message(
+                "channel",
+                "rx",
+                Some("aa"),
+                "aa",
+                Some(0),
+                Some(1),
+                21,
+                "no mention",
+                "no mention",
+                None,
+                None,
+                &raw,
+                "received",
+                None,
+            )
+            .unwrap()
+            .unwrap();
+        let flagged: i64 = db
+            .lock()
+            .query_row(
+                "SELECT mentions_hq FROM messages WHERE id = ?1",
+                params![id1],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(flagged, 1);
+        db.set_channel_last_read(0, id1 - 1).unwrap();
+        let public = db
+            .list_channels()
+            .unwrap()
+            .into_iter()
+            .find(|c| c.slot == 0)
+            .unwrap();
+        assert_eq!(public.unread_mentions, 1);
+        assert_eq!(db.total_unread_mentions().unwrap(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mark_all_noticed_and_prune_heard() {
+        let (db, secrets, dir) = test_db();
+        db.upsert_contact("aa11", "Ada", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), false, None)
+            .unwrap();
+        db.upsert_contact("bb22", "Bob", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), false, None)
+            .unwrap();
+        db.upsert_contact("cc33", "Cara", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), false, None)
+            .unwrap();
+        db.set_enrollment("bb22", Enrollment::Pending, None).unwrap();
+        db.approve("cc33", &secrets).unwrap();
+        assert_eq!(db.count_unnoticed_nodes().unwrap(), 3);
+        assert_eq!(db.mark_all_nodes_noticed().unwrap(), 3);
+        assert_eq!(db.count_unnoticed_nodes().unwrap(), 0);
+        db.add_tracked_node("aa11", "Ada", "").unwrap();
+        db.block_node("aa11", "Ada").unwrap();
+        assert_eq!(db.count_heard_only_nodes().unwrap(), 1);
+        assert_eq!(db.prune_heard_nodes().unwrap(), 1);
+        assert!(db.get_node("aa11").unwrap().is_none());
+        assert!(db.get_node("bb22").unwrap().is_some());
+        assert!(db.get_node("cc33").unwrap().is_some());
+        assert!(!db.is_blocked("aa11").unwrap());
+        assert!(db.list_tracked_nodes().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

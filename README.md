@@ -1,6 +1,6 @@
 # Metis Mesh HQ
 
-Local emergency headquarters for [MeshCore](https://meshcore.co.uk/) communities.
+Local emergency headquarters for [MeshCore](https://meshcore.io/) communities.
 
 Churches, neighborhoods, and volunteer groups run this on a regular computer sitting next to a MeshCore companion radio. It keeps working when the internet drops. No cloud account, and it does not call home.
 

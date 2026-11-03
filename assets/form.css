@@ -34,6 +34,32 @@
   overflow: hidden;
 }
 
+/* Nudge to connect when a companion is saved but the link is down. */
+@keyframes header-connect-ping {
+  0% {
+    box-shadow: 0 0 0 0 rgba(61, 214, 140, 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 0.7rem rgba(61, 214, 140, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(61, 214, 140, 0);
+  }
+}
+
+.header-connect-pulse {
+  display: inline-flex;
+  border-radius: 0.375rem;
+  animation: header-connect-ping 1.85s ease-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .header-connect-pulse {
+    animation: none;
+    box-shadow: 0 0 0 1px rgba(61, 214, 140, 0.45);
+  }
+}
+
 .hq-topbar {
   position: relative !important;
   top: auto !important;
@@ -1641,6 +1667,18 @@ option {
   font-variant-numeric: tabular-nums;
 }
 
+.channel-unread-badge-mention {
+  border-color: rgba(251, 191, 36, 0.45);
+  background: rgba(251, 191, 36, 0.18);
+  color: #fcd34d;
+}
+
+.nav-count-badge-mention {
+  border-color: rgba(251, 191, 36, 0.5);
+  background: rgba(251, 191, 36, 0.22);
+  color: #fcd34d;
+}
+
 /* Messages thread shell: left rail + conversation. */
 .messages-shell {
   display: flex;
@@ -1840,6 +1878,12 @@ option {
   user-select: none;
 }
 
+.messages-avatar-sm {
+  height: 1.35rem;
+  width: 1.35rem;
+  font-size: 0.62rem;
+}
+
 .messages-avatar-0 { background: #0e7490; }
 .messages-avatar-1 { background: #047857; }
 .messages-avatar-2 { background: #b45309; }
@@ -1848,6 +1892,40 @@ option {
 .messages-avatar-5 { background: #1d4ed8; }
 .messages-avatar-6 { background: #a16207; }
 .messages-avatar-7 { background: #0f766e; }
+
+/* Soft per-sender fills — hues match .messages-avatar-N. */
+.message-bubble-tone-0 {
+  background: rgba(14, 116, 144, 0.22);
+  border: 1px solid rgba(14, 116, 144, 0.35);
+}
+.message-bubble-tone-1 {
+  background: rgba(4, 120, 87, 0.22);
+  border: 1px solid rgba(4, 120, 87, 0.35);
+}
+.message-bubble-tone-2 {
+  background: rgba(180, 83, 9, 0.22);
+  border: 1px solid rgba(180, 83, 9, 0.35);
+}
+.message-bubble-tone-3 {
+  background: rgba(124, 58, 237, 0.22);
+  border: 1px solid rgba(124, 58, 237, 0.35);
+}
+.message-bubble-tone-4 {
+  background: rgba(190, 18, 60, 0.22);
+  border: 1px solid rgba(190, 18, 60, 0.35);
+}
+.message-bubble-tone-5 {
+  background: rgba(29, 78, 216, 0.22);
+  border: 1px solid rgba(29, 78, 216, 0.35);
+}
+.message-bubble-tone-6 {
+  background: rgba(161, 98, 7, 0.22);
+  border: 1px solid rgba(161, 98, 7, 0.35);
+}
+.message-bubble-tone-7 {
+  background: rgba(15, 118, 110, 0.22);
+  border: 1px solid rgba(15, 118, 110, 0.35);
+}
 
 /* Channel bubble hover actions — pill on the bubble's bottom-right.
    Use explicit position here: frozen Tailwind may omit `.relative`/`.absolute`. */

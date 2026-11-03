@@ -1166,7 +1166,7 @@ pub fn MeshTextCount(text: String) -> Element {
     }
 }
 
-const AVATAR_PALETTE_LEN: usize = 8;
+pub const AVATAR_PALETTE_LEN: usize = 8;
 
 fn conversation_avatar_letter(label: &str) -> char {
     label
@@ -1176,7 +1176,8 @@ fn conversation_avatar_letter(label: &str) -> char {
         .unwrap_or('#')
 }
 
-fn conversation_avatar_tone(seed: &str) -> usize {
+/// Stable 0..AVATAR_PALETTE_LEN tone from a contact seed (pubkey or display name).
+pub fn conversation_avatar_tone(seed: &str) -> usize {
     let mut hash: u32 = 2_166_132_261;
     for byte in seed.bytes() {
         hash ^= u32::from(byte);
@@ -1187,12 +1188,23 @@ fn conversation_avatar_tone(seed: &str) -> usize {
 
 /// Generated circle avatar: first letter of `label`, color from stable `seed` hash.
 #[component]
-pub fn ConversationAvatar(label: String, seed: String) -> Element {
+pub fn ConversationAvatar(
+    label: String,
+    seed: String,
+    /// Smaller circle for chat rows beside bubbles.
+    #[props(default = false)]
+    compact: bool,
+) -> Element {
     let letter = conversation_avatar_letter(&label);
     let tone = conversation_avatar_tone(&seed);
+    let size = if compact {
+        "messages-avatar messages-avatar-sm"
+    } else {
+        "messages-avatar"
+    };
     rsx! {
         span {
-            class: "messages-avatar messages-avatar-{tone}",
+            class: "{size} messages-avatar-{tone}",
             title: "{label}",
             aria_hidden: "true",
             "{letter}"

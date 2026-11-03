@@ -10,6 +10,7 @@ mod deps;
 mod firmware;
 mod map_tiles;
 mod mesh_regions;
+mod mesh_text;
 mod path;
 mod pmtiles_path;
 mod radio;

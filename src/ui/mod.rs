@@ -40,11 +40,11 @@ use tracker_page::TrackerPage;
 use weather_page::WeatherPage;
 use welcome::{reopen_welcome, welcome_is_done, WelcomeFinishAction, WelcomeWizard};
 use widgets::{
-    append_emoji, clamp_mesh_text, heard_icon_class, heard_within_week, Badge, BarMix, BarMixRow,
-    BatteryChart, BatteryPill, BatterySample, Button, ButtonKind, Card, ChartSeries,
-    ConversationAvatar, Dialog, EmojiPickerButton, LineChart, MeshTextCount, PageHeading,
-    PinSlideDown, SelectInput, SlideDownPanel, Sparkline, TextInput, Throbber, ToastHost,
-    ToggleSwitch, MESH_TEXT_MAX_BYTES,
+    append_emoji, clamp_mesh_text, conversation_avatar_tone, heard_icon_class, heard_within_week,
+    Badge, BarMix, BarMixRow, BatteryChart, BatteryPill, BatterySample, Button, ButtonKind, Card,
+    ChartSeries, ConversationAvatar, Dialog, EmojiPickerButton, LineChart, MeshTextCount,
+    PageHeading, PinSlideDown, SelectInput, SlideDownPanel, Sparkline, TextInput, Throbber,
+    ToastHost, ToggleSwitch, MESH_TEXT_MAX_BYTES,
 };
 
 /// Show a transient toast (and log it). Prefer this over inline amber labels.
@@ -483,6 +483,18 @@ pub fn App() -> Element {
         .total_dm_unread()
         .unwrap_or(0)
         .max(0) as u32;
+    let channel_mention_nav = state()
+        .db
+        .list_channels()
+        .unwrap_or_default()
+        .iter()
+        .any(|c| c.unread_mentions > 0);
+    let dm_mention_nav = state()
+        .db
+        .list_dm_threads()
+        .unwrap_or_default()
+        .iter()
+        .any(|t| t.unread_mentions > 0);
     let expanded = nav_open();
     let nav_width = if expanded { "w-56" } else { "w-[4.5rem]" };
     let brand_logo = crate::brand::custom_logo_url(&state().db);
@@ -620,6 +632,8 @@ pub fn App() -> Element {
                                         active: page() == Page::Messages,
                                         badge: channel_unread,
                                         badge_alt: dm_unread,
+                                        badge_mention: channel_mention_nav,
+                                        badge_alt_mention: dm_mention_nav,
                                         onclick: move |_| {
                                             messages_root_epoch.set(messages_root_epoch() + 1);
                                             page.set(Page::Messages);
@@ -934,6 +948,9 @@ fn NavButton(
     #[props(default)] badge: u32,
     /// Second badge (e.g. DM unread beside channel unread on Messages).
     #[props(default)] badge_alt: u32,
+    /// When true, the primary badge uses the mention tone (HQ @mentioned).
+    #[props(default)] badge_mention: bool,
+    #[props(default)] badge_alt_mention: bool,
     onclick: EventHandler<MouseEvent>,
 ) -> Element {
     let class = if active {
@@ -949,6 +966,16 @@ fn NavButton(
     let show_badges = badge > 0 || badge_alt > 0;
     let badge_label = format_nav_badge(badge);
     let badge_alt_label = format_nav_badge(badge_alt);
+    let badge_class = if badge_mention {
+        "nav-count-badge nav-count-badge-mention"
+    } else {
+        "nav-count-badge"
+    };
+    let badge_alt_class = if badge_alt_mention {
+        "nav-count-badge nav-count-badge-alt nav-count-badge-mention"
+    } else {
+        "nav-count-badge nav-count-badge-alt"
+    };
     rsx! {
         button {
             class: "{class} {layout} cursor-pointer",
@@ -962,10 +989,10 @@ fn NavButton(
                 if !expanded && show_badges {
                     span { class: "absolute -right-2 -top-1.5 flex items-center gap-0.5",
                         if badge > 0 {
-                            span { class: "nav-count-badge", "{badge_label}" }
+                            span { class: "{badge_class}", "{badge_label}" }
                         }
                         if badge_alt > 0 {
-                            span { class: "nav-count-badge nav-count-badge-alt", "{badge_alt_label}" }
+                            span { class: "{badge_alt_class}", "{badge_alt_label}" }
                         }
                     }
                 }
@@ -975,10 +1002,10 @@ fn NavButton(
                 if show_badges {
                     span { class: "ml-auto flex shrink-0 items-center gap-1",
                         if badge > 0 {
-                            span { class: "nav-count-badge", "{badge_label}" }
+                            span { class: "{badge_class}", "{badge_label}" }
                         }
                         if badge_alt > 0 {
-                            span { class: "nav-count-badge nav-count-badge-alt", "{badge_alt_label}" }
+                            span { class: "{badge_alt_class}", "{badge_alt_label}" }
                         }
                     }
                 }
@@ -1203,23 +1230,30 @@ fn HeaderRadioControls(radio: RadioStatus) -> Element {
                         }
                     }
                 }
-                Button {
-                    disabled: busy || selected().trim().is_empty(),
-                    onclick: move |_| {
-                        let target = if saved_radios.len() == 1 {
-                            saved_radios
-                                .first()
-                                .map(|row| row.address.clone())
-                                .unwrap_or_else(|| selected())
-                        } else {
-                            selected()
-                        };
-                        if !target.trim().is_empty() {
-                            state().radio.reconnect(target);
-                        }
+                span {
+                    class: if busy || selected().trim().is_empty() {
+                        "inline-flex"
+                    } else {
+                        "header-connect-pulse"
                     },
-                    Icon { name: connect_icon, size: 14 }
-                    "Connect"
+                    Button {
+                        disabled: busy || selected().trim().is_empty(),
+                        onclick: move |_| {
+                            let target = if saved_radios.len() == 1 {
+                                saved_radios
+                                    .first()
+                                    .map(|row| row.address.clone())
+                                    .unwrap_or_else(|| selected())
+                            } else {
+                                selected()
+                            };
+                            if !target.trim().is_empty() {
+                                state().radio.reconnect(target);
+                            }
+                        },
+                        Icon { name: connect_icon, size: 14 }
+                        "Connect"
+                    }
                 }
             }
         }
@@ -1606,50 +1640,84 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
                     }
                 }
             }
-            div { class: "grid grid-cols-2 gap-3 lg:grid-cols-4",
-                OverviewStat {
-                    icon: IconName::Users,
-                    label: "Enrolled".to_string(),
-                    value: enrolled.to_string(),
-                    hint: format!("{heard} heard, {total} known"),
-                    tone: "signal".to_string(),
-                    series: senders_hourly.clone(),
-                    delta: last_hour_delta(&senders_hourly),
-                }
-                OverviewStat {
-                    icon: IconName::Inbox,
-                    label: "Pending signup".to_string(),
-                    value: pending_count.to_string(),
-                    hint: if pending_count == 0 {
-                        "Inbox is clear".to_string()
-                    } else {
-                        "Waiting for operator approval".to_string()
-                    },
-                    tone: if pending_count == 0 {
-                        "muted".to_string()
-                    } else {
-                        "pending".to_string()
-                    },
-                    series: direct_hourly.clone(),
-                    delta: last_hour_delta(&direct_hourly),
-                }
-                OverviewStat {
-                    icon: IconName::Locate,
-                    label: "GPS coverage".to_string(),
-                    value: format!("{coverage}%"),
-                    hint: format!("{with_gps} of {total} nodes with a fix"),
-                    tone: "ok".to_string(),
-                    series: position_hourly.clone(),
-                    delta: last_hour_delta(&position_hourly),
-                }
-                OverviewStat {
-                    icon: IconName::Messages,
-                    label: "Recent traffic".to_string(),
-                    value: messages_24h.to_string(),
-                    hint: "Messages in the last 24h".to_string(),
-                    tone: "muted".to_string(),
-                    series: messages_hourly.clone(),
-                    delta: last_hour_delta(&messages_hourly),
+            {
+                let mention_unread = state()
+                    .db
+                    .total_unread_mentions()
+                    .unwrap_or(0)
+                    .max(0);
+                rsx! {
+                    div { class: "grid grid-cols-2 gap-3 lg:grid-cols-5",
+                        OverviewStat {
+                            icon: IconName::Users,
+                            label: "Enrolled".to_string(),
+                            value: enrolled.to_string(),
+                            hint: format!("{heard} heard, {total} known"),
+                            tone: "signal".to_string(),
+                            series: senders_hourly.clone(),
+                            delta: last_hour_delta(&senders_hourly),
+                        }
+                        OverviewStat {
+                            icon: IconName::Inbox,
+                            label: "Pending signup".to_string(),
+                            value: pending_count.to_string(),
+                            hint: if pending_count == 0 {
+                                "Inbox is clear".to_string()
+                            } else {
+                                "Waiting for operator approval".to_string()
+                            },
+                            tone: if pending_count == 0 {
+                                "muted".to_string()
+                            } else {
+                                "pending".to_string()
+                            },
+                            series: direct_hourly.clone(),
+                            delta: last_hour_delta(&direct_hourly),
+                        }
+                        OverviewStat {
+                            icon: IconName::Locate,
+                            label: "GPS coverage".to_string(),
+                            value: format!("{coverage}%"),
+                            hint: format!("{with_gps} of {total} nodes with a fix"),
+                            tone: "ok".to_string(),
+                            series: position_hourly.clone(),
+                            delta: last_hour_delta(&position_hourly),
+                        }
+                        OverviewStat {
+                            icon: IconName::Messages,
+                            label: "Recent traffic".to_string(),
+                            value: messages_24h.to_string(),
+                            hint: "Messages in the last 24h".to_string(),
+                            tone: "muted".to_string(),
+                            series: messages_hourly.clone(),
+                            delta: last_hour_delta(&messages_hourly),
+                        }
+                        button {
+                            class: "rounded-lg border border-border bg-card px-3 py-2.5 text-left hover:bg-muted/40 cursor-pointer",
+                            onclick: move |_| on_navigate.call(Page::Messages),
+                            div { class: "mb-1 flex items-center justify-between gap-2 text-muted-foreground",
+                                span { class: "truncate text-[0.65rem] uppercase tracking-[0.14em]", "Mentions" }
+                                Icon { name: IconName::Messages, size: 14 }
+                            }
+                            div { class: "flex items-baseline justify-between gap-2",
+                                p {
+                                    class: if mention_unread > 0 {
+                                        "text-xl font-semibold tracking-tight text-amber-200"
+                                    } else {
+                                        "text-xl font-semibold tracking-tight text-foreground"
+                                    },
+                                    "{mention_unread}"
+                                }
+                            }
+                            p { class: "mt-0.5 truncate text-[0.7rem] text-muted-foreground",
+                                if mention_unread > 0 {
+                                    "Unread @mentions of this companion"
+                                } else {
+                                    "No unread @mentions"
+                                }
+                            }
+                        }
+                    }
                 }
             }
             div {
@@ -2231,6 +2299,8 @@ fn RosterPage() -> Element {
     let mut claim_busy = use_signal(|| false);
     let mut claim_error = use_signal(String::new);
     let mut details_pubkey = use_signal(|| None::<String>);
+    let mut confirm_clear_new = use_signal(|| false);
+    let mut confirm_prune_heard = use_signal(|| false);
     let mut invite_channel = use_signal(|| {
         private_channels
             .first()
@@ -2242,6 +2312,8 @@ fn RosterPage() -> Element {
                     .unwrap_or_else(|_| crate::secrets::CHANNEL_NAME.to_string())
             })
     });
+    let unnoticed_count = state().db.count_unnoticed_nodes().unwrap_or(0);
+    let heard_only_count = state().db.count_heard_only_nodes().unwrap_or(0);
     let needle = query();
     let mut ranked: Vec<_> = nodes
         .into_iter()
@@ -2477,6 +2549,81 @@ fn RosterPage() -> Element {
             PageHeading { icon: IconName::Users, title: "Roster".to_string(),
                 "Search heard nodes, send a direct message, or manually share a private channel secret."
             }
+            Dialog {
+                open: confirm_clear_new(),
+                title: "Clear NEW badges".to_string(),
+                on_close: move |_| confirm_clear_new.set(false),
+                div { class: "flex flex-col gap-3",
+                    p { class: "text-sm text-muted-foreground",
+                        "Clear NEW on {unnoticed_count} node(s)? This only marks them as noticed — it does not remove anyone from the roster."
+                    }
+                    div { class: "flex justify-end gap-2",
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| confirm_clear_new.set(false),
+                            "Cancel"
+                        }
+                        Button {
+                            onclick: move |_| {
+                                match state().db.mark_all_nodes_noticed() {
+                                    Ok(n) => {
+                                        confirm_clear_new.set(false);
+                                        note.set(if n == 0 {
+                                            "No NEW badges to clear.".into()
+                                        } else {
+                                            format!("Cleared NEW on {n} node(s).")
+                                        });
+                                    }
+                                    Err(err) => {
+                                        confirm_clear_new.set(false);
+                                        note.set(err.to_string());
+                                    }
+                                }
+                            },
+                            "Clear NEW"
+                        }
+                    }
+                }
+            }
+            Dialog {
+                open: confirm_prune_heard(),
+                title: "Remove heard-only nodes".to_string(),
+                on_close: move |_| confirm_prune_heard.set(false),
+                div { class: "flex flex-col gap-3",
+                    p { class: "text-sm text-muted-foreground",
+                        "Remove {heard_only_count} heard-only node(s) from the roster? Enrolled, pending, denied, and HQ stay. Tracker, block, and claim rows for removed keys are cleared. Message history is kept (use Settings purge for that)."
+                    }
+                    div { class: "flex justify-end gap-2",
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| confirm_prune_heard.set(false),
+                            "Cancel"
+                        }
+                        Button {
+                            kind: ButtonKind::Danger,
+                            onclick: move |_| {
+                                match state().db.prune_heard_nodes() {
+                                    Ok(n) => {
+                                        confirm_prune_heard.set(false);
+                                        details_pubkey.set(None);
+                                        note.set(if n == 0 {
+                                            "No heard-only nodes to remove.".into()
+                                        } else {
+                                            format!("Removed {n} heard-only node(s).")
+                                        });
+                                    }
+                                    Err(err) => {
+                                        confirm_prune_heard.set(false);
+                                        note.set(err.to_string());
+                                    }
+                                }
+                            },
+                            Icon { name: IconName::Trash, size: 14 }
+                            "Remove heard-only"
+                        }
+                    }
+                }
+            }
             div { class: "flex flex-col gap-2 sm:flex-row sm:items-center",
                 div { class: "min-w-0 flex-1",
                     TextInput {
@@ -2486,7 +2633,21 @@ fn RosterPage() -> Element {
                         oninput: move |event: FormEvent| query.set(event.value()),
                     }
                 }
-                p { class: "text-xs text-muted-foreground", "{ranked.len()} shown" }
+                div { class: "flex flex-wrap items-center gap-2",
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        disabled: unnoticed_count <= 0,
+                        onclick: move |_| confirm_clear_new.set(true),
+                        "Clear NEW"
+                    }
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        disabled: heard_only_count <= 0,
+                        onclick: move |_| confirm_prune_heard.set(true),
+                        "Remove heard-only"
+                    }
+                    p { class: "text-xs text-muted-foreground", "{ranked.len()} shown" }
+                }
             }
             if !note().is_empty() {
                 p { class: "text-xs text-amber-200", "{note}" }
@@ -3113,6 +3274,45 @@ enum MessagesRailConfirm {
     ClearDm { pubkey: String, name: String },
 }
 
+const MSG_WINDOW_INITIAL: i64 = 20;
+const MSG_WINDOW_PAGE: i64 = 10;
+
+#[derive(Clone, PartialEq, Eq)]
+enum MsgWindowKey {
+    Channel(i64),
+    Dm(String),
+}
+
+#[derive(Clone)]
+struct MsgWindowState {
+    key: MsgWindowKey,
+    messages: Vec<crate::db::MessageRow>,
+    has_older: bool,
+}
+
+fn unread_badge_class(unread_mentions: i64) -> &'static str {
+    if unread_mentions > 0 {
+        "channel-unread-badge channel-unread-badge-mention"
+    } else {
+        "channel-unread-badge"
+    }
+}
+
+fn merge_newer_messages(
+    window: &mut MsgWindowState,
+    newest: Vec<crate::db::MessageRow>,
+) -> bool {
+    let last = window.messages.last().map(|m| m.id).unwrap_or(0);
+    let mut changed = false;
+    for message in newest {
+        if message.id > last {
+            window.messages.push(message);
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Confirm before dropping channel + DM traffic from a contact.
 #[component]
 fn BlockContactDialog(
@@ -3167,6 +3367,32 @@ fn BlockContactDialog(
     }
 }
 
+/// Shown when channel Block cannot resolve a display name to one roster pubkey.
+#[component]
+fn BlockResolveFailDialog(target: Signal<Option<String>>) -> Element {
+    let mut target = target;
+    let open = target().is_some();
+    let name = target().unwrap_or_default();
+    rsx! {
+        Dialog {
+            open: open,
+            title: "Can't block yet".to_string(),
+            on_close: move |_| target.set(None),
+            div { class: "flex flex-col gap-3",
+                p { class: "text-sm text-muted-foreground",
+                    "No unique roster match for \"{name}\". Channel frames only carry a display name — open Roster and confirm exactly one node uses that name (or wait until HQ hears them). This does not require a live companion link."
+                }
+                div { class: "flex justify-end",
+                    Button {
+                        onclick: move |_| target.set(None),
+                        "OK"
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn MessagesRail(
     channels: Vec<ChannelRow>,
@@ -3213,7 +3439,7 @@ fn MessagesRail(
                                         }
                                         span { class: "messages-rail-item-label", "{name}" }
                                         if unread > 0 {
-                                            span { class: "channel-unread-badge",
+                                            span { class: "{unread_badge_class(channel.unread_mentions)}",
                                                 if unread > 99 { "99+" } else { "{unread}" }
                                             }
                                         }
@@ -3249,6 +3475,7 @@ fn MessagesRail(
                             let label = thread.name.clone();
                             let active = selected_dm.as_ref() == Some(&pubkey);
                             let unread = thread.unread_count;
+                            let mention_tone = thread.unread_mentions;
                             let select_key = pubkey.clone();
                             let clear_key = pubkey.clone();
                             let clear_label = label.clone();
@@ -3270,7 +3497,7 @@ fn MessagesRail(
                                         }
                                         span { class: "messages-rail-item-label", "{label}" }
                                         if unread > 0 {
-                                            span { class: "channel-unread-badge",
+                                            span { class: "{unread_badge_class(mention_tone)}",
                                                 if unread > 99 { "99+" } else { "{unread}" }
                                             }
                                         }
@@ -3448,6 +3675,10 @@ fn MessagesPage() -> Element {
     let mut new_dm_query = use_signal(String::new);
     let mut new_dm_body = use_signal(String::new);
     let mut block_confirm = use_signal(|| None::<(String, String)>);
+    let mut block_resolve_fail = use_signal(|| None::<String>);
+    let mut msg_window = use_signal(|| None::<MsgWindowState>);
+    let mut loading_older = use_signal(|| false);
+    let mut scroll_preserve_height = use_signal(|| None::<f64>);
     let mut message_keep = use_signal(|| {
         state()
             .db
@@ -3486,6 +3717,8 @@ fn MessagesPage() -> Element {
     let dm_threads = state().db.list_dm_threads().unwrap_or_default();
     let channel_unread_total: i64 = channels.iter().map(|c| c.unread_count).sum();
     let dm_unread_total: i64 = dm_threads.iter().map(|t| t.unread_count).sum();
+    let channel_mention_total: i64 = channels.iter().map(|c| c.unread_mentions).sum();
+    let dm_mention_total: i64 = dm_threads.iter().map(|t| t.unread_mentions).sum();
     // Only enable Send once the live session loop is up (sync_phase Ready).
     // Mid-sync used to report state=connected while the command lock was held,
     // so Send did nothing.
@@ -3494,6 +3727,22 @@ fn MessagesPage() -> Element {
             radio.sync_phase,
             crate::radio::SyncPhase::Ready | crate::radio::SyncPhase::Idle
         );
+
+    // Restore scroll after prepending older messages.
+    if let Some(prev_height) = scroll_preserve_height() {
+        scroll_preserve_height.set(None);
+        spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            let _ = document::eval(&format!(
+                r#"(() => {{
+                  const s = document.getElementById('channel-scroller')
+                    || document.getElementById('dm-scroller');
+                  if (!s) return;
+                  s.scrollTop = Math.max(0, s.scrollHeight - {prev_height});
+                }})()"#
+            ));
+        });
+    }
 
     if let Some(dm_pubkey) = selected_dm() {
         let thread = dm_threads
@@ -3508,10 +3757,35 @@ fn MessagesPage() -> Element {
             .unwrap_or_else(|| {
                 dm_pubkey.chars().take(12).collect::<String>()
             });
-        let messages = state()
-            .db
-            .list_dm_messages(&dm_pubkey, 400)
+        let window_key = MsgWindowKey::Dm(dm_pubkey.clone());
+        let need_window = !matches!(
+            msg_window(),
+            Some(ref w) if w.key == window_key
+        );
+        if need_window {
+            let (messages, has_older) = state()
+                .db
+                .list_dm_messages(&dm_pubkey, MSG_WINDOW_INITIAL)
+                .unwrap_or_else(|_| (Vec::new(), false));
+            msg_window.set(Some(MsgWindowState {
+                key: window_key.clone(),
+                messages,
+                has_older,
+            }));
+        } else if let Some(mut window) = msg_window() {
+            if let Ok((newest, _)) = state()
+                .db
+                .list_dm_messages(&dm_pubkey, MSG_WINDOW_INITIAL)
+            {
+                if merge_newer_messages(&mut window, newest) {
+                    msg_window.set(Some(window));
+                }
+            }
+        }
+        let messages = msg_window()
+            .map(|w| w.messages)
             .unwrap_or_default();
+        let has_older = msg_window().map(|w| w.has_older).unwrap_or(false);
         let latest_id = messages.last().map(|m| m.id);
         let anchor = state()
             .db
@@ -3543,6 +3817,7 @@ fn MessagesPage() -> Element {
                     draft.set(String::new());
                     reply_target.set(None);
                     read_session.set(None);
+                    msg_window.set(None);
                     note.set(String::new());
                 },
                 on_select_dm: move |pubkey: String| {
@@ -3550,6 +3825,7 @@ fn MessagesPage() -> Element {
                     selected_dm.set(Some(pubkey));
                     draft.set(String::new());
                     reply_target.set(None);
+                    msg_window.set(None);
                     note.set(String::new());
                 },
                 on_after_delete_channel: move |name: String| {
@@ -3557,6 +3833,7 @@ fn MessagesPage() -> Element {
                         selected_channel.set(None);
                         reply_target.set(None);
                         read_session.set(None);
+                        msg_window.set(None);
                         draft.set(String::new());
                     }
                     refresh.set(refresh() + 1);
@@ -3564,6 +3841,7 @@ fn MessagesPage() -> Element {
                 on_after_clear_dm: move |pubkey: String| {
                     if selected_dm() == Some(pubkey) {
                         selected_dm.set(None);
+                        msg_window.set(None);
                         draft.set(String::new());
                     }
                     refresh.set(refresh() + 1);
@@ -3575,6 +3853,7 @@ fn MessagesPage() -> Element {
                             onclick: move |_| {
                                 let _ = state().db.mark_dm_caught_up(&dm_key);
                                 selected_dm.set(None);
+                                msg_window.set(None);
                                 draft.set(String::new());
                                 note.set(String::new());
                             },
@@ -3609,8 +3888,75 @@ fn MessagesPage() -> Element {
                     target: block_confirm,
                     on_blocked: move |_| refresh.set(refresh() + 1),
                 }
+                BlockResolveFailDialog { target: block_resolve_fail }
                 div { class: "flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border bg-card",
-                    div { class: "min-h-0 flex-1 space-y-3 overflow-auto p-4",
+                    div {
+                        id: "dm-scroller",
+                        class: "min-h-0 flex-1 space-y-3 overflow-auto p-4",
+                        onscroll: {
+                            let peer = dm_pubkey.clone();
+                            move |_| {
+                                if !has_older || loading_older() {
+                                    return;
+                                }
+                                let peer = peer.clone();
+                                spawn(async move {
+                                    let near_top = document::eval(
+                                        r#"return (() => {
+                                          const s = document.getElementById('dm-scroller');
+                                          return !!(s && s.scrollTop < 80);
+                                        })();"#,
+                                    )
+                                    .await
+                                    .ok()
+                                    .and_then(|v| v.as_bool())
+                                        == Some(true);
+                                    if !near_top || loading_older() {
+                                        return;
+                                    }
+                                    let Some(window) = msg_window() else { return };
+                                    let Some(before_id) = window.messages.first().map(|m| m.id) else {
+                                        return;
+                                    };
+                                    let prev_height = document::eval(
+                                        r#"return document.getElementById('dm-scroller')?.scrollHeight ?? 0;"#,
+                                    )
+                                    .await
+                                    .ok()
+                                    .and_then(|v| v.as_f64())
+                                    .unwrap_or(0.0);
+                                    loading_older.set(true);
+                                    match state().db.list_dm_messages_before(
+                                        &peer,
+                                        before_id,
+                                        MSG_WINDOW_PAGE,
+                                    ) {
+                                        Ok((older, still_older)) if !older.is_empty() => {
+                                            let mut next = window;
+                                            let mut combined = older;
+                                            combined.append(&mut next.messages);
+                                            next.messages = combined;
+                                            next.has_older = still_older;
+                                            scroll_preserve_height.set(Some(prev_height));
+                                            msg_window.set(Some(next));
+                                        }
+                                        Ok(_) => {
+                                            if let Some(mut next) = msg_window() {
+                                                next.has_older = false;
+                                                msg_window.set(Some(next));
+                                            }
+                                        }
+                                        Err(_) => {}
+                                    }
+                                    loading_older.set(false);
+                                });
+                            }
+                        },
+                        if has_older {
+                            p { class: "text-center text-[0.7rem] text-muted-foreground",
+                                if loading_older() { "Loading earlier messages…" } else { "Scroll up for earlier messages" }
+                            }
+                        }
                         if messages.is_empty() {
                             p { class: "text-sm text-muted-foreground", "No direct messages yet." }
                         }
@@ -3618,26 +3964,46 @@ fn MessagesPage() -> Element {
                             {
                                 let outgoing = message.direction == "tx";
                                 let show_new = show_banner && anchor == Some(message.id);
+                                let peer_seed = dm_pubkey.clone();
+                                let peer_label = title.clone();
+                                let peer_tone = conversation_avatar_tone(&peer_seed);
                                 rsx! {
                                     div {
                                         key: "{message.id}",
-                                        class: if outgoing {
-                                            "ml-auto flex max-w-[85%] flex-col items-end gap-1"
-                                        } else {
-                                            "mr-auto flex max-w-[85%] flex-col items-start gap-1"
-                                        },
+                                        class: "flex w-full flex-col gap-1",
                                         div {
                                             class: if outgoing {
-                                                "min-w-[12rem] rounded-2xl rounded-br-md border border-sky-500/30 bg-[#16324f] px-3 py-2.5 text-sm text-sky-50"
+                                                "ml-auto flex max-w-[85%] flex-col items-end gap-1"
                                             } else {
-                                                "min-w-[12rem] rounded-2xl rounded-bl-md bg-muted px-3 py-2.5 text-sm"
+                                                "mr-auto flex max-w-[85%] flex-col items-start gap-1"
                                             },
-                                            MessageBody {
-                                                text: message.text.clone(),
-                                                outgoing,
-                                            }
-                                            p { class: "mt-1 text-[0.65rem] text-muted-foreground",
-                                                "{format_time(Some(message.received_at))}"
+                                            div {
+                                                class: if outgoing {
+                                                    "message-bubble min-w-[12rem] rounded-2xl rounded-br-md border border-sky-500/30 bg-[#16324f] px-3 py-2.5 text-sm text-sky-50"
+                                                } else {
+                                                    "message-bubble min-w-[12rem] rounded-2xl rounded-bl-md message-bubble-tone-{peer_tone} px-3 py-2.5 text-sm"
+                                                },
+                                                if !outgoing {
+                                                    div { class: "mb-1.5 flex items-center gap-1.5",
+                                                        ConversationAvatar {
+                                                            label: peer_label,
+                                                            seed: peer_seed,
+                                                            compact: true,
+                                                        }
+                                                        span { class: "text-[0.65rem] text-muted-foreground",
+                                                            "{format_time(Some(message.received_at))}"
+                                                        }
+                                                    }
+                                                }
+                                                MessageBody {
+                                                    text: message.text.clone(),
+                                                    outgoing,
+                                                }
+                                                if outgoing {
+                                                    p { class: "mt-1 text-[0.65rem] text-muted-foreground",
+                                                        "{format_time(Some(message.received_at))}"
+                                                    }
+                                                }
                                             }
                                         }
                                         if show_new {
@@ -3732,10 +4098,32 @@ fn MessagesPage() -> Element {
             };
         };
         let slot = channel.slot;
-        let messages = state()
-            .db
-            .list_channel_messages(slot, 400)
+        let window_key = MsgWindowKey::Channel(slot);
+        let need_window = !matches!(
+            msg_window(),
+            Some(ref w) if w.key == window_key
+        );
+        if need_window {
+            let (messages, has_older) = state()
+                .db
+                .list_channel_messages(slot, MSG_WINDOW_INITIAL)
+                .unwrap_or_else(|_| (Vec::new(), false));
+            msg_window.set(Some(MsgWindowState {
+                key: window_key.clone(),
+                messages,
+                has_older,
+            }));
+        } else if let Some(mut window) = msg_window() {
+            if let Ok((newest, _)) = state().db.list_channel_messages(slot, MSG_WINDOW_INITIAL) {
+                if merge_newer_messages(&mut window, newest) {
+                    msg_window.set(Some(window));
+                }
+            }
+        }
+        let messages = msg_window()
+            .map(|w| w.messages)
             .unwrap_or_default();
+        let has_older = msg_window().map(|w| w.has_older).unwrap_or(false);
         let emergency = channel.role == "emergency";
         let latest_id = messages.last().map(|message| message.id);
         let needs_session = read_session()
@@ -3841,6 +4229,7 @@ fn MessagesPage() -> Element {
                     draft.set(String::new());
                     reply_target.set(None);
                     read_session.set(None);
+                    msg_window.set(None);
                     note.set(String::new());
                 },
                 on_select_dm: move |pubkey: String| {
@@ -3849,6 +4238,7 @@ fn MessagesPage() -> Element {
                     draft.set(String::new());
                     reply_target.set(None);
                     read_session.set(None);
+                    msg_window.set(None);
                     note.set(String::new());
                 },
                 on_after_delete_channel: move |name: String| {
@@ -3856,6 +4246,7 @@ fn MessagesPage() -> Element {
                         selected_channel.set(None);
                         reply_target.set(None);
                         read_session.set(None);
+                        msg_window.set(None);
                         draft.set(String::new());
                     }
                     refresh.set(refresh() + 1);
@@ -3863,6 +4254,7 @@ fn MessagesPage() -> Element {
                 on_after_clear_dm: move |pubkey: String| {
                     if selected_dm() == Some(pubkey) {
                         selected_dm.set(None);
+                        msg_window.set(None);
                         draft.set(String::new());
                     }
                     refresh.set(refresh() + 1);
@@ -3885,6 +4277,7 @@ fn MessagesPage() -> Element {
                                 reply_target.set(None);
                                 draft.set(String::new());
                                 read_session.set(None);
+                                msg_window.set(None);
                             },
                             Icon { name: IconName::ChevronRight, size: 14 }
                             "Channels"
@@ -3927,15 +4320,75 @@ fn MessagesPage() -> Element {
                         id: "channel-scroller",
                         class: "min-h-0 flex-1 space-y-3 overflow-auto p-4",
                         onscroll: move |_| {
-                            if !read_session().as_ref().is_some_and(|session| session.show_banner) {
+                            if read_session().as_ref().is_some_and(|session| session.show_banner) {
+                                spawn(async move {
+                                    if channel_unread_is_caught_up().await {
+                                        dismiss_channel_new_banner(read_session);
+                                    }
+                                });
+                            }
+                            if !has_older || loading_older() {
                                 return;
                             }
                             spawn(async move {
-                                if channel_unread_is_caught_up().await {
-                                    dismiss_channel_new_banner(read_session);
+                                let near_top = document::eval(
+                                    r#"return (() => {
+                                      const s = document.getElementById('channel-scroller');
+                                      return !!(s && s.scrollTop < 80);
+                                    })();"#,
+                                )
+                                .await
+                                .ok()
+                                .and_then(|v| v.as_bool())
+                                    == Some(true);
+                                if !near_top || loading_older() {
+                                    return;
                                 }
+                                let Some(window) = msg_window() else { return };
+                                let MsgWindowKey::Channel(slot) = window.key.clone() else {
+                                    return;
+                                };
+                                let Some(before_id) = window.messages.first().map(|m| m.id) else {
+                                    return;
+                                };
+                                let prev_height = document::eval(
+                                    r#"return document.getElementById('channel-scroller')?.scrollHeight ?? 0;"#,
+                                )
+                                .await
+                                .ok()
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or(0.0);
+                                loading_older.set(true);
+                                match state().db.list_channel_messages_before(
+                                    slot,
+                                    before_id,
+                                    MSG_WINDOW_PAGE,
+                                ) {
+                                    Ok((older, still_older)) if !older.is_empty() => {
+                                        let mut next = window;
+                                        let mut combined = older;
+                                        combined.append(&mut next.messages);
+                                        next.messages = combined;
+                                        next.has_older = still_older;
+                                        scroll_preserve_height.set(Some(prev_height));
+                                        msg_window.set(Some(next));
+                                    }
+                                    Ok(_) => {
+                                        if let Some(mut next) = msg_window() {
+                                            next.has_older = false;
+                                            msg_window.set(Some(next));
+                                        }
+                                    }
+                                    Err(_) => {}
+                                }
+                                loading_older.set(false);
                             });
                         },
+                        if has_older {
+                            p { class: "text-center text-[0.7rem] text-muted-foreground",
+                                if loading_older() { "Loading earlier messages…" } else { "Scroll up for earlier messages" }
+                            }
+                        }
                         if messages.is_empty() {
                             p { class: "text-sm text-muted-foreground", "No messages in this channel yet." }
                         }
@@ -3976,32 +4429,47 @@ fn MessagesPage() -> Element {
                                     .as_ref()
                                     .is_some_and(|pk| blocked_set.contains(pk));
                                 let block_label = device_name.clone();
+                                let avatar_seed = known_pk
+                                    .clone()
+                                    .filter(|pk| !pk.is_empty())
+                                    .unwrap_or_else(|| device_name.clone());
+                                let sender_tone = conversation_avatar_tone(&avatar_seed);
                                 rsx! {
                                     div {
                                         id: "msg-anchor-{message.id}",
                                         key: "{message.id}",
-                                        class: if outgoing {
-                                            "ml-auto flex max-w-[85%] flex-col items-end gap-1"
-                                        } else {
-                                            "mr-auto flex max-w-[85%] flex-col items-start gap-1"
-                                        },
+                                        class: "flex w-full flex-col gap-1",
                                         div {
                                             class: if outgoing {
-                                                "message-bubble min-w-[14rem] rounded-2xl rounded-br-md border border-sky-500/30 bg-[#16324f] px-3 py-2.5 text-sm text-sky-50"
-                                            } else if emergency {
-                                                "message-bubble min-w-[14rem] rounded-2xl rounded-bl-md border border-signal/30 bg-background/80 px-3 py-2.5 text-sm"
+                                                "ml-auto flex max-w-[85%] flex-col items-end gap-1"
                                             } else {
-                                                "message-bubble min-w-[14rem] rounded-2xl rounded-bl-md bg-muted px-3 py-2.5 text-sm"
+                                                "mr-auto flex max-w-[85%] flex-col items-start gap-1"
                                             },
+                                            div {
+                                                class: if outgoing {
+                                                    "message-bubble min-w-[14rem] rounded-2xl rounded-br-md border border-sky-500/30 bg-[#16324f] px-3 py-2.5 text-sm text-sky-50"
+                                                } else if emergency {
+                                                    "message-bubble min-w-[14rem] rounded-2xl rounded-bl-md border border-signal/30 bg-background/80 px-3 py-2.5 text-sm"
+                                                } else {
+                                                    "message-bubble min-w-[14rem] rounded-2xl rounded-bl-md message-bubble-tone-{sender_tone} px-3 py-2.5 text-sm"
+                                                },
                                             div { class: "mb-2 flex items-start justify-between gap-2",
-                                                span {
-                                                    class: if outgoing {
-                                                        "inline-flex max-w-[60%] items-center gap-1 rounded-full bg-sky-400/15 px-2 py-0.5 text-[0.7rem] font-medium text-sky-100"
-                                                    } else {
-                                                        "inline-flex max-w-[60%] items-center gap-1 rounded-full bg-background/70 px-2 py-0.5 text-[0.7rem] font-medium text-foreground"
-                                                    },
-                                                    Icon { name: IconName::Radio, size: 11 }
-                                                    span { class: "truncate", "{device_name}" }
+                                                div { class: "flex min-w-0 max-w-[70%] items-center gap-1.5",
+                                                    if !outgoing {
+                                                        ConversationAvatar {
+                                                            label: device_name.clone(),
+                                                            seed: avatar_seed.clone(),
+                                                            compact: true,
+                                                        }
+                                                    }
+                                                    span {
+                                                        class: if outgoing {
+                                                            "inline-flex min-w-0 items-center gap-1 rounded-full bg-sky-400/15 px-2 py-0.5 text-[0.7rem] font-medium text-sky-100"
+                                                        } else {
+                                                            "inline-flex min-w-0 items-center gap-1 rounded-full bg-background/70 px-2 py-0.5 text-[0.7rem] font-medium text-foreground"
+                                                        },
+                                                        span { class: "truncate", "{device_name}" }
+                                                    }
                                                 }
                                                 span {
                                                     class: if outgoing {
@@ -4131,8 +4599,8 @@ fn MessagesPage() -> Element {
                                                                                 .map(|n| n.pubkey)
                                                                         });
                                                                         let Some(pubkey) = pubkey else {
-                                                                            status_note(format!(
-                                                                                "Can't block {resolve_name} — no unique roster match yet."
+                                                                            block_resolve_fail.set(Some(
+                                                                                resolve_name.clone(),
                                                                             ));
                                                                             return;
                                                                         };
@@ -4148,6 +4616,7 @@ fn MessagesPage() -> Element {
                                                         }
                                                     }
                                                 }
+                                            }
                                             }
                                         }
                                     }
@@ -4284,6 +4753,7 @@ fn MessagesPage() -> Element {
                     target: block_confirm,
                     on_blocked: move |_| refresh.set(refresh() + 1),
                 }
+                BlockResolveFailDialog { target: block_resolve_fail }
             }
         };
     }
@@ -4309,7 +4779,7 @@ fn MessagesPage() -> Element {
                     span { class: "inline-flex items-center gap-2",
                         "Channels"
                         if channel_unread_total > 0 {
-                            span { class: "channel-unread-badge",
+                            span { class: "{unread_badge_class(channel_mention_total)}",
                                 if channel_unread_total > 99 { "99+" } else { "{channel_unread_total}" }
                             }
                         }
@@ -4324,7 +4794,7 @@ fn MessagesPage() -> Element {
                     span { class: "inline-flex items-center gap-2",
                         "Direct"
                         if dm_unread_total > 0 {
-                            span { class: "channel-unread-badge",
+                            span { class: "{unread_badge_class(dm_mention_total)}",
                                 if dm_unread_total > 99 { "99+" } else { "{dm_unread_total}" }
                             }
                         }
@@ -4461,6 +4931,7 @@ fn MessagesPage() -> Element {
                                     class: "flex flex-1 flex-col items-start gap-3 text-left cursor-pointer",
                                     onclick: move |_| {
                                         note.set(String::new());
+                                        msg_window.set(None);
                                         selected_channel.set(Some(name.clone()));
                                     },
                                     div { class: "flex w-full items-start justify-between gap-2",
@@ -4475,7 +4946,7 @@ fn MessagesPage() -> Element {
                                             p { class: "truncate font-semibold", "{channel.name}" }
                                             if channel.unread_count > 0 {
                                                 span {
-                                                    class: "channel-unread-badge",
+                                                    class: "{unread_badge_class(channel.unread_mentions)}",
                                                     if channel.unread_count > 99 {
                                                         "99+"
                                                     } else {
@@ -4667,6 +5138,7 @@ fn MessagesPage() -> Element {
                                                 onclick: move |_| {
                                                     note.set(String::new());
                                                     draft.set(String::new());
+                                                    msg_window.set(None);
                                                     selected_dm.set(Some(open_key.clone()));
                                                 },
                                                 div { class: "flex w-full items-start justify-between gap-2",
@@ -4676,7 +5148,7 @@ fn MessagesPage() -> Element {
                                                         }
                                                         p { class: "truncate font-semibold", "{thread.name}" }
                                                         if thread.unread_count > 0 {
-                                                            span { class: "channel-unread-badge",
+                                                            span { class: "{unread_badge_class(thread.unread_mentions)}",
                                                                 if thread.unread_count > 99 {
                                                                     "99+"
                                                                 } else {

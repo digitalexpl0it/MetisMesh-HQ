@@ -315,23 +315,24 @@ mod tests {
         let tty = devices.join("ttyACM0");
         std::fs::write(&tty, b"").unwrap();
         let link = by_id.join("usb-MeshCore-Companion-if00");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&tty, &link).unwrap();
         #[cfg(not(unix))]
         {
             let _ = (tty, link);
             let _ = std::fs::remove_dir_all(&root);
             return;
         }
-
-        let preferred = prefer_by_id_path_in(&by_id, tty.to_str().unwrap()).expect("by-id");
-        assert_eq!(preferred, link.to_string_lossy());
-        // A second symlink sorts later; first sorted by-id wins.
-        let link_b = by_id.join("usb-MeshCore-Companion-if01");
-        std::os::unix::fs::symlink(&tty, &link_b).unwrap();
-        let preferred2 = prefer_by_id_path_in(&by_id, tty.to_str().unwrap()).expect("by-id");
-        assert_eq!(preferred2, link.to_string_lossy());
-        let _ = std::fs::remove_dir_all(root);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&tty, &link).unwrap();
+            let preferred = prefer_by_id_path_in(&by_id, tty.to_str().unwrap()).expect("by-id");
+            assert_eq!(preferred, link.to_string_lossy());
+            // A second symlink sorts later; first sorted by-id wins.
+            let link_b = by_id.join("usb-MeshCore-Companion-if01");
+            std::os::unix::fs::symlink(&tty, &link_b).unwrap();
+            let preferred2 = prefer_by_id_path_in(&by_id, tty.to_str().unwrap()).expect("by-id");
+            assert_eq!(preferred2, link.to_string_lossy());
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 
     #[test]

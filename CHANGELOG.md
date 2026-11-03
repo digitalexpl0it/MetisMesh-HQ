@@ -2,6 +2,11 @@
 
 ## Unreleased — 2026-11-02
 
+### Ship
+
+- Standalone Linux / Windows / macOS release binaries via CI (`cargo build --release`); tag `v*` publishes a GitHub Release
+- CI fixes: `libudev-dev` on Linux, Windows-safe USB by-id test, unique SQLite snapshot temp paths
+
 ### Radio pool
 
 - USB serial companions on the same pool as BLE

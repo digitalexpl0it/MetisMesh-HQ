@@ -1,6 +1,7 @@
 //! Local history. WAL SQLite, one file for every radio.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -409,11 +410,7 @@ impl Db {
         use rusqlite::backup::Backup;
         use std::time::Duration;
 
-        let path = std::env::temp_dir().join(format!(
-            "metis-snap-{}-{}.db",
-            std::process::id(),
-            unix_now()
-        ));
+        let path = unique_temp_db_path("metis-snap");
         {
             let src = self.lock();
             let mut dst = Connection::open(&path)?;
@@ -434,11 +431,7 @@ impl Db {
         use rusqlite::backup::Backup;
         use std::time::Duration;
 
-        let path = std::env::temp_dir().join(format!(
-            "metis-restore-{}-{}.db",
-            std::process::id(),
-            unix_now()
-        ));
+        let path = unique_temp_db_path("metis-restore");
         std::fs::write(&path, bytes).map_err(|e| Error::Msg(e.to_string()))?;
         {
             let src = Connection::open(&path)?;
@@ -3724,6 +3717,20 @@ pub fn unix_now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Temp SQLite path unique across parallel tests (pid + nanos + counter).
+fn unique_temp_db_path(prefix: &str) -> PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "{prefix}-{}-{nanos}-{seq}.db",
+        std::process::id()
+    ))
 }
 
 pub fn merge_enrollment_rank(current: Enrollment, incoming: Enrollment) -> Enrollment {

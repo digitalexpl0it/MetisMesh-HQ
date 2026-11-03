@@ -88,7 +88,7 @@ Mirror MeshCore community firmware while online; flash over USB when the interne
 
 HQ must run offline as a normal desktop app on operator laptops — no Docker, no cloud runtime. One program per OS.
 
-- [ ] **H1** Standalone executables for **Linux**, **Windows**, and **macOS** (`dx` / Cargo desktop release builds); ship with bundled MapLibre assets; document install + first-run `data/` location
+- [x] **H1** Standalone executables for **Linux**, **Windows**, and **macOS** (`dx` / Cargo desktop release builds); ship with bundled MapLibre assets; document install + first-run `data/` location
 - [ ] **H2** Smoke each target: window opens, SQLite creates under `data/`, BLE/USB paths degrade cleanly when hardware is absent
 - [ ] **H3** SQLite durability: confirm **WAL** journal mode on open (already set in `Db::open`); keep WAL + checkpoint behavior healthy under multi-radio ingest so the DB does not choke or lock up; note `-wal`/`-shm` beside the main file in backup docs
 
@@ -146,7 +146,7 @@ Heard nodes stay on Roster/Map. **Claimed** nodes are HQ-owned mesh infrastructu
 - [x] USB companion + BLE/USB/TCP second radio both live under one HQ; bot TX from primary only
 - [x] Backup restores roster + secrets on a fresh machine; import does not flood radio contacts
 - [x] Map uploader (if on): only infra GPS adverts; companions/tracks stay local
-- [ ] Release artifacts: one standalone binary (or app bundle) each for Linux, Windows, macOS
+- [x] Release artifacts: one standalone binary (or app bundle) each for Linux, Windows, macOS
 - [ ] Fresh launch: `PRAGMA journal_mode` reports `wal`; app survives concurrent radio writes without SQLite lock storms
 - [x] Claim repeater → Infrastructure page + Overview strip; probe/CLI via linked companion; empty claim list hides Overview infra chrome
 - [x] Claim requires admin login proof; guest/wrong password never inserts; Unclaim then reclaim asks for password again

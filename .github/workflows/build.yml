@@ -51,7 +51,8 @@ jobs:
             libxdo-dev \
             libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev \
-            libdbus-1-dev
+            libdbus-1-dev \
+            libudev-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -60,6 +61,17 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: ${{ matrix.os }}
+
+      - name: Artifact basename
+        id: art
+        shell: bash
+        run: |
+          base="${{ matrix.artifact }}"
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            echo "name=${base}-${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${base}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Test
         run: cargo test --release
@@ -71,30 +83,30 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           mkdir -p dist
-          cp "${{ matrix.binary }}" "dist/${{ matrix.artifact }}"
-          chmod +x "dist/${{ matrix.artifact }}"
+          cp "${{ matrix.binary }}" "dist/${{ steps.art.outputs.name }}"
+          chmod +x "dist/${{ steps.art.outputs.name }}"
           (
             cd dist
-            tar -czf "../${{ matrix.artifact }}.tar.gz" "${{ matrix.artifact }}"
+            tar -czf "../${{ steps.art.outputs.name }}.tar.gz" "${{ steps.art.outputs.name }}"
           )
-          ls -lh "${{ matrix.artifact }}.tar.gz"
+          ls -lh "${{ steps.art.outputs.name }}.tar.gz"
 
       - name: Package artifact (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item "${{ matrix.binary }}" "dist/${{ matrix.artifact }}.exe"
-          Compress-Archive -Path "dist/${{ matrix.artifact }}.exe" -DestinationPath "${{ matrix.artifact }}.zip" -Force
-          Get-Item "${{ matrix.artifact }}.zip"
+          Copy-Item "${{ matrix.binary }}" "dist/${{ steps.art.outputs.name }}.exe"
+          Compress-Archive -Path "dist/${{ steps.art.outputs.name }}.exe" -DestinationPath "${{ steps.art.outputs.name }}.zip" -Force
+          Get-Item "${{ steps.art.outputs.name }}.zip"
 
       - name: Upload build
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
+          name: ${{ steps.art.outputs.name }}
           path: |
-            ${{ matrix.artifact }}.tar.gz
-            ${{ matrix.artifact }}.zip
+            ${{ steps.art.outputs.name }}.tar.gz
+            ${{ steps.art.outputs.name }}.zip
           if-no-files-found: error
           retention-days: 30
 

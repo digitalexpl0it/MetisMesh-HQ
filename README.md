@@ -18,12 +18,51 @@ Churches, neighborhoods, and volunteer groups run this on a regular computer sit
 
 Communities stay separate until both headquarters agree to link. That bridge is not in this MVP yet — the data model leaves room for it.
 
-## Requirements
+## Install (standalone binary)
+
+GitHub Actions builds Linux (`x86_64`), Windows (`x86_64`), and macOS (`aarch64`) on every push to `main` and on version tags.
+
+1. Download the archive for your OS from a [GitHub Release](https://github.com/digitalexpl0it/MetisMesh-HQ/releases) (preferred), or from the Actions tab artifacts on `main`.
+2. Unpack into a folder you own (for example `~/metis-hq/` or `C:\MetisHQ\`).
+3. Run the binary from that folder:
+   - Linux / macOS: `./metis-mesh-hq-linux-x86_64` (or the macOS name from the archive)
+   - Windows: double-click or run `metis-mesh-hq-windows-x86_64.exe`
+4. First launch creates `./data/` next to your current working directory for SQLite, firmware cache, backups, and QR files. Override with `METIS_DATA_DIR=/path/to/dir` if you want the data elsewhere.
+
+### Runtime libraries
+
+- **Linux (Debian / Ubuntu):** install the WebKitGTK / GTK runtimes (not only the `-dev` packages used to compile):
+
+  ```bash
+  sudo apt-get update
+  sudo apt-get install -y \
+    libwebkit2gtk-4.1-0 libgtk-3-0 \
+    libayatana-appindicator3-1 libsoup-3.0-0 \
+    libjavascriptcoregtk-4.1-0 libdbus-1-3
+  ```
+
+  Bluetooth needs BlueZ. USB serial needs ordinary udev/device access (often membership in `dialout`).
+
+- **Windows:** Edge WebView2 runtime (usually already present on current Windows 10/11).
+- **macOS:** system WebKit (no extra install). First open may need right-click → Open if Gatekeeper blocks an unsigned binary.
+
+### Publishing a GitHub Release
+
+Releases are created only from version tags (not every `main` push):
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+That runs the Build workflow and attaches `metis-mesh-hq-*-v0.1.0.tar.gz` / `.zip` to the new release.
+
+## Requirements (build from source)
 
 - Rust (1.88+ is fine; we build on stable)
 - [Dioxus CLI](https://dioxuslabs.com/) (`dx`) for day-to-day runs
 - A MeshCore companion radio nearby
-- On Linux: WebKitGTK 4.1, GTK 3, and D-Bus headers (see below)
+- On Linux: WebKitGTK 4.1, GTK 3, D-Bus, and libudev headers (see below)
 
 ### Linux packages (Debian / Ubuntu)
 
@@ -34,7 +73,7 @@ sudo apt-get install -y \
   libwebkit2gtk-4.1-dev libgtk-3-dev \
   libayatana-appindicator3-dev libxdo-dev \
   libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
-  libdbus-1-dev
+  libdbus-1-dev libudev-dev
 ```
 
 Bluetooth needs BlueZ running. Disconnect the MeshCore phone app before HQ connects over BLE — the companion only allows one GATT client. USB and TCP do not use a companion PIN.
@@ -60,9 +99,7 @@ On first launch it creates `data/` (gitignored) for the database and QR cache.
 cargo build --release
 ```
 
-Binary lands at `target/release/metis-mesh-hq` (`.exe` on Windows).
-
-GitHub Actions builds Linux, Windows, and macOS on every push to `main` and on tags. Grab the artifacts from the Actions tab, or from a release if you tagged one (`v0.1.0`, etc.).
+Binary lands at `target/release/metis-mesh-hq` (`.exe` on Windows). MapLibre and other `assets/` files are embedded via Dioxus `asset!()`.
 
 ## Layout
 

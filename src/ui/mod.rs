@@ -40,7 +40,7 @@ use widgets::{
     append_emoji, heard_icon_class, heard_within_week, Badge, BarMix, BarMixRow, BatteryChart,
     BatteryPill, BatterySample, Button, ButtonKind, Card, ChartSeries, Dialog, EmojiPickerButton,
     LineChart, PageHeading, PinSlideDown, SelectInput, SlideDownPanel, Sparkline, TextInput,
-    ToastHost, ToggleSwitch,
+    Throbber, ToastHost, ToggleSwitch,
 };
 
 /// Show a transient toast (and log it). Prefer this over inline amber labels.
@@ -783,7 +783,9 @@ pub fn App() -> Element {
 fn status_icon(state: &str) -> IconName {
     match state {
         "connected" => IconName::Radio,
-        "connecting" | "reconnecting" | "scanning" | "pairing" | "disconnecting" => IconName::Scan,
+        "connecting" | "reconnecting" | "scanning" | "scanning_usb" | "pairing" | "disconnecting" => {
+            IconName::Scan
+        }
         "error" => IconName::Close,
         _ => IconName::Radio,
     }
@@ -836,6 +838,7 @@ fn status_label(state: &str) -> &'static str {
         "connecting" => "Connecting",
         "reconnecting" => "Reconnecting",
         "scanning" => "Scanning",
+        "scanning_usb" => "Refreshing USB",
         "pairing" => "Pairing",
         "disconnecting" => "Disconnecting",
         "error" => "Radio error",
@@ -1018,7 +1021,7 @@ fn HeaderRadioControls(radio: RadioStatus) -> Element {
     let linked = radio.state == "connected";
     let busy = matches!(
         radio.state.as_str(),
-        "connecting" | "reconnecting" | "pairing" | "scanning" | "disconnecting"
+        "connecting" | "reconnecting" | "pairing" | "scanning" | "scanning_usb" | "disconnecting"
     );
     let show_live = linked || busy || !radio.connected_name.is_empty();
     let selected_transport = saved_radios
@@ -1213,7 +1216,7 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
     };
     let busy = matches!(
         radio.state.as_str(),
-        "connecting" | "reconnecting" | "pairing" | "scanning" | "disconnecting"
+        "connecting" | "reconnecting" | "pairing" | "scanning" | "scanning_usb" | "disconnecting"
     );
     let linked = radio.state == "connected";
     let stored_device = if !radio.connected_name.is_empty() {
@@ -5193,9 +5196,10 @@ fn SettingsPage(
         crate::services::default_json_template(crate::services::weather_unit_f(&state().db));
     let mqtt_pass_saved = crate::services::password_file_present(&crate::data_dir());
     let scanning = radio.state == "scanning" || radio.state == "pairing";
+    let usb_scanning = radio.state == "scanning_usb";
     let busy = matches!(
         radio.state.as_str(),
-        "connecting" | "reconnecting" | "pairing" | "scanning" | "disconnecting"
+        "connecting" | "reconnecting" | "pairing" | "scanning" | "scanning_usb" | "disconnecting"
     );
     let target_saved = state()
         .db
@@ -5452,8 +5456,12 @@ fn SettingsPage(
                             kind: ButtonKind::Ghost,
                             disabled: scanning,
                             onclick: move |_| state().radio.scan(),
-                            Icon { name: IconName::Scan, size: 14 }
-                            if scanning { "Scanning" } else { "Scan" }
+                            if scanning {
+                                Throbber { size: 14 }
+                            } else {
+                                Icon { name: IconName::Scan, size: 14 }
+                            }
+                            if scanning { "Scanning…" } else { "Scan" }
                         }
                         Button {
                             kind: ButtonKind::Ghost,
@@ -5513,9 +5521,14 @@ fn SettingsPage(
                     div { class: "mb-3 flex flex-wrap gap-2",
                         Button {
                             kind: ButtonKind::Ghost,
+                            disabled: usb_scanning,
                             onclick: move |_| state().radio.scan_usb(),
-                            Icon { name: IconName::Scan, size: 14 }
-                            "Refresh ports"
+                            if usb_scanning {
+                                Throbber { size: 14 }
+                            } else {
+                                Icon { name: IconName::Scan, size: 14 }
+                            }
+                            if usb_scanning { "Refreshing…" } else { "Refresh ports" }
                         }
                     }
                     if usb_ports.is_empty() {
@@ -9142,12 +9155,17 @@ fn SettingsPage(
                                     }
                                     Button {
                                         kind: ButtonKind::Ghost,
+                                        disabled: radio.state == "scanning_usb",
                                         onclick: move |_| {
                                             state().radio.scan_usb();
                                             flasher_tick.with_mut(|n| *n = n.wrapping_add(1));
                                         },
-                                        Icon { name: IconName::Scan, size: 14 }
-                                        "Refresh"
+                                        if radio.state == "scanning_usb" {
+                                            Throbber { size: 14 }
+                                        } else {
+                                            Icon { name: IconName::Scan, size: 14 }
+                                        }
+                                        if radio.state == "scanning_usb" { "Refreshing…" } else { "Refresh" }
                                     }
                                 }
                             }

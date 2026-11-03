@@ -1056,6 +1056,24 @@ option {
   align-items: center;
 }
 
+.hq-throbber {
+  display: inline-block;
+  box-sizing: border-box;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  flex-shrink: 0;
+  opacity: 0.9;
+  animation: hq-throbber-spin 0.7s linear infinite;
+  vertical-align: middle;
+}
+
+@keyframes hq-throbber-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .welcome-dep-list {
   display: flex;
   flex-direction: column;

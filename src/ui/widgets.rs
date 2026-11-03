@@ -30,6 +30,19 @@ pub enum ButtonKind {
     Danger,
 }
 
+/// Inline busy indicator for scan / refresh actions.
+#[component]
+pub fn Throbber(#[props(default = 14)] size: u32) -> Element {
+    rsx! {
+        span {
+            class: "hq-throbber",
+            style: "width:{size}px;height:{size}px;",
+            role: "status",
+            aria_label: "Working",
+        }
+    }
+}
+
 #[component]
 pub fn Button(
     #[props(default)] kind: ButtonKind,

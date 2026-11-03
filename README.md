@@ -52,7 +52,7 @@ Critical UI libraries are probed before the window opens. On Debian/Ubuntu the a
 
   Bluetooth needs BlueZ. USB serial needs membership in `dialout` (log out/in after the wizard adds you).
 
-- **Windows:** Edge WebView2 runtime (usually already present on current Windows 10/11).
+- **Windows:** Edge WebView2 runtime (usually already present on current Windows 10/11). If missing, HQ downloads the Evergreen bootstrapper with PowerShell and runs a silent install. Optional flashers (`esptool`, `adafruit-nrfutil`) install the same way (winget Python if needed, then `pip --user`).
 - **macOS:** system WebKit (no extra install). First open may need right-click → Open if Gatekeeper blocks an unsigned binary.
 
 ### Publishing a GitHub Release

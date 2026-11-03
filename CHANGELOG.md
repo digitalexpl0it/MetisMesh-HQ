@@ -9,7 +9,9 @@
 - Data folder moved to the user profile: Linux `~/.MetisMeshHQ`, macOS `…/MetisMeshHQ`, Windows `%APPDATA%\MetisMeshHQ` (`METIS_DATA_DIR` still overrides)
 - Default EmergHQ header logo embedded in the binary (release packages no longer show a broken image)
 - First-run welcome wizard: install runtime deps (pkexec apt / WebView2) and optional companion connect; Settings → About (version, author, MIT, GitHub, data folder)
-- Welcome System setup Install buttons for optional flashers (`esptool` via apt, `adafruit-nrfutil` via pipx)
+- Welcome System setup Install buttons for optional flashers (`esptool` via apt, `adafruit-nrfutil` via pipx; Windows via PowerShell + winget/pip)
+- Windows WebView2 bootstrapper install uses PowerShell (`Invoke-WebRequest`) instead of the Rust HTTP client
+- Scan / Refresh USB buttons show a throbber while working (welcome + Settings)
 - Linux baseline is Ubuntu 26.04+ (CI job/artifact `ubuntu-26.04`); critical probe uses `libgtk-3-0t64`
 
 ### Radio pool

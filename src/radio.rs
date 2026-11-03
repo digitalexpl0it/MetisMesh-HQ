@@ -1092,6 +1092,9 @@ impl PoolShared {
     }
 
     async fn refresh_usb_ports(&self, announce: bool) {
+        if announce {
+            self.notify("scanning_usb", "Looking for USB serial ports…");
+        }
         match tokio::task::spawn_blocking(usb_serial::list_usb_ports).await {
             Ok(Ok(ports)) => {
                 let count = ports.len();

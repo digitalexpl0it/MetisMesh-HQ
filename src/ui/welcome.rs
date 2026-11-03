@@ -7,7 +7,7 @@ use crate::radio::RadioStatus;
 
 use super::icons::{Icon, IconName};
 use super::state;
-use super::widgets::{Button, ButtonKind, SelectInput, TextInput};
+use super::widgets::{Button, ButtonKind, SelectInput, TextInput, Throbber};
 
 const WELCOME_DONE_KEY: &str = "welcome_done";
 
@@ -61,7 +61,7 @@ pub fn WelcomeWizard(
     let mut step = use_signal(|| WelcomeStep::Intro);
     let mut soft_tick = use_signal(|| 0u32);
     let mut install_note = use_signal(String::new);
-    let mut install_busy = use_signal(|| false);
+    let mut install_kind = use_signal(|| Option::<deps::SoftDepKind>::None);
     let mut companion_tab = use_signal(|| CompanionTab::Bluetooth);
     let mut ble_target = use_signal(String::new);
     let mut usb_path = use_signal(String::new);
@@ -69,6 +69,8 @@ pub fn WelcomeWizard(
     let mut tcp_port = use_signal(|| crate::tcp_radio::DEFAULT_TCP_PORT.to_string());
     let _ = soft_tick();
     let report = deps::soft_status();
+    let ble_scanning = radio.state == "scanning" || radio.state == "pairing";
+    let usb_scanning = radio.state == "scanning_usb";
 
     let finish = move |action: WelcomeFinishAction| {
         set_welcome_done(true);
@@ -113,12 +115,21 @@ pub fn WelcomeWizard(
                             for item in report.items {
                                 {
                                     let kind = item.kind;
-                                    let can = item.can_install && !install_busy();
+                                    let label = item.label.clone();
+                                    let busy_kind = install_kind();
+                                    let this_busy = busy_kind == Some(kind);
+                                    let show_install = item.can_install || this_busy;
                                     rsx! {
                                         div { class: "welcome-dep-row",
                                             div { class: "welcome-dep-main",
                                                 span { class: if item.ok { "welcome-dep-ok" } else { "welcome-dep-miss" },
-                                                    if item.ok { "Ready" } else { "Needs attention" }
+                                                    if item.ok {
+                                                        "Ready"
+                                                    } else if this_busy {
+                                                        "Installing"
+                                                    } else {
+                                                        "Needs attention"
+                                                    }
                                                 }
                                                 div {
                                                     p { class: "welcome-dep-label", "{item.label}" }
@@ -128,20 +139,32 @@ pub fn WelcomeWizard(
                                                     }
                                                 }
                                             }
-                                            if can {
+                                            if show_install {
                                                 Button {
                                                     kind: ButtonKind::Ghost,
+                                                    disabled: busy_kind.is_some(),
                                                     onclick: move |_| {
-                                                        install_busy.set(true);
-                                                        install_note.set(String::new());
-                                                        match deps::install_soft(kind) {
-                                                            Ok(msg) => install_note.set(msg),
-                                                            Err(err) => install_note.set(err),
-                                                        }
-                                                        install_busy.set(false);
-                                                        soft_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                                        install_kind.set(Some(kind));
+                                                        install_note.set(format!("Installing {label}…"));
+                                                        spawn(async move {
+                                                            let result = tokio::task::spawn_blocking(move || {
+                                                                deps::install_soft(kind)
+                                                            })
+                                                            .await;
+                                                            match result {
+                                                                Ok(Ok(msg)) => install_note.set(msg),
+                                                                Ok(Err(err)) => install_note.set(err),
+                                                                Err(err) => install_note
+                                                                    .set(format!("Install task failed: {err}")),
+                                                            }
+                                                            install_kind.set(None);
+                                                            soft_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                                        });
                                                     },
-                                                    "Install"
+                                                    if this_busy {
+                                                        Throbber { size: 14 }
+                                                    }
+                                                    if this_busy { "Installing…" } else { "Install" }
                                                 }
                                             }
                                         }
@@ -155,6 +178,7 @@ pub fn WelcomeWizard(
                         div { class: "welcome-actions",
                             Button {
                                 kind: ButtonKind::Ghost,
+                                disabled: install_kind().is_some(),
                                 onclick: move |_| {
                                     soft_tick.with_mut(|n| *n = n.wrapping_add(1));
                                     install_note.set(String::new());
@@ -163,11 +187,13 @@ pub fn WelcomeWizard(
                             }
                             Button {
                                 kind: ButtonKind::Ghost,
+                                disabled: install_kind().is_some(),
                                 onclick: move |_| step.set(WelcomeStep::Companion),
                                 "Skip"
                             }
                             Button {
                                 kind: ButtonKind::Primary,
+                                disabled: install_kind().is_some(),
                                 onclick: move |_| step.set(WelcomeStep::Companion),
                                 "Continue"
                             }
@@ -207,9 +233,14 @@ pub fn WelcomeWizard(
                                     div { class: "welcome-actions",
                                         Button {
                                             kind: ButtonKind::Ghost,
+                                            disabled: ble_scanning,
                                             onclick: move |_| state().radio.scan(),
-                                            Icon { name: IconName::Bluetooth, size: 14 }
-                                            "Scan"
+                                            if ble_scanning {
+                                                Throbber { size: 14 }
+                                            } else {
+                                                Icon { name: IconName::Bluetooth, size: 14 }
+                                            }
+                                            if ble_scanning { "Scanning…" } else { "Scan" }
                                         }
                                     }
                                     if radio.devices.is_empty() {
@@ -253,8 +284,14 @@ pub fn WelcomeWizard(
                                     div { class: "welcome-actions",
                                         Button {
                                             kind: ButtonKind::Ghost,
+                                            disabled: usb_scanning,
                                             onclick: move |_| state().radio.scan_usb(),
-                                            "Refresh ports"
+                                            if usb_scanning {
+                                                Throbber { size: 14 }
+                                            } else {
+                                                Icon { name: IconName::Scan, size: 14 }
+                                            }
+                                            if usb_scanning { "Refreshing…" } else { "Refresh ports" }
                                         }
                                     }
                                     if radio.usb_ports.is_empty() {

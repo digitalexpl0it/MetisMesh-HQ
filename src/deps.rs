@@ -204,11 +204,7 @@ pub fn soft_status() -> SoftDepsReport {
             "Optional — only needed for ESP32 USB flashing.".into()
         },
         can_install: esptool_install,
-        hint: if esptool_install {
-            "Install via apt (Ubuntu) or pipx.".into()
-        } else {
-            "Install manually: sudo apt-get install -y esptool   (or pipx install esptool)".into()
-        },
+        hint: flasher_install_hint(SoftDepKind::Esptool, esptool_install),
     });
 
     let nrf_ok = tool_on_path(&["adafruit-nrfutil", "nrfutil"]);
@@ -223,11 +219,7 @@ pub fn soft_status() -> SoftDepsReport {
             "Optional — only needed for nRF52 serial DFU.".into()
         },
         can_install: nrf_install,
-        hint: if nrf_install {
-            "Install adafruit-nrfutil via pipx.".into()
-        } else {
-            "Install manually: pipx install adafruit-nrfutil".into()
-        },
+        hint: flasher_install_hint(SoftDepKind::Nrfutil, nrf_install),
     });
 
     SoftDepsReport { items }
@@ -260,32 +252,88 @@ pub fn install_soft(kind: SoftDepKind) -> Result<String, String> {
             }
         }
         SoftDepKind::Esptool => install_esptool(),
-        SoftDepKind::Nrfutil => install_python_cli("adafruit-nrfutil", &["adafruit-nrfutil", "nrfutil"]),
+        SoftDepKind::Nrfutil => install_nrfutil(),
+    }
+}
+
+fn flasher_install_hint(kind: SoftDepKind, can_install: bool) -> String {
+    match kind {
+        SoftDepKind::Esptool => {
+            if can_install {
+                #[cfg(target_os = "windows")]
+                {
+                    return "Install via PowerShell (Python + pip if needed).".into();
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    return "Install via apt (Ubuntu) or pipx.".into();
+                }
+                #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+                {
+                    return "Install via pipx / pip.".into();
+                }
+            }
+            #[cfg(target_os = "windows")]
+            {
+                "Install manually: winget install Python.Python.3.12 ; python -m pip install --user esptool"
+                    .into()
+            }
+            #[cfg(target_os = "linux")]
+            {
+                "Install manually: sudo apt-get install -y esptool   (or pipx install esptool)".into()
+            }
+            #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+            {
+                "Install manually: pipx install esptool".into()
+            }
+        }
+        SoftDepKind::Nrfutil => {
+            if can_install {
+                #[cfg(target_os = "windows")]
+                {
+                    return "Install adafruit-nrfutil via PowerShell (Python + pip if needed).".into();
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    return "Install adafruit-nrfutil via pipx.".into();
+                }
+            }
+            #[cfg(target_os = "windows")]
+            {
+                "Install manually: python -m pip install --user adafruit-nrfutil".into()
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                "Install manually: pipx install adafruit-nrfutil".into()
+            }
+        }
+        SoftDepKind::Bluez | SoftDepKind::Dialout => String::new(),
     }
 }
 
 fn can_install_flasher_cli(kind: SoftDepKind) -> bool {
     match kind {
-        SoftDepKind::Esptool => {
+        SoftDepKind::Esptool | SoftDepKind::Nrfutil => {
+            #[cfg(target_os = "windows")]
+            {
+                // PowerShell can fetch Python via winget, then pip-install the tool.
+                return windows_powershell_available();
+            }
             #[cfg(target_os = "linux")]
             {
-                if linux_is_apt() {
+                if kind == SoftDepKind::Esptool && linux_is_apt() {
                     return true;
                 }
+                if linux_is_apt() {
+                    return true; // can apt-install pipx first
+                }
+                return python_cli_installer_available();
             }
-            python_cli_installer_available()
+            #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+            {
+                python_cli_installer_available()
+            }
         }
-        SoftDepKind::Nrfutil => python_cli_installer_available() || {
-            #[cfg(target_os = "linux")]
-            {
-                // Can apt-install pipx first, then pipx-install the tool.
-                linux_is_apt()
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                false
-            }
-        },
         SoftDepKind::Bluez | SoftDepKind::Dialout => false,
     }
 }
@@ -296,16 +344,66 @@ fn python_cli_installer_available() -> bool {
         || python_pip_module_ok()
 }
 
+fn python_commands() -> &'static [&'static str] {
+    // Windows often has the `py` launcher; macOS/Linux prefer python3.
+    #[cfg(windows)]
+    {
+        &["python", "py", "python3"]
+    }
+    #[cfg(not(windows))]
+    {
+        &["python3", "python"]
+    }
+}
+
 fn python_pip_module_ok() -> bool {
-    let py = if cfg!(windows) { "python" } else { "python3" };
-    Command::new(py)
-        .args(["-m", "pip", "--version"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    python_commands().iter().any(|py| {
+        Command::new(py)
+            .args(["-m", "pip", "--version"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
+}
+
+fn run_pip_user_install(pip_name: &str) -> Result<(bool, String), String> {
+    let mut last_err = String::new();
+    for py in python_commands() {
+        let mut args = vec![
+            "-m".into(),
+            "pip".into(),
+            "install".into(),
+            "--user".into(),
+            pip_name.to_string(),
+        ];
+        match Command::new(py).args(&args).output() {
+            Ok(output) if output.status.success() => return Ok((true, String::new())),
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                if stderr.contains("externally-managed-environment") {
+                    args.push("--break-system-packages".into());
+                    match Command::new(py).args(&args).output() {
+                        Ok(retry) if retry.status.success() => return Ok((true, String::new())),
+                        Ok(retry) => {
+                            last_err = String::from_utf8_lossy(&retry.stderr).to_string();
+                        }
+                        Err(e) => last_err = format!("Could not run {py} -m pip retry: {e}"),
+                    }
+                } else {
+                    last_err = stderr;
+                }
+            }
+            Err(e) => last_err = format!("Could not run {py} -m pip: {e}"),
+        }
+    }
+    Ok((false, last_err))
 }
 
 fn install_esptool() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        return windows_install_python_package("esptool", &["esptool.py", "esptool"]);
+    }
     #[cfg(target_os = "linux")]
     {
         if linux_is_apt() {
@@ -318,7 +416,21 @@ fn install_esptool() -> Result<String, String> {
             );
         }
     }
-    install_python_cli("esptool", &["esptool.py", "esptool"])
+    #[cfg(not(target_os = "windows"))]
+    {
+        install_python_cli("esptool", &["esptool.py", "esptool"])
+    }
+}
+
+fn install_nrfutil() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        windows_install_python_package("adafruit-nrfutil", &["adafruit-nrfutil", "nrfutil"])
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        install_python_cli("adafruit-nrfutil", &["adafruit-nrfutil", "nrfutil"])
+    }
 }
 
 fn install_python_cli(pip_name: &str, binaries: &[&str]) -> Result<String, String> {
@@ -347,43 +459,19 @@ fn install_python_cli(pip_name: &str, binaries: &[&str]) -> Result<String, Strin
         ));
     }
 
-    let py = if cfg!(windows) { "python" } else { "python3" };
-    let mut args = vec![
-        "-m".into(),
-        "pip".into(),
-        "install".into(),
-        "--user".into(),
-        pip_name.to_string(),
-    ];
-    let output = Command::new(py)
-        .args(&args)
-        .output()
-        .map_err(|e| format!("Could not run {py} -m pip: {e}"))?;
-    if output.status.success() || tool_on_path(binaries) {
+    let (ok, err) = run_pip_user_install(pip_name)?;
+    if ok || tool_on_path(binaries) {
         return Ok(format!(
             "{pip_name} installed with pip --user. Click Refresh (ensure user Scripts / ~/.local/bin is on PATH)."
         ));
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if stderr.contains("externally-managed-environment") {
-        // Last resort on older setups; Ubuntu path should have used pipx above.
-        args.push("--break-system-packages".into());
-        let retry = Command::new(py)
-            .args(&args)
-            .output()
-            .map_err(|e| format!("Could not run pip retry: {e}"))?;
-        if retry.status.success() || tool_on_path(binaries) {
-            return Ok(format!("{pip_name} installed with pip --user.").into());
-        }
+    if err.contains("externally-managed-environment") {
         return Err(format!(
             "pip is blocked (externally managed). Install pipx, then: pipx install {pip_name}\n{}",
-            stderr.trim()
+            err.trim()
         ));
     }
-    Err(format!(
-        "pip install {pip_name} failed.\n{}",
-        stderr.trim()
-    ))
+    Err(format!("pip install {pip_name} failed.\n{}", err.trim()))
 }
 
 fn pipx_bin() -> &'static str {
@@ -641,6 +729,44 @@ fn linux_add_dialout() -> Result<String, String> {
 }
 
 #[cfg(target_os = "windows")]
+fn windows_powershell_available() -> bool {
+    Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.Major"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_run_powershell(script: &str) -> Result<String, String> {
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
+        .output()
+        .map_err(|e| format!("Could not start PowerShell: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if output.status.success() {
+        return Ok(if stdout.is_empty() {
+            stderr
+        } else {
+            stdout
+        });
+    }
+    Err(format!(
+        "PowerShell failed.\n{}\n{}",
+        stdout,
+        stderr
+    ))
+}
+
+#[cfg(target_os = "windows")]
 fn windows_critical_status() -> CriticalStatus {
     if windows_webview2_present() {
         CriticalStatus {
@@ -690,34 +816,104 @@ fn windows_webview2_present() -> bool {
 
 #[cfg(target_os = "windows")]
 fn windows_install_webview2() -> Result<(), String> {
-    // Microsoft Evergreen Standalone Bootstrapper
-    const URL: &str =
-        "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
-    let dest = std::env::temp_dir().join("MicrosoftEdgeWebview2Setup.exe");
-    eprintln!("Metis Mesh HQ: downloading WebView2 bootstrapper…");
-    let resp = ureq::get(URL)
-        .timeout(std::time::Duration::from_secs(180))
-        .call()
-        .map_err(|e| format!("WebView2 download failed: {e}"))?;
-    let mut reader = resp.into_reader();
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut reader, &mut bytes)
-        .map_err(|e| format!("WebView2 download read failed: {e}"))?;
-    if bytes.len() < 1024 {
-        return Err("WebView2 bootstrapper download looked empty.".into());
+    if !windows_powershell_available() {
+        return Err(
+            "PowerShell is required to download WebView2. Install WebView2 manually from Microsoft."
+                .into(),
+        );
     }
-    std::fs::write(&dest, &bytes).map_err(|e| format!("Could not write bootstrapper: {e}"))?;
-    eprintln!("Metis Mesh HQ: running WebView2 installer…");
-    let status = Command::new(&dest)
-        .args(["/silent", "/install"])
-        .status()
-        .map_err(|e| format!("Could not run WebView2 installer: {e}"))?;
-    let _ = std::fs::remove_file(&dest);
-    if status.success() || windows_webview2_present() {
+    eprintln!("Metis Mesh HQ: downloading WebView2 via PowerShell…");
+    // Evergreen Standalone Bootstrapper (Microsoft).
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+$url = 'https://go.microsoft.com/fwlink/p/?LinkId=2124703'
+$dest = Join-Path $env:TEMP 'MicrosoftEdgeWebview2Setup.exe'
+Write-Output 'Downloading WebView2 bootstrapper…'
+Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+Write-Output 'Running WebView2 installer…'
+$p = Start-Process -FilePath $dest -ArgumentList '/silent','/install' -Wait -PassThru
+Remove-Item -LiteralPath $dest -Force -ErrorAction SilentlyContinue
+if ($null -ne $p.ExitCode -and $p.ExitCode -ne 0) {
+  throw "WebView2 installer exited with code $($p.ExitCode)"
+}
+Write-Output 'WebView2 installer finished.'
+"#;
+    windows_run_powershell(script)?;
+    if windows_webview2_present() {
         return Ok(());
     }
-    Err(format!(
-        "WebView2 installer exited with {status}. Install manually from Microsoft."
+    Err(
+        "WebView2 installer finished but the runtime was not detected. Install manually from Microsoft."
+            .into(),
+    )
+}
+
+/// Install a PyPI flasher CLI on Windows via PowerShell.
+/// Ensures Python (winget) when missing, then `pip install --user`.
+#[cfg(target_os = "windows")]
+fn windows_install_python_package(pip_name: &str, binaries: &[&str]) -> Result<String, String> {
+    // Only known package names from SoftDepKind reach here.
+    if !pip_name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("Refusing to install an unexpected package name.".into());
+    }
+    if !windows_powershell_available() {
+        return Err(format!(
+            "PowerShell is required to install {pip_name}. Install Python and run: python -m pip install --user {pip_name}"
+        ));
+    }
+    let script = format!(
+        r#"
+$ErrorActionPreference = 'Stop'
+function Find-Python {{
+  foreach ($c in @('py', 'python', 'python3')) {{
+    $cmd = Get-Command $c -ErrorAction SilentlyContinue
+    if ($cmd) {{ return $cmd.Source }}
+  }}
+  return $null
+}}
+function Refresh-Path {{
+  $machine = [System.Environment]::GetEnvironmentVariable('Path','Machine')
+  $user = [System.Environment]::GetEnvironmentVariable('Path','User')
+  $env:Path = @($machine, $user) -join ';'
+}}
+$py = Find-Python
+if (-not $py) {{
+  $winget = Get-Command winget -ErrorAction SilentlyContinue
+  if (-not $winget) {{
+    throw 'Python was not found and winget is unavailable. Install Python 3 from python.org, then retry.'
+  }}
+  Write-Output 'Installing Python via winget…'
+  & winget install -e --id Python.Python.3.12 --silent --accept-package-agreements --accept-source-agreements
+  if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {{
+    # -1978335189 = already installed
+    throw "winget failed to install Python (exit $LASTEXITCODE)"
+  }}
+  Refresh-Path
+  $py = Find-Python
+  if (-not $py) {{
+    throw 'Python still not on PATH after winget. Close and reopen Metis Mesh HQ, then retry Install.'
+  }}
+}}
+Write-Output ("Using Python: " + $py)
+Write-Output 'Installing {pip_name} with pip --user…'
+& $py -m pip install --user {pip_name}
+if ($LASTEXITCODE -ne 0) {{
+  throw "pip install {pip_name} failed (exit $LASTEXITCODE)"
+}}
+Write-Output '{pip_name} installed.'
+"#
+    );
+    let out = windows_run_powershell(&script)?;
+    if tool_on_path(binaries) {
+        return Ok(format!(
+            "{pip_name} installed via PowerShell. Click Refresh if status is still pending."
+        ));
+    }
+    Ok(format!(
+        "{pip_name} installed via PowerShell. If Refresh still shows missing, reopen HQ so PATH picks up Python Scripts.\n{out}"
     ))
 }
 

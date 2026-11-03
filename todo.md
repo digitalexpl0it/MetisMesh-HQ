@@ -92,7 +92,7 @@ HQ must run offline as a normal desktop app on operator laptops — no Docker, n
 - [x] **H1** Standalone executables for **Linux**, **Windows**, and **macOS** (`dx` / Cargo desktop release builds); ship with bundled MapLibre assets; document install + first-run `data/` location
 - [x] **H1b** First-run welcome wizard (critical/soft deps install + optional companion connect) and Settings → About (version, author, MIT, GitHub, data path)
 - [ ] **H2** Smoke each target: window opens, SQLite creates under `data/`, BLE/USB paths degrade cleanly when hardware is absent
-- [ ] **H3** SQLite durability: confirm **WAL** journal mode on open (already set in `Db::open`); keep WAL + checkpoint behavior healthy under multi-radio ingest so the DB does not choke or lock up; note `-wal`/`-shm` beside the main file in backup docs
+- [x] **H3** SQLite durability: confirm **WAL** journal mode on open (already set in `Db::open`); keep WAL + checkpoint behavior healthy under multi-radio ingest so the DB does not choke or lock up; note `-wal`/`-shm` beside the main file in backup docs
 
 ## Phase I — Infrastructure (claimed repeaters / rooms / sensors)
 
@@ -106,11 +106,12 @@ Heard nodes stay on Roster/Map. **Claimed** nodes are HQ-owned mesh infrastructu
 
 ## Phase J — Nav / list UX
 
-- [x] **J1** Sidebar order by use: Overview → Messages → Inbox → Roster → Map → Infrastructure → Tracker → CLI; Settings stays bottom
+- [x] **J1** Sidebar order by use: Overview → Messages → Inbox → Roster → Map → Infrastructure → Tracker → CLI; Help then Settings at bottom
 - [x] **J2** Expanded-only fuzzy jump: pages + in-page tabs/keywords (not live roster/message bodies)
 - [x] **J3** Zebra rows on Roster, Infrastructure (claimed + claim-from-roster), Tracker (tracked + add-from-roster) via `.row-zebra` in `form.css` (frozen Tailwind lacks `bg-muted/40`)
 - [x] **J4** GPS locate icon: green within 7 days of `last_heard`, red when older / never
 - [x] **J5** Shell: opaque top banner + `min-h-0` / `overflow-hidden` so page content does not paint under the bar
+- [x] **J6** In-app Help page (nav above Settings): operator desk guide + shareable radio-user signup / channel steps; About → Open Help
 
 ## Non-goals (for now)
 
@@ -134,7 +135,7 @@ Heard nodes stay on Roster/Map. **Claimed** nodes are HQ-owned mesh infrastructu
 9. G1 → G4 (offline firmware locker + selective Manage overlay + USB flasher)  
 10. H1 → H3 (standalone Linux/Windows/macOS + WAL-safe SQLite)  
 11. I1 → I5 (claimed infrastructure + verify-on-claim + gated Overview)  
-12. J1 → J5 (nav order, fuzzy jump, zebra, heard-week icon, shell layout)
+12. J1 → J6 (nav order, fuzzy jump, zebra, heard-week icon, shell layout, Help page)
 
 ## Success checks
 
@@ -149,7 +150,7 @@ Heard nodes stay on Roster/Map. **Claimed** nodes are HQ-owned mesh infrastructu
 - [x] Backup restores roster + secrets on a fresh machine; import does not flood radio contacts
 - [x] Map uploader (if on): only infra GPS adverts; companions/tracks stay local
 - [x] Release artifacts: one standalone binary (or app bundle) each for Linux, Windows, macOS
-- [ ] Fresh launch: `PRAGMA journal_mode` reports `wal`; app survives concurrent radio writes without SQLite lock storms
+- [x] Fresh launch: `PRAGMA journal_mode` reports `wal`; app survives concurrent radio writes without SQLite lock storms
 - [x] Claim repeater → Infrastructure page + Overview strip; probe/CLI via linked companion; empty claim list hides Overview infra chrome
 - [x] Claim requires admin login proof; guest/wrong password never inserts; Unclaim then reclaim asks for password again
 - [x] Expanded nav search finds Settings for “device” / tab keywords; Roster zebra rows visible; pages clear the top banner

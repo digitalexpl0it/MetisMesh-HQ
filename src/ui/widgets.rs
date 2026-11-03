@@ -1123,12 +1123,46 @@ const EMOJI_PICKER_ROWS: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// MeshCore plain-text budget (bytes, not Unicode scalars).
+pub const MESH_TEXT_MAX_BYTES: usize = 160;
+
+/// Truncate to at most [`MESH_TEXT_MAX_BYTES`] UTF-8 bytes on a char boundary.
+pub fn clamp_mesh_text(s: impl Into<String>) -> String {
+    let s = s.into();
+    if s.len() <= MESH_TEXT_MAX_BYTES {
+        return s;
+    }
+    let mut end = MESH_TEXT_MAX_BYTES;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
 /// Append `emoji` when the result still fits MeshCore's 160-byte text budget.
 pub fn append_emoji(draft: &str, emoji: &str) -> String {
-    if draft.len().saturating_add(emoji.len()) > 160 {
+    if draft.len().saturating_add(emoji.len()) > MESH_TEXT_MAX_BYTES {
         draft.to_string()
     } else {
         format!("{draft}{emoji}")
+    }
+}
+
+/// Live `n/160` mesh text counter — green under the limit, red at max.
+#[component]
+pub fn MeshTextCount(text: String) -> Element {
+    let n = text.len();
+    let at_max = n >= MESH_TEXT_MAX_BYTES;
+    rsx! {
+        span {
+            class: if at_max {
+                "mesh-text-count mesh-text-count-max"
+            } else {
+                "mesh-text-count"
+            },
+            title: "Mesh text budget (UTF-8 bytes)",
+            "{n}/{MESH_TEXT_MAX_BYTES}"
+        }
     }
 }
 
@@ -1136,9 +1170,17 @@ pub fn append_emoji(draft: &str, emoji: &str) -> String {
 #[component]
 pub fn EmojiPickerButton(
     #[props(default = false)] disabled: bool,
+    /// Anchor the popover to the right when the trigger sits after the text box.
+    #[props(default = false)]
+    align_end: bool,
     on_pick: EventHandler<String>,
 ) -> Element {
     let mut open = use_signal(|| false);
+    let panel_class = if align_end {
+        "emoji-picker-panel emoji-picker-panel-end"
+    } else {
+        "emoji-picker-panel"
+    };
     rsx! {
         div { class: "emoji-picker-wrap",
             button {
@@ -1157,7 +1199,7 @@ pub fn EmojiPickerButton(
             }
             if open() {
                 div {
-                    class: "emoji-picker-panel",
+                    class: "{panel_class}",
                     role: "dialog",
                     "aria-label": "Emoji picker",
                     onclick: move |event: MouseEvent| event.stop_propagation(),

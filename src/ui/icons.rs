@@ -34,6 +34,8 @@ pub enum IconName {
     Weather,
     /// Terminal window with prompt — Device CLI.
     Terminal,
+    /// Circle with i — Help.
+    Help,
 }
 
 #[component]
@@ -199,6 +201,12 @@ fn icon_paths(name: IconName) -> &'static [&'static str] {
             "M4 5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5z",
             "m8 9 3 3-3 3",
             "M13 15h4",
+        ],
+        // Help — circle with i.
+        IconName::Help => &[
+            "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z",
+            "M12 16v-4",
+            "M12 8h.01",
         ],
     }
 }

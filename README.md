@@ -13,7 +13,7 @@ Churches, neighborhoods, and volunteer groups run this on a regular computer sit
 - Maps nodes with MapLibre + a local style (and optional PMTiles offline packs)
 - Tracks an operator whitelist of devices expected to share GPS (Tracker)
 - Offline firmware locker + USB flasher (checksums, Ready-for-outage status, export/import `.zip` pack); encrypted HQ backup/restore
-- Volunteer offline runbook (`docs/OFFLINE_RUNBOOK.md` and Settings → About)
+- In-app **Help** page (operators + shareable radio-user signup steps); volunteer offline runbook (`docs/OFFLINE_RUNBOOK.md` and Settings → About)
 - Stores messages and contacts in SQLite under the per-user data folder
 - Puts channel secrets in the OS keyring when it can; otherwise a locked-down file
 
@@ -34,6 +34,8 @@ GitHub Actions builds Ubuntu 26.04 (`x86_64`), Windows (`x86_64`), and macOS (`a
    - Windows: `%APPDATA%\MetisMeshHQ`
    
    Override with `METIS_DATA_DIR=/path/to/dir` if you want the data elsewhere.
+
+   The live store is `metis.db` (WAL mode) plus optional `metis.db-wal` and `metis.db-shm` beside it. Prefer **Settings → Backup** for copies. If you copy the data folder by hand, include all three files — or stop HQ first so SQLite can checkpoint into `metis.db`.
 
 5. First launch opens a **setup wizard**: checks Bluetooth / USB serial access, can install missing pieces (may prompt for admin / `pkexec`), and optionally connects a companion (BLE / USB / TCP). You can skip and finish later under Settings → Connect. Settings → About has version, license, GitHub, and data-folder path; **Run setup again** reopens the wizard.
 

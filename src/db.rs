@@ -63,6 +63,25 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// WAL + durability pragmas for file-backed HQ databases.
+///
+/// Call after `Db::open` / restore. Fails closed if the filesystem cannot run WAL
+/// (some network mounts reject it).
+fn apply_runtime_pragmas(conn: &Connection) -> Result<()> {
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    let mode: String = conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Err(Error::Msg(format!(
+            "SQLite journal_mode is '{mode}', expected WAL. Use a local disk for the HQ data folder."
+        )));
+    }
+    // Covers Backup API's second connection and any future multi-conn readers.
+    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+    // NORMAL is the usual durable pairing with WAL (faster than FULL).
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct NodeRow {
     pub pubkey: String,
@@ -264,10 +283,7 @@ impl Db {
         }
         let conn = Connection::open(path)?;
         let db = Self::from_conn(conn)?;
-        db.conn
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .pragma_update(None, "journal_mode", "WAL")?;
+        apply_runtime_pragmas(&db.lock())?;
         Ok(db)
     }
 
@@ -443,7 +459,7 @@ impl Db {
                     .run_to_completion(64, Duration::from_millis(1), None)
                     .map_err(|e| Error::Msg(e.to_string()))?;
             }
-            let _ = dst.pragma_update(None, "journal_mode", "WAL");
+            apply_runtime_pragmas(&dst)?;
         }
         let _ = std::fs::remove_file(&path);
         // Re-apply additive migrations in case the snapshot is from an older build.
@@ -3941,6 +3957,8 @@ mod tests {
     use super::*;
     use crate::secrets::Secrets;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::thread;
 
     static TEST_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -3958,6 +3976,68 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let secrets = Secrets::file_only(&dir);
         (db, secrets, dir)
+    }
+
+    fn temp_db_path(label: &str) -> PathBuf {
+        let seq = TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "metis-wal-{}-{}-{}-{}",
+            label,
+            std::process::id(),
+            unix_now(),
+            seq
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("metis.db")
+    }
+
+    #[test]
+    fn open_sets_wal_journal_mode() {
+        let path = temp_db_path("open");
+        let db = Db::open(&path).unwrap();
+        let mode: String = db
+            .lock()
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode.to_ascii_lowercase(), "wal");
+        db.set_setting("h3_wal_probe", "1").unwrap();
+        // After a write, SQLite typically creates the WAL sidecar beside the main file.
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        assert!(
+            wal.is_file() || path.is_file(),
+            "expected metis.db (and usually metis.db-wal) after a write"
+        );
+        drop(db);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn concurrent_writes_survive() {
+        let path = temp_db_path("conc");
+        let db = Arc::new(Db::open(&path).unwrap());
+        let mut handles = Vec::new();
+        for t in 0..8 {
+            let db = Arc::clone(&db);
+            handles.push(thread::spawn(move || {
+                for i in 0..40 {
+                    db.set_setting(&format!("h3_t{t}_i{i}"), "ok")
+                        .expect("setting write");
+                    db.audit("h3_conc", "", &format!("{t}:{i}"))
+                        .expect("audit write");
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("worker panicked");
+        }
+        let mode: String = db
+            .lock()
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode.to_ascii_lowercase(), "wal");
+        drop(db);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     fn queued_bodies(db: &Db, pubkey: &str) -> Vec<(String, String)> {

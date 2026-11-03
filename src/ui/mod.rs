@@ -1,4 +1,5 @@
 mod cli_page;
+mod help_page;
 mod icons;
 mod infra_page;
 mod map_host;
@@ -31,6 +32,7 @@ use crate::secrets::Secrets;
 use crate::signup::Enrollment;
 
 use cli_page::CliPage;
+use help_page::HelpPage;
 use icons::{Icon, IconName};
 use infra_page::InfraPage;
 use map_page::MapPage;
@@ -38,10 +40,10 @@ use tracker_page::TrackerPage;
 use weather_page::WeatherPage;
 use welcome::{reopen_welcome, welcome_is_done, WelcomeFinishAction, WelcomeWizard};
 use widgets::{
-    append_emoji, heard_icon_class, heard_within_week, Badge, BarMix, BarMixRow, BatteryChart,
-    BatteryPill, BatterySample, Button, ButtonKind, Card, ChartSeries, Dialog, EmojiPickerButton,
-    LineChart, PageHeading, PinSlideDown, SelectInput, SlideDownPanel, Sparkline, TextInput,
-    Throbber, ToastHost, ToggleSwitch,
+    append_emoji, clamp_mesh_text, heard_icon_class, heard_within_week, Badge, BarMix, BarMixRow,
+    BatteryChart, BatteryPill, BatterySample, Button, ButtonKind, Card, ChartSeries, Dialog,
+    EmojiPickerButton, LineChart, MeshTextCount, PageHeading, PinSlideDown, SelectInput,
+    SlideDownPanel, Sparkline, TextInput, Throbber, ToastHost, ToggleSwitch, MESH_TEXT_MAX_BYTES,
 };
 
 /// Show a transient toast (and log it). Prefer this over inline amber labels.
@@ -78,6 +80,7 @@ enum Page {
     Inbox,
     Messages,
     Cli,
+    Help,
     Settings,
 }
 
@@ -251,6 +254,33 @@ const NAV_SEARCH_INDEX: &[NavSearchEntry] = &[
         ],
     },
     NavSearchEntry {
+        page: Page::Help,
+        title: "Help",
+        icon: IconName::Help,
+        topics: &[
+            "help",
+            "how to",
+            "signup",
+            "enroll",
+            "enrollment",
+            "approve",
+            "deny",
+            "revoke",
+            "channel",
+            "secret",
+            "METIS-INFO",
+            "METIS-NET",
+            "weather",
+            "flasher",
+            "firmware",
+            "backup",
+            "WAL",
+            "offline",
+            "runbook",
+            "radio users",
+        ],
+    },
+    NavSearchEntry {
         page: Page::Settings,
         title: "Settings",
         icon: IconName::Settings,
@@ -375,6 +405,15 @@ fn nav_search_hits(query: &str) -> Vec<(i32, Page, IconName, String, String)> {
     hits
 }
 
+fn reset_main_scroll() {
+    // `.hq-main` is shared across pages — leaving Help (etc.) scrolled down
+    // would paint the next page below the viewport until the operator scrolls.
+    let _ = document::eval(
+        r#"const main = document.querySelector('.hq-main');
+           if (main) main.scrollTop = 0;"#,
+    );
+}
+
 #[allow(non_snake_case)]
 pub fn App() -> Element {
     let mut page = use_signal(|| Page::Dashboard);
@@ -389,6 +428,16 @@ pub fn App() -> Element {
     let mut show_welcome = use_signal(|| !welcome_is_done());
     let mut open_about_after_welcome = use_signal(|| false);
     let mut started = use_signal(|| false);
+    // Reset shared main-pane scroll whenever the active page changes.
+    use_effect(move || {
+        let _ = page();
+        reset_main_scroll();
+        spawn(async move {
+            // Second pass after the new page paints (tall Help → short Settings).
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            reset_main_scroll();
+        });
+    });
     if !started() {
         started.set(true);
         spawn(async move {
@@ -618,6 +667,13 @@ pub fn App() -> Element {
                                     }
                                     div { class: "mt-auto" }
                                     NavButton {
+                                        icon: IconName::Help,
+                                        label: "Help".to_string(),
+                                        expanded,
+                                        active: page() == Page::Help,
+                                        onclick: move |_| page.set(Page::Help),
+                                    }
+                                    NavButton {
                                         icon: IconName::Settings,
                                         label: "Settings".to_string(),
                                         expanded,
@@ -669,11 +725,13 @@ pub fn App() -> Element {
                             Page::Inbox => rsx! { InboxPage {} },
                             Page::Messages => rsx! { MessagesPage {} },
                             Page::Cli => rsx! { CliPage { radio: radio.clone() } },
+                            Page::Help => rsx! { HelpPage {} },
                             Page::Settings => rsx! {
                                 SettingsPage {
                                     radio: radio.clone(),
                                     prefer_about: open_about_after_welcome(),
                                     on_about_consumed: move |_| open_about_after_welcome.set(false),
+                                    on_open_help: move |_| page.set(Page::Help),
                                     on_request_pin: move |target: String| {
                                         let target = target.trim().to_string();
                                         if target.is_empty() {
@@ -2578,49 +2636,58 @@ fn RosterPage() -> Element {
                     .unwrap_or_else(|| "Direct message".into()),
                 on_close: move |_| dm_target.set(None),
                 div { class: "flex flex-col gap-3",
-                    textarea {
-                        class: "min-h-28 w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground outline-none",
-                        value: dm_body(),
-                        maxlength: "160",
-                        placeholder: "Write a direct message (max 160 bytes)…",
-                        oninput: move |event: FormEvent| dm_body.set(event.value()),
+                    div { class: "flex items-stretch gap-2",
+                        textarea {
+                            class: "min-h-28 min-w-0 flex-1 rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground outline-none",
+                            value: dm_body(),
+                            placeholder: "Write a direct message…",
+                            oninput: move |event: FormEvent| {
+                                dm_body.set(clamp_mesh_text(event.value()));
+                            },
+                        }
+                        div { class: "flex flex-col justify-end",
+                            EmojiPickerButton {
+                                align_end: true,
+                                on_pick: move |emoji: String| {
+                                    dm_body.set(append_emoji(&dm_body(), &emoji));
+                                },
+                            }
+                        }
                     }
                     div { class: "flex items-center justify-between gap-2",
-                        EmojiPickerButton {
-                            on_pick: move |emoji: String| {
-                                dm_body.set(append_emoji(&dm_body(), &emoji));
-                            },
-                        }
+                        MeshTextCount { text: dm_body() }
                         div { class: "flex justify-end gap-2",
-                        Button {
-                            kind: ButtonKind::Ghost,
-                            onclick: move |_| dm_target.set(None),
-                            "Cancel"
-                        }
-                        Button {
-                            disabled: dm_body().trim().is_empty(),
-                            onclick: move |_| {
-                                let Some((pubkey, _)) = dm_target() else { return; };
-                                let body = dm_body().trim().to_string();
-                                if body.is_empty() {
-                                    return;
-                                }
-                                if body.len() > 160 {
-                                    note.set("Mesh text is limited to 160 bytes.".into());
-                                    return;
-                                }
-                                match state().db.queue_text(&pubkey, &body, &body) {
-                                    Ok(_) => {
-                                        note.set("Direct message queued for the companion.".into());
-                                        dm_target.set(None);
-                                        dm_body.set(String::new());
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| dm_target.set(None),
+                                "Cancel"
+                            }
+                            Button {
+                                disabled: dm_body().trim().is_empty(),
+                                onclick: move |_| {
+                                    let Some((pubkey, _)) = dm_target() else { return; };
+                                    let body = dm_body().trim().to_string();
+                                    if body.is_empty() {
+                                        return;
                                     }
-                                    Err(err) => note.set(err.to_string()),
-                                }
-                            },
-                            Icon { name: IconName::Messages, size: 14 }
-                            "Send DM"
-                        }
+                                    if body.len() > MESH_TEXT_MAX_BYTES {
+                                        note.set(format!(
+                                            "Mesh text is limited to {MESH_TEXT_MAX_BYTES} bytes."
+                                        ));
+                                        return;
+                                    }
+                                    match state().db.queue_text(&pubkey, &body, &body) {
+                                        Ok(_) => {
+                                            note.set("Direct message queued for the companion.".into());
+                                            dm_target.set(None);
+                                            dm_body.set(String::new());
+                                        }
+                                        Err(err) => note.set(err.to_string()),
+                                    }
+                                },
+                                Icon { name: IconName::Messages, size: 14 }
+                                "Send DM"
+                            }
                         }
                     }
                 }
@@ -2728,8 +2795,24 @@ fn RosterPage() -> Element {
                     .unwrap_or_else(|| "Add to private channel".into()),
                 on_close: move |_| invite_target.set(None),
                 div { class: "flex flex-col gap-3",
-                    p { class: "text-sm text-muted-foreground",
-                        "Sends the channel secret by direct message, the same way signup approval does for the bot-home channel."
+                    {
+                        let info_name = state()
+                            .db
+                            .info_channel_name()
+                            .unwrap_or_else(|_| crate::secrets::CHANNEL_NAME.into());
+                        let net_name = state()
+                            .db
+                            .net_channel_name()
+                            .unwrap_or_else(|_| crate::secrets::NET_CHANNEL_NAME.into());
+                        rsx! {
+                            p { class: "text-sm text-muted-foreground",
+                                "Sends the channel secret by direct message, the same way signup approval does for "
+                                code { class: "text-foreground", "{info_name}" }
+                                " / "
+                                code { class: "text-foreground", "{net_name}" }
+                                "."
+                            }
+                        }
                     }
                     if private_channels.is_empty() {
                         p { class: "text-sm text-amber-200", "Create a private channel under Messages first." }
@@ -2870,8 +2953,20 @@ fn InboxPage() -> Element {
     let secrets = state().secrets.clone();
     rsx! {
         div { class: "flex flex-col gap-3",
-            PageHeading { icon: IconName::Inbox, title: "Inbox".to_string(),
-                "Operator queue for join requests and held community alerts. A node DMs signup to ask to join; approval sends the bot-home and peer-net secrets. Weather and Amber wait here when auto-relay is off. Ordinary chats are under Messages → Direct."
+            {
+                let info_name = state()
+                    .db
+                    .info_channel_name()
+                    .unwrap_or_else(|_| crate::secrets::CHANNEL_NAME.into());
+                let net_name = state()
+                    .db
+                    .net_channel_name()
+                    .unwrap_or_else(|_| crate::secrets::NET_CHANNEL_NAME.into());
+                rsx! {
+                    PageHeading { icon: IconName::Inbox, title: "Inbox".to_string(),
+                        "Operator queue for join requests and held community alerts. A node DMs signup to ask to join; approval sends the {info_name} and {net_name} secrets. Weather and Amber wait here when auto-relay is off. Ordinary chats are under Messages → Direct."
+                    }
+                }
             }
             if pending.is_empty() {
                 Card { title: "Waiting", icon: Some(IconName::Inbox),
@@ -2976,6 +3071,10 @@ fn MessagesPage() -> Element {
     let mut refresh_started = use_signal(|| false);
     let mut last_send_seq = use_signal(|| 0u64);
     let mut read_session = use_signal(|| None::<ChannelReadSession>);
+    let mut new_dm_open = use_signal(|| false);
+    let mut new_dm_peer = use_signal(String::new);
+    let mut new_dm_query = use_signal(String::new);
+    let mut new_dm_body = use_signal(String::new);
     let mut message_keep = use_signal(|| {
         state()
             .db
@@ -3127,8 +3226,9 @@ fn MessagesPage() -> Element {
                                 class: "h-10 min-w-0 flex-1 rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none",
                                 value: draft(),
                                 placeholder: "Direct message…",
-                                maxlength: "160",
-                                oninput: move |event: FormEvent| draft.set(event.value()),
+                                oninput: move |event: FormEvent| {
+                                    draft.set(clamp_mesh_text(event.value()));
+                                },
                                 onkeydown: {
                                     let peer = dm_pubkey.clone();
                                     move |event: KeyboardEvent| {
@@ -3173,13 +3273,16 @@ fn MessagesPage() -> Element {
                                 "Send"
                             }
                         }
+                        div { class: "mt-2 flex flex-wrap items-center justify-between gap-2",
+                            MeshTextCount { text: draft() }
+                            if !linked {
+                                p { class: "text-xs text-muted-foreground",
+                                    "Connect a companion to send direct messages."
+                                }
+                            }
+                        }
                         if !note().is_empty() {
                             p { class: "mt-2 text-xs text-amber-200", "{note}" }
-                        }
-                        if !linked {
-                            p { class: "mt-2 text-xs text-muted-foreground",
-                                "Connect a companion to send direct messages."
-                            }
                         }
                     }
                 }
@@ -3586,12 +3689,6 @@ fn MessagesPage() -> Element {
                         }
                         div {
                             class: "flex gap-2",
-                            EmojiPickerButton {
-                                disabled: !linked,
-                                on_pick: move |emoji: String| {
-                                    draft.set(append_emoji(&draft(), &emoji));
-                                },
-                            }
                             input {
                                 class: "h-10 min-w-0 flex-1 rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none",
                                 value: draft(),
@@ -3600,8 +3697,9 @@ fn MessagesPage() -> Element {
                                 } else {
                                     "Message this channel…"
                                 },
-                                maxlength: "160",
-                                oninput: move |event: FormEvent| draft.set(event.value()),
+                                oninput: move |event: FormEvent| {
+                                    draft.set(clamp_mesh_text(event.value()));
+                                },
                                 onkeydown: move |event: KeyboardEvent| {
                                     if event.key() == Key::Enter {
                                         event.prevent_default();
@@ -3617,6 +3715,13 @@ fn MessagesPage() -> Element {
                                             bump_refresh,
                                         );
                                     }
+                                },
+                            }
+                            EmojiPickerButton {
+                                disabled: !linked,
+                                align_end: true,
+                                on_pick: move |emoji: String| {
+                                    draft.set(append_emoji(&draft(), &emoji));
                                 },
                             }
                             Button {
@@ -3638,16 +3743,19 @@ fn MessagesPage() -> Element {
                                 if sending() { "Sending…" } else { "Send" }
                             }
                         }
-                        if !note().is_empty() {
-                            p {
-                                class: if note().starts_with("Send failed") || note().starts_with("Not sent") {
-                                    "mt-2 text-xs text-red-300"
-                                } else if note() == "Sending…" {
-                                    "mt-2 text-xs text-muted-foreground"
-                                } else {
-                                    "mt-2 text-xs text-sky-200"
-                                },
-                                "{note}"
+                        div { class: "mt-2 flex flex-wrap items-center justify-between gap-2",
+                            MeshTextCount { text: draft() }
+                            if !note().is_empty() {
+                                p {
+                                    class: if note().starts_with("Send failed") || note().starts_with("Not sent") {
+                                        "text-xs text-red-300"
+                                    } else if note() == "Sending…" {
+                                        "text-xs text-muted-foreground"
+                                    } else {
+                                        "text-xs text-sky-200"
+                                    },
+                                    "{note}"
+                                }
                             }
                         }
                     }
@@ -3957,59 +4065,285 @@ fn MessagesPage() -> Element {
                 }
             }
             } else {
-                if dm_threads.is_empty() {
-                    Card { title: "Direct messages".to_string(), icon: Some(IconName::Messages),
-                        p { class: "text-sm text-muted-foreground",
-                            "No direct message threads yet. When a node DMs this companion, or you send from Roster, the conversation appears here."
+                {
+                    let dm_contacts: Vec<(String, String)> = state()
+                        .db
+                        .list_nodes()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|node| node.enrollment != Enrollment::Hq)
+                        .map(|node| {
+                            let title = node_title(&node.name, &node.requested_name);
+                            (node.pubkey, title)
+                        })
+                        .collect();
+                    let default_dm_peer = dm_contacts
+                        .first()
+                        .map(|(pubkey, _)| pubkey.clone())
+                        .unwrap_or_default();
+                    let can_send_new = linked
+                        && !new_dm_peer().is_empty()
+                        && !new_dm_body().trim().is_empty();
+                    rsx! {
+                        div { class: "flex flex-wrap items-center justify-between gap-3",
+                            p { class: "text-sm text-muted-foreground",
+                                "Open a thread to reply, or start a new direct message."
+                            }
+                            Button {
+                                onclick: move |_| {
+                                    new_dm_body.set(String::new());
+                                    new_dm_query.set(String::new());
+                                    if new_dm_peer().is_empty() && !default_dm_peer.is_empty() {
+                                        new_dm_peer.set(default_dm_peer.clone());
+                                    }
+                                    note.set(String::new());
+                                    new_dm_open.set(true);
+                                },
+                                Icon { name: IconName::Messages, size: 14 }
+                                "Send direct message"
+                            }
                         }
-                    }
-                } else {
-                    div { class: "grid grid-cols-[repeat(auto-fill,minmax(16rem,1fr))] gap-3",
-                        for thread in dm_threads {
-                            {
-                                let pubkey = thread.pubkey.clone();
-                                let open_key = pubkey.clone();
-                                rsx! {
-                                    button {
-                                        key: "{pubkey}",
-                                        class: "flex flex-col rounded-lg border border-border bg-card p-4 text-left hover:bg-muted/40 cursor-pointer",
-                                        onclick: move |_| {
-                                            note.set(String::new());
-                                            draft.set(String::new());
-                                            selected_dm.set(Some(open_key.clone()));
-                                        },
-                                        div { class: "flex w-full items-start justify-between gap-2",
-                                            div { class: "flex min-w-0 items-center gap-2",
-                                                span { class: "text-muted-foreground",
-                                                    Icon { name: IconName::Messages, size: 18 }
+                        if dm_threads.is_empty() {
+                            Card { title: "Direct messages".to_string(), icon: Some(IconName::Messages),
+                                p { class: "text-sm text-muted-foreground",
+                                    "No threads yet. Use Send direct message, Message on Roster, or wait for a node to DM this companion."
+                                }
+                            }
+                        } else {
+                            div { class: "grid grid-cols-[repeat(auto-fill,minmax(16rem,1fr))] gap-3",
+                                for thread in dm_threads {
+                                    {
+                                        let pubkey = thread.pubkey.clone();
+                                        let open_key = pubkey.clone();
+                                        rsx! {
+                                            button {
+                                                key: "{pubkey}",
+                                                class: "flex flex-col rounded-lg border border-border bg-card p-4 text-left hover:bg-muted/40 cursor-pointer",
+                                                onclick: move |_| {
+                                                    note.set(String::new());
+                                                    draft.set(String::new());
+                                                    selected_dm.set(Some(open_key.clone()));
+                                                },
+                                                div { class: "flex w-full items-start justify-between gap-2",
+                                                    div { class: "flex min-w-0 items-center gap-2",
+                                                        span { class: "text-muted-foreground",
+                                                            Icon { name: IconName::Messages, size: 18 }
+                                                        }
+                                                        p { class: "truncate font-semibold", "{thread.name}" }
+                                                        if thread.unread_count > 0 {
+                                                            span { class: "channel-unread-badge",
+                                                                if thread.unread_count > 99 {
+                                                                    "99+"
+                                                                } else {
+                                                                    "{thread.unread_count}"
+                                                                }
+                                                            }
+                                                        }
+                                                    }
                                                 }
-                                                p { class: "truncate font-semibold", "{thread.name}" }
-                                                if thread.unread_count > 0 {
-                                                    span { class: "channel-unread-badge",
-                                                        if thread.unread_count > 99 {
-                                                            "99+"
-                                                        } else {
-                                                            "{thread.unread_count}"
+                                                p { class: "mt-1 font-mono text-xs text-muted-foreground",
+                                                    "{pubkey.chars().take(12).collect::<String>()}"
+                                                }
+                                                p { class: "mt-2 line-clamp-2 text-sm text-muted-foreground",
+                                                    if let Some(text) = thread.last_text.as_ref() {
+                                                        "{text}"
+                                                    } else {
+                                                        "No messages yet"
+                                                    }
+                                                }
+                                                div { class: "mt-auto flex w-full items-center justify-between pt-3 text-xs text-muted-foreground",
+                                                    span { "{thread.message_count} messages" }
+                                                    span { "{format_time(thread.last_message_at)}" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        SlideDownPanel {
+                            open: new_dm_open(),
+                            title: "Send direct message".to_string(),
+                            subtitle: "Pick a roster contact and write up to 160 bytes.".to_string(),
+                            icon: Some(IconName::Messages),
+                            on_close: move |_| {
+                                new_dm_open.set(false);
+                                new_dm_body.set(String::new());
+                                new_dm_query.set(String::new());
+                            },
+                            footer: rsx! {
+                                Button {
+                                    kind: ButtonKind::Ghost,
+                                    onclick: move |_| {
+                                        new_dm_open.set(false);
+                                        new_dm_body.set(String::new());
+                                        new_dm_query.set(String::new());
+                                    },
+                                    "Cancel"
+                                }
+                                Button {
+                                    disabled: !can_send_new,
+                                    onclick: move |_| {
+                                        let peer = new_dm_peer();
+                                        let body = new_dm_body().trim().to_string();
+                                        if peer.is_empty() || body.is_empty() {
+                                            return;
+                                        }
+                                        if body.len() > MESH_TEXT_MAX_BYTES {
+                                            note.set(format!(
+                                                "Mesh text is limited to {MESH_TEXT_MAX_BYTES} bytes."
+                                            ));
+                                            return;
+                                        }
+                                        match state().db.queue_text(&peer, &body, &body) {
+                                            Ok(_) => {
+                                                new_dm_open.set(false);
+                                                new_dm_body.set(String::new());
+                                                new_dm_query.set(String::new());
+                                                note.set(String::new());
+                                                draft.set(String::new());
+                                                selected_dm.set(Some(peer));
+                                                refresh.set(refresh() + 1);
+                                                status_note("Direct message queued for the companion.");
+                                            }
+                                            Err(err) => note.set(err.to_string()),
+                                        }
+                                    },
+                                    Icon { name: IconName::Messages, size: 14 }
+                                    "Send"
+                                }
+                            },
+                            div { class: "flex flex-col gap-3",
+                                if dm_contacts.is_empty() {
+                                    p { class: "text-sm text-muted-foreground",
+                                        "No roster contacts yet. Hear a node on the mesh first, then try again."
+                                    }
+                                } else {
+                                    {
+                                        let needle = new_dm_query();
+                                        let mut ranked: Vec<(i32, String, String, String)> =
+                                            dm_contacts
+                                                .iter()
+                                                .filter_map(|(pubkey, title)| {
+                                                    let short =
+                                                        pubkey.chars().take(12).collect::<String>();
+                                                    let score = fuzzy_score(
+                                                        &needle,
+                                                        &[title.as_str(), pubkey.as_str(), short.as_str()],
+                                                    )?;
+                                                    Some((
+                                                        score,
+                                                        pubkey.clone(),
+                                                        title.clone(),
+                                                        short,
+                                                    ))
+                                                })
+                                                .collect();
+                                        ranked.sort_by(|a, b| {
+                                            b.0.cmp(&a.0).then_with(|| a.2.cmp(&b.2))
+                                        });
+                                        ranked.truncate(16);
+                                        let selected_label = dm_contacts
+                                            .iter()
+                                            .find(|(pubkey, _)| *pubkey == new_dm_peer())
+                                            .map(|(pubkey, title)| {
+                                                format!(
+                                                    "{title} · {}",
+                                                    pubkey.chars().take(12).collect::<String>()
+                                                )
+                                            });
+                                        rsx! {
+                                            div {
+                                                label {
+                                                    class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground",
+                                                    "Contact"
+                                                }
+                                                TextInput {
+                                                    value: new_dm_query(),
+                                                    placeholder: "Fuzzy search name or pubkey…".to_string(),
+                                                    kind: "text".to_string(),
+                                                    oninput: move |event: FormEvent| {
+                                                        new_dm_query.set(event.value());
+                                                    },
+                                                }
+                                                if let Some(label) = selected_label {
+                                                    p { class: "mt-1 text-xs text-signal",
+                                                        "Selected: {label}"
+                                                    }
+                                                } else {
+                                                    p { class: "mt-1 text-xs text-muted-foreground",
+                                                        "Pick a contact from the matches below."
+                                                    }
+                                                }
+                                                div { class: "dm-contact-results",
+                                                    if ranked.is_empty() {
+                                                        p { class: "px-3 py-3 text-sm text-muted-foreground",
+                                                            "No roster matches for that search."
+                                                        }
+                                                    } else {
+                                                        for (_score, pubkey, title, short) in ranked {
+                                                            {
+                                                                let pick = pubkey.clone();
+                                                                let active = new_dm_peer() == pubkey;
+                                                                rsx! {
+                                                                    button {
+                                                                        key: "{pubkey}",
+                                                                        r#type: "button",
+                                                                        class: if active {
+                                                                            "dm-contact-option dm-contact-option-active"
+                                                                        } else {
+                                                                            "dm-contact-option"
+                                                                        },
+                                                                        onclick: move |_| {
+                                                                            new_dm_peer.set(pick.clone());
+                                                                        },
+                                                                        span { class: "dm-contact-option-title", "{title}" }
+                                                                        span { class: "dm-contact-option-key", "{short}" }
+                                                                    }
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 }
                                             }
                                         }
-                                        p { class: "mt-1 font-mono text-xs text-muted-foreground",
-                                            "{pubkey.chars().take(12).collect::<String>()}"
+                                    }
+                                }
+                                div {
+                                    label {
+                                        class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground",
+                                        "Message"
+                                    }
+                                    div { class: "flex items-stretch gap-2",
+                                        textarea {
+                                            class: "min-h-28 min-w-0 flex-1 rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground outline-none",
+                                            value: new_dm_body(),
+                                            placeholder: "Write a direct message…",
+                                            oninput: move |event: FormEvent| {
+                                                new_dm_body.set(clamp_mesh_text(event.value()));
+                                            },
                                         }
-                                        p { class: "mt-2 line-clamp-2 text-sm text-muted-foreground",
-                                            if let Some(text) = thread.last_text.as_ref() {
-                                                "{text}"
-                                            } else {
-                                                "No messages yet"
+                                        div { class: "flex flex-col justify-end",
+                                            EmojiPickerButton {
+                                                disabled: !linked || dm_contacts.is_empty(),
+                                                align_end: true,
+                                                on_pick: move |emoji: String| {
+                                                    new_dm_body.set(append_emoji(&new_dm_body(), &emoji));
+                                                },
                                             }
                                         }
-                                        div { class: "mt-auto flex w-full items-center justify-between pt-3 text-xs text-muted-foreground",
-                                            span { "{thread.message_count} messages" }
-                                            span { "{format_time(thread.last_message_at)}" }
-                                        }
                                     }
+                                    div { class: "mt-2 flex justify-end",
+                                        MeshTextCount { text: new_dm_body() }
+                                    }
+                                }
+                                if !linked {
+                                    p { class: "text-xs text-muted-foreground",
+                                        "Connect a companion to send direct messages."
+                                    }
+                                }
+                                if !note().is_empty() {
+                                    p { class: "text-xs text-amber-200", "{note}" }
                                 }
                             }
                         }
@@ -4809,6 +5143,7 @@ fn SettingsPage(
     radio: RadioStatus,
     prefer_about: bool,
     on_about_consumed: EventHandler<()>,
+    on_open_help: EventHandler<()>,
     on_request_pin: EventHandler<String>,
 ) -> Element {
     let saved_name = state().db.setting("radio_name").ok().flatten().unwrap_or_default();
@@ -5936,7 +6271,7 @@ fn SettingsPage(
                     div { class: "services-panel",
                         ToggleSwitch {
                             checked: svc_weather(),
-                            label: "Weather on bot-home channel".to_string(),
+                            label: format!("Weather on {0}", channel_info_name()),
                             hint: Some("#weather [zip] and #weather+ (multi-frame). Place lookups use Open-Meteo.".to_string()),
                             onchange: move |next| {
                                 svc_weather.set(next);
@@ -9663,6 +9998,14 @@ fn SettingsPage(
                 Card { title: "About".to_string(), icon: Some(IconName::Settings),
                     p { class: "mb-2 text-sm text-muted-foreground",
                         "Local offline emergency headquarters for MeshCore communities. No cloud account — this computer owns the radio link, roster, and bot."
+                    }
+                    div { class: "mb-3",
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| on_open_help.call(()),
+                            Icon { name: IconName::Help, size: 14 }
+                            "Open Help"
+                        }
                     }
                     {
                         let version = env!("CARGO_PKG_VERSION");

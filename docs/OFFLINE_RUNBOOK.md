@@ -39,4 +39,4 @@ One page for church / community volunteers running **Metis Mesh HQ** when the WA
 
 ## Help
 
-Settings → About shows version and the data folder path (`~/.MetisMeshHQ` on Linux). Source and issues: https://github.com/digitalexpl0it/MetisMesh-HQ
+Settings → About shows version and the data folder path (`~/.MetisMeshHQ` on Linux). The live database is `metis.db` with optional `metis.db-wal` / `metis.db-shm` sidecars — use Settings → Backup for a consistent copy, or include all three if you copy the folder cold. Source and issues: https://github.com/digitalexpl0it/MetisMesh-HQ

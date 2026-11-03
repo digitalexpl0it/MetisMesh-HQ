@@ -1166,6 +1166,40 @@ pub fn MeshTextCount(text: String) -> Element {
     }
 }
 
+const AVATAR_PALETTE_LEN: usize = 8;
+
+fn conversation_avatar_letter(label: &str) -> char {
+    label
+        .chars()
+        .find(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_uppercase())
+        .unwrap_or('#')
+}
+
+fn conversation_avatar_tone(seed: &str) -> usize {
+    let mut hash: u32 = 2_166_132_261;
+    for byte in seed.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    (hash as usize) % AVATAR_PALETTE_LEN
+}
+
+/// Generated circle avatar: first letter of `label`, color from stable `seed` hash.
+#[component]
+pub fn ConversationAvatar(label: String, seed: String) -> Element {
+    let letter = conversation_avatar_letter(&label);
+    let tone = conversation_avatar_tone(&seed);
+    rsx! {
+        span {
+            class: "messages-avatar messages-avatar-{tone}",
+            title: "{label}",
+            aria_hidden: "true",
+            "{letter}"
+        }
+    }
+}
+
 /// Smile button that opens a compact emoji popover for message composers.
 #[component]
 pub fn EmojiPickerButton(

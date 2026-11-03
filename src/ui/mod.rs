@@ -20,7 +20,7 @@ use dioxus::prelude::*;
 use crate::contact_qr::{
     contact_add_uri, enqueue_contact_qr, qr_data_url_from_file, qr_public_url,
 };
-use crate::db::{unix_now, Db, SystemChannel, TelemetryPoint};
+use crate::db::{unix_now, ChannelRow, Db, DmThreadRow, SystemChannel, TelemetryPoint};
 use crate::radio::{
     channel_sender_and_body, prefix_channel_sender, BleRadio, RadioHandle, RadioStatus,
 };
@@ -41,9 +41,10 @@ use weather_page::WeatherPage;
 use welcome::{reopen_welcome, welcome_is_done, WelcomeFinishAction, WelcomeWizard};
 use widgets::{
     append_emoji, clamp_mesh_text, heard_icon_class, heard_within_week, Badge, BarMix, BarMixRow,
-    BatteryChart, BatteryPill, BatterySample, Button, ButtonKind, Card, ChartSeries, Dialog,
-    EmojiPickerButton, LineChart, MeshTextCount, PageHeading, PinSlideDown, SelectInput,
-    SlideDownPanel, Sparkline, TextInput, Throbber, ToastHost, ToggleSwitch, MESH_TEXT_MAX_BYTES,
+    BatteryChart, BatteryPill, BatterySample, Button, ButtonKind, Card, ChartSeries,
+    ConversationAvatar, Dialog, EmojiPickerButton, LineChart, MeshTextCount, PageHeading,
+    PinSlideDown, SelectInput, SlideDownPanel, Sparkline, TextInput, Throbber, ToastHost,
+    ToggleSwitch, MESH_TEXT_MAX_BYTES,
 };
 
 /// Show a transient toast (and log it). Prefer this over inline amber labels.
@@ -427,6 +428,9 @@ pub fn App() -> Element {
     let mut toast_tick = use_signal(|| 0u32);
     let mut show_welcome = use_signal(|| !welcome_is_done());
     let mut open_about_after_welcome = use_signal(|| false);
+    // Bumped when the operator picks Messages in the nav so an open thread
+    // returns to the Channels / Direct root instead of staying drilled in.
+    let mut messages_root_epoch = use_signal(|| 0u64);
     let mut started = use_signal(|| false);
     // Reset shared main-pane scroll whenever the active page changes.
     use_effect(move || {
@@ -579,6 +583,10 @@ pub fn App() -> Element {
                                                                 "flex w-full cursor-pointer items-start gap-3 rounded-md px-3 py-2 text-left text-muted-foreground hover:bg-muted hover:text-foreground"
                                                             },
                                                             onclick: move |_| {
+                                                                if go == Page::Messages {
+                                                                    messages_root_epoch
+                                                                        .set(messages_root_epoch() + 1);
+                                                                }
                                                                 page.set(go);
                                                                 nav_query.set(String::new());
                                                             },
@@ -612,7 +620,10 @@ pub fn App() -> Element {
                                         active: page() == Page::Messages,
                                         badge: channel_unread,
                                         badge_alt: dm_unread,
-                                        onclick: move |_| page.set(Page::Messages),
+                                        onclick: move |_| {
+                                            messages_root_epoch.set(messages_root_epoch() + 1);
+                                            page.set(Page::Messages);
+                                        },
                                     }
                                     NavButton {
                                         icon: IconName::Inbox,
@@ -723,7 +734,8 @@ pub fn App() -> Element {
                             Page::Infrastructure => rsx! { InfraPage { radio: radio.clone() } },
                             Page::Roster => rsx! { RosterPage {} },
                             Page::Inbox => rsx! { InboxPage {} },
-                            Page::Messages => rsx! { MessagesPage {} },
+                            // key remounts Messages on each nav click → root list, no mid-render signal writes.
+                            Page::Messages => rsx! { MessagesPage { key: "{messages_root_epoch()}" } },
                             Page::Cli => rsx! { CliPage { radio: radio.clone() } },
                             Page::Help => rsx! { HelpPage {} },
                             Page::Settings => rsx! {
@@ -2243,6 +2255,7 @@ fn RosterPage() -> Element {
                     node.prefix.as_str(),
                     node.pubkey.as_str(),
                     node.enrollment.label(),
+                    roster_type_label(node.enrollment, node.contact_type),
                     contact_type_label(node.contact_type),
                 ],
             )?;
@@ -2324,7 +2337,12 @@ fn RosterPage() -> Element {
                             DetailField { label: "Enrollment".to_string(),
                                 Badge { tone: node.enrollment.as_str().to_string(), "{node.enrollment.label()}" }
                             }
-                            DetailField { label: "Type".to_string(), "{contact_type_label(node.contact_type)}" }
+                            DetailField { label: "Type".to_string(),
+                                ContactTypePill {
+                                    enrollment: node.enrollment,
+                                    contact_type: node.contact_type,
+                                }
+                            }
                             DetailField { label: "Prefix".to_string(),
                                 span { class: "font-mono text-xs", "{node.prefix}" }
                             }
@@ -2526,7 +2544,12 @@ fn RosterPage() -> Element {
                                     div { class: "font-mono text-xs text-muted-foreground", "{node.prefix}" }
                                 }
                                 td { class: "px-3 py-2", Badge { tone: node.enrollment.as_str().to_string(), "{node.enrollment.label()}" } }
-                                td { class: "px-3 py-2 text-muted-foreground", "{contact_type_label(node.contact_type)}" }
+                                td { class: "px-3 py-2",
+                                    ContactTypePill {
+                                        enrollment: node.enrollment,
+                                        contact_type: node.contact_type,
+                                    }
+                                }
                                 td { class: "px-3 py-2", "{format_time(node.last_heard)}" }
                                 td { class: "px-3 py-2",
                                     span {
@@ -2931,6 +2954,36 @@ fn contact_type_label(value: u8) -> &'static str {
     }
 }
 
+fn roster_type_key(enrollment: Enrollment, contact_type: u8) -> &'static str {
+    if enrollment == Enrollment::Hq {
+        return "hq";
+    }
+    match contact_type {
+        1 => "chat",
+        2 => "repeater",
+        3 => "room",
+        4 => "sensor",
+        _ => "node",
+    }
+}
+
+fn roster_type_label(enrollment: Enrollment, contact_type: u8) -> &'static str {
+    if enrollment == Enrollment::Hq {
+        "HQ"
+    } else {
+        contact_type_label(contact_type)
+    }
+}
+
+#[component]
+fn ContactTypePill(enrollment: Enrollment, contact_type: u8) -> Element {
+    let key = roster_type_key(enrollment, contact_type);
+    let label = roster_type_label(enrollment, contact_type);
+    rsx! {
+        span { class: "roster-type-pill roster-type-pill-{key}", "{label}" }
+    }
+}
+
 #[component]
 fn InboxPage() -> Element {
     let mut refresh = use_signal(|| 0u64);
@@ -3054,10 +3107,329 @@ fn InboxPage() -> Element {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+enum MessagesRailConfirm {
+    DeleteChannel(String),
+    ClearDm { pubkey: String, name: String },
+}
+
+/// Confirm before dropping channel + DM traffic from a contact.
+#[component]
+fn BlockContactDialog(
+    target: Signal<Option<(String, String)>>,
+    on_blocked: EventHandler<()>,
+) -> Element {
+    let mut target = target;
+    let open = target().is_some();
+    let label = target()
+        .as_ref()
+        .map(|(_, name)| name.clone())
+        .unwrap_or_default();
+    rsx! {
+        Dialog {
+            open: open,
+            title: "Block contact".to_string(),
+            on_close: move |_| target.set(None),
+            div { class: "flex flex-col gap-3",
+                p { class: "text-sm text-muted-foreground",
+                    "Block {label}? Future channel and direct messages from them will be dropped. Enrollment stays the same — you can unblock under Messages → Blocked."
+                }
+                div { class: "flex justify-end gap-2",
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        onclick: move |_| target.set(None),
+                        "Cancel"
+                    }
+                    Button {
+                        kind: ButtonKind::Danger,
+                        onclick: move |_| {
+                            let Some((pubkey, name)) = target() else { return; };
+                            match state().db.block_node(&pubkey, &name) {
+                                Ok(()) => {
+                                    target.set(None);
+                                    status_note(format!(
+                                        "Blocked {name}. Future messages from them are dropped."
+                                    ));
+                                    on_blocked.call(());
+                                }
+                                Err(err) => {
+                                    target.set(None);
+                                    status_note(err.to_string());
+                                }
+                            }
+                        },
+                        Icon { name: IconName::Ban, size: 14 }
+                        "Block"
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn MessagesRail(
+    channels: Vec<ChannelRow>,
+    dm_threads: Vec<DmThreadRow>,
+    selected_channel: Option<String>,
+    selected_dm: Option<String>,
+    on_select_channel: EventHandler<String>,
+    on_select_dm: EventHandler<String>,
+    on_delete_channel: EventHandler<String>,
+    on_clear_dm: EventHandler<(String, String)>,
+) -> Element {
+    rsx! {
+        nav { class: "messages-rail", aria_label: "Conversations",
+            div { class: "messages-rail-section",
+                p { class: "messages-rail-section-title", "Channels" }
+                div { class: "messages-rail-list",
+                    if channels.is_empty() {
+                        p { class: "messages-rail-empty", "No channels yet." }
+                    }
+                    for channel in channels.iter() {
+                        {
+                            let name = channel.name.clone();
+                            let active = selected_channel.as_ref() == Some(&name);
+                            let can_delete = !name.eq_ignore_ascii_case("Public")
+                                && !state().db.is_reserved_private(&name);
+                            let unread = channel.unread_count;
+                            let select_name = name.clone();
+                            let delete_name = name.clone();
+                            rsx! {
+                                div {
+                                    key: "ch-{name}",
+                                    class: if active {
+                                        "messages-rail-item messages-rail-item-active"
+                                    } else {
+                                        "messages-rail-item"
+                                    },
+                                    button {
+                                        r#type: "button",
+                                        class: "messages-rail-item-main",
+                                        onclick: move |_| on_select_channel.call(select_name.clone()),
+                                        ConversationAvatar {
+                                            label: name.clone(),
+                                            seed: name.clone(),
+                                        }
+                                        span { class: "messages-rail-item-label", "{name}" }
+                                        if unread > 0 {
+                                            span { class: "channel-unread-badge",
+                                                if unread > 99 { "99+" } else { "{unread}" }
+                                            }
+                                        }
+                                    }
+                                    if can_delete {
+                                        button {
+                                            r#type: "button",
+                                            class: "messages-rail-item-action",
+                                            title: "Delete channel",
+                                            onclick: move |event: MouseEvent| {
+                                                event.prevent_default();
+                                                event.stop_propagation();
+                                                on_delete_channel.call(delete_name.clone());
+                                            },
+                                            Icon { name: IconName::Trash, size: 12 }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            div { class: "messages-rail-section",
+                p { class: "messages-rail-section-title", "Direct messages" }
+                div { class: "messages-rail-list",
+                    if dm_threads.is_empty() {
+                        p { class: "messages-rail-empty", "No direct threads yet." }
+                    }
+                    for thread in dm_threads.iter() {
+                        {
+                            let pubkey = thread.pubkey.clone();
+                            let label = thread.name.clone();
+                            let active = selected_dm.as_ref() == Some(&pubkey);
+                            let unread = thread.unread_count;
+                            let select_key = pubkey.clone();
+                            let clear_key = pubkey.clone();
+                            let clear_label = label.clone();
+                            rsx! {
+                                div {
+                                    key: "dm-{pubkey}",
+                                    class: if active {
+                                        "messages-rail-item messages-rail-item-active"
+                                    } else {
+                                        "messages-rail-item"
+                                    },
+                                    button {
+                                        r#type: "button",
+                                        class: "messages-rail-item-main",
+                                        onclick: move |_| on_select_dm.call(select_key.clone()),
+                                        ConversationAvatar {
+                                            label: label.clone(),
+                                            seed: pubkey.clone(),
+                                        }
+                                        span { class: "messages-rail-item-label", "{label}" }
+                                        if unread > 0 {
+                                            span { class: "channel-unread-badge",
+                                                if unread > 99 { "99+" } else { "{unread}" }
+                                            }
+                                        }
+                                    }
+                                    button {
+                                        r#type: "button",
+                                        class: "messages-rail-item-action",
+                                        title: "Clear conversation",
+                                        onclick: move |event: MouseEvent| {
+                                            event.prevent_default();
+                                            event.stop_propagation();
+                                            on_clear_dm.call((clear_key.clone(), clear_label.clone()));
+                                        },
+                                        Icon { name: IconName::Trash, size: 12 }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn MessagesThreadShell(
+    channels: Vec<ChannelRow>,
+    dm_threads: Vec<DmThreadRow>,
+    selected_channel: Option<String>,
+    selected_dm: Option<String>,
+    linked: bool,
+    on_select_channel: EventHandler<String>,
+    on_select_dm: EventHandler<String>,
+    on_after_delete_channel: EventHandler<String>,
+    on_after_clear_dm: EventHandler<String>,
+    children: Element,
+) -> Element {
+    let mut confirm = use_signal(|| None::<MessagesRailConfirm>);
+    rsx! {
+        div { class: "messages-shell hq-page-fill",
+            MessagesRail {
+                channels: channels,
+                dm_threads: dm_threads,
+                selected_channel: selected_channel.clone(),
+                selected_dm: selected_dm.clone(),
+                on_select_channel: move |name| on_select_channel.call(name),
+                on_select_dm: move |pubkey| on_select_dm.call(pubkey),
+                on_delete_channel: move |name| {
+                    confirm.set(Some(MessagesRailConfirm::DeleteChannel(name)));
+                },
+                on_clear_dm: move |(pubkey, name)| {
+                    confirm.set(Some(MessagesRailConfirm::ClearDm { pubkey, name }));
+                },
+            }
+            div { class: "messages-convo",
+                {children}
+            }
+            Dialog {
+                open: confirm().is_some(),
+                title: match confirm() {
+                    Some(MessagesRailConfirm::DeleteChannel(_)) => "Delete channel".into(),
+                    Some(MessagesRailConfirm::ClearDm { .. }) => "Clear conversation".into(),
+                    None => String::new(),
+                },
+                on_close: move |_| confirm.set(None),
+                div { class: "flex flex-col gap-3",
+                    p { class: "text-sm text-muted-foreground",
+                        match confirm() {
+                            Some(MessagesRailConfirm::DeleteChannel(name)) => format!(
+                                "Remove {name} from HQ? System channels cannot be deleted. The companion slot will be cleared when connected."
+                            ),
+                            Some(MessagesRailConfirm::ClearDm { name, .. }) => format!(
+                                "Delete all direct messages with {name}? The node stays on the roster."
+                            ),
+                            None => String::new(),
+                        }
+                    }
+                    div { class: "flex justify-end gap-2",
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| confirm.set(None),
+                            "Cancel"
+                        }
+                        Button {
+                            kind: ButtonKind::Danger,
+                            onclick: move |_| {
+                                match confirm() {
+                                    Some(MessagesRailConfirm::DeleteChannel(name)) => {
+                                        match state().db.soft_delete_channel(&name) {
+                                            Ok(slot) => {
+                                                if linked {
+                                                    status_note(format!(
+                                                        "Deleted {name}. Clearing companion slot {slot}…"
+                                                    ));
+                                                    let reply = state().radio.clear_channel(slot as u8);
+                                                    let label = name.clone();
+                                                    spawn(async move {
+                                                        match reply.await {
+                                                            Ok(Ok(())) => status_note(format!(
+                                                                "Deleted {label} and cleared companion slot."
+                                                            )),
+                                                            Ok(Err(err)) => status_note(format!(
+                                                                "Deleted {label} locally, but companion clear failed: {err}"
+                                                            )),
+                                                            Err(_) => status_note(format!(
+                                                                "Deleted {label} locally; companion clear did not finish."
+                                                            )),
+                                                        }
+                                                    });
+                                                } else {
+                                                    status_note(format!(
+                                                        "Deleted {name}. Connect the companion to clear it from the radio too."
+                                                    ));
+                                                }
+                                                confirm.set(None);
+                                                on_after_delete_channel.call(name);
+                                            }
+                                            Err(err) => {
+                                                confirm.set(None);
+                                                status_note(err.to_string());
+                                            }
+                                        }
+                                    }
+                                    Some(MessagesRailConfirm::ClearDm { pubkey, name }) => {
+                                        match state().db.clear_dm_thread(&pubkey) {
+                                            Ok(_) => {
+                                                confirm.set(None);
+                                                status_note(format!("Cleared conversation with {name}."));
+                                                on_after_clear_dm.call(pubkey);
+                                            }
+                                            Err(err) => {
+                                                confirm.set(None);
+                                                status_note(err.to_string());
+                                            }
+                                        }
+                                    }
+                                    None => {}
+                                }
+                            },
+                            Icon { name: IconName::Trash, size: 14 }
+                            match confirm() {
+                                Some(MessagesRailConfirm::ClearDm { .. }) => "Clear",
+                                _ => "Delete",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn MessagesPage() -> Element {
     // Select by name, not slot: radio sync remaps slots and used to make a
     // click on Public open METIS-INFO when both rows shared slot 1.
+    // Parent remounts this page (key = messages_root_epoch) when the nav
+    // Messages item is clicked, which returns to the root list cleanly.
     let mut messages_tab = use_signal(|| "channels".to_string());
     let mut selected_channel = use_signal(|| None::<String>);
     let mut selected_dm = use_signal(|| None::<String>);
@@ -3075,6 +3447,7 @@ fn MessagesPage() -> Element {
     let mut new_dm_peer = use_signal(String::new);
     let mut new_dm_query = use_signal(String::new);
     let mut new_dm_body = use_signal(String::new);
+    let mut block_confirm = use_signal(|| None::<(String, String)>);
     let mut message_keep = use_signal(|| {
         state()
             .db
@@ -3086,7 +3459,8 @@ fn MessagesPage() -> Element {
         refresh_started.set(true);
         spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+                // Keep this gentle: full channel paints are expensive in the WebView.
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
                 refresh.set(refresh() + 1);
             }
         });
@@ -3157,7 +3531,43 @@ fn MessagesPage() -> Element {
         }
         let dm_key = dm_pubkey.clone();
         return rsx! {
-            div { class: "hq-page-fill mx-auto max-w-4xl gap-3",
+            MessagesThreadShell {
+                channels: channels.clone(),
+                dm_threads: dm_threads.clone(),
+                selected_channel: None,
+                selected_dm: Some(dm_pubkey.clone()),
+                linked,
+                on_select_channel: move |name: String| {
+                    selected_dm.set(None);
+                    selected_channel.set(Some(name));
+                    draft.set(String::new());
+                    reply_target.set(None);
+                    read_session.set(None);
+                    note.set(String::new());
+                },
+                on_select_dm: move |pubkey: String| {
+                    selected_channel.set(None);
+                    selected_dm.set(Some(pubkey));
+                    draft.set(String::new());
+                    reply_target.set(None);
+                    note.set(String::new());
+                },
+                on_after_delete_channel: move |name: String| {
+                    if selected_channel() == Some(name) {
+                        selected_channel.set(None);
+                        reply_target.set(None);
+                        read_session.set(None);
+                        draft.set(String::new());
+                    }
+                    refresh.set(refresh() + 1);
+                },
+                on_after_clear_dm: move |pubkey: String| {
+                    if selected_dm() == Some(pubkey) {
+                        selected_dm.set(None);
+                        draft.set(String::new());
+                    }
+                    refresh.set(refresh() + 1);
+                },
                 div { class: "flex flex-wrap items-center justify-between gap-3",
                     div { class: "flex min-w-0 items-center gap-3",
                         Button {
@@ -3178,6 +3588,26 @@ fn MessagesPage() -> Element {
                             }
                         }
                     }
+                    {
+                        let peer = dm_pubkey.clone();
+                        let label = title.clone();
+                        let already = state().db.is_blocked(&peer).unwrap_or(false);
+                        rsx! {
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                disabled: already,
+                                onclick: move |_| {
+                                    block_confirm.set(Some((peer.clone(), label.clone())));
+                                },
+                                Icon { name: IconName::Ban, size: 14 }
+                                if already { "Blocked" } else { "Block" }
+                            }
+                        }
+                    }
+                }
+                BlockContactDialog {
+                    target: block_confirm,
+                    on_blocked: move |_| refresh.set(refresh() + 1),
                 }
                 div { class: "flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border bg-card",
                     div { class: "min-h-0 flex-1 space-y-3 overflow-auto p-4",
@@ -3390,8 +3820,53 @@ fn MessagesPage() -> Element {
                 }
             });
         };
+        // One blocked-set load per paint — never resolve roster per message (that froze hover).
+        let blocked_set: std::collections::HashSet<String> = state()
+            .db
+            .list_blocked_nodes()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| row.pubkey)
+            .collect();
         return rsx! {
-            div { class: "hq-page-fill mx-auto max-w-4xl gap-3",
+            MessagesThreadShell {
+                channels: channels.clone(),
+                dm_threads: dm_threads.clone(),
+                selected_channel: Some(channel.name.clone()),
+                selected_dm: None,
+                linked,
+                on_select_channel: move |name: String| {
+                    selected_dm.set(None);
+                    selected_channel.set(Some(name));
+                    draft.set(String::new());
+                    reply_target.set(None);
+                    read_session.set(None);
+                    note.set(String::new());
+                },
+                on_select_dm: move |pubkey: String| {
+                    selected_channel.set(None);
+                    selected_dm.set(Some(pubkey));
+                    draft.set(String::new());
+                    reply_target.set(None);
+                    read_session.set(None);
+                    note.set(String::new());
+                },
+                on_after_delete_channel: move |name: String| {
+                    if selected_channel() == Some(name) {
+                        selected_channel.set(None);
+                        reply_target.set(None);
+                        read_session.set(None);
+                        draft.set(String::new());
+                    }
+                    refresh.set(refresh() + 1);
+                },
+                on_after_clear_dm: move |pubkey: String| {
+                    if selected_dm() == Some(pubkey) {
+                        selected_dm.set(None);
+                        draft.set(String::new());
+                    }
+                    refresh.set(refresh() + 1);
+                },
                 div { class: "flex flex-wrap items-center justify-between gap-3",
                     div { class: "flex min-w-0 items-center gap-3",
                         Button {
@@ -3495,22 +3970,28 @@ fn MessagesPage() -> Element {
                                     sender_name: device_name.clone(),
                                     text: bubble_text.clone(),
                                 };
+                                // Use stored pubkey only at paint time; name→key resolve is click-only.
+                                let known_pk = message.sender_pubkey.clone();
+                                let already_blocked = known_pk
+                                    .as_ref()
+                                    .is_some_and(|pk| blocked_set.contains(pk));
+                                let block_label = device_name.clone();
                                 rsx! {
                                     div {
                                         id: "msg-anchor-{message.id}",
                                         key: "{message.id}",
                                         class: if outgoing {
-                                            "group relative ml-auto flex max-w-[85%] flex-col items-end gap-1"
+                                            "ml-auto flex max-w-[85%] flex-col items-end gap-1"
                                         } else {
-                                            "group relative mr-auto flex max-w-[85%] flex-col items-start gap-1"
+                                            "mr-auto flex max-w-[85%] flex-col items-start gap-1"
                                         },
                                         div {
                                             class: if outgoing {
-                                                "min-w-[14rem] rounded-2xl rounded-br-md border border-sky-500/30 bg-[#16324f] px-3 py-2.5 text-sm text-sky-50"
+                                                "message-bubble min-w-[14rem] rounded-2xl rounded-br-md border border-sky-500/30 bg-[#16324f] px-3 py-2.5 text-sm text-sky-50"
                                             } else if emergency {
-                                                "min-w-[14rem] rounded-2xl rounded-bl-md border border-signal/30 bg-background/80 px-3 py-2.5 text-sm"
+                                                "message-bubble min-w-[14rem] rounded-2xl rounded-bl-md border border-signal/30 bg-background/80 px-3 py-2.5 text-sm"
                                             } else {
-                                                "min-w-[14rem] rounded-2xl rounded-bl-md bg-muted px-3 py-2.5 text-sm"
+                                                "message-bubble min-w-[14rem] rounded-2xl rounded-bl-md bg-muted px-3 py-2.5 text-sm"
                                             },
                                             div { class: "mb-2 flex items-start justify-between gap-2",
                                                 span {
@@ -3570,63 +4051,102 @@ fn MessagesPage() -> Element {
                                                     }
                                                 }
                                             }
-                                        }
-                                        div {
-                                            class: if outgoing {
-                                                "pointer-events-none absolute -top-3 right-1 z-10 opacity-0 transition group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100"
-                                            } else {
-                                                "pointer-events-none absolute -top-3 left-1 z-10 opacity-0 transition group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100"
-                                            },
-                                            div { class: "flex items-center gap-0.5 rounded-md border border-border bg-card/95 p-0.5 shadow-lg backdrop-blur-sm",
-                                                button {
-                                                    class: "inline-flex h-7 items-center gap-1 rounded px-2 text-[0.7rem] text-foreground hover:bg-muted cursor-pointer",
-                                                    title: "Reply",
-                                                    onclick: {
-                                                        let target = target.clone();
-                                                        move |_| {
-                                                            reply_target.set(Some(MessageReplyTarget {
-                                                                id: target.id,
-                                                                sender_name: target.sender_name.clone(),
-                                                                text: String::new(),
-                                                            }));
-                                                            note.set(String::new());
+                                            div {
+                                                class: if outgoing {
+                                                    "message-action-wrap message-action-wrap-end"
+                                                } else {
+                                                    "message-action-wrap message-action-wrap-start"
+                                                },
+                                                div { class: "message-action-bar",
+                                                    button {
+                                                        class: "message-action-btn message-action-btn-reply",
+                                                        title: "Reply",
+                                                        onclick: {
+                                                            let target = target.clone();
+                                                            move |_| {
+                                                                reply_target.set(Some(MessageReplyTarget {
+                                                                    id: target.id,
+                                                                    sender_name: target.sender_name.clone(),
+                                                                    text: String::new(),
+                                                                }));
+                                                                note.set(String::new());
+                                                            }
+                                                        },
+                                                        Icon { name: IconName::Reply, size: 12 }
+                                                        "Reply"
+                                                    }
+                                                    button {
+                                                        class: "message-action-btn message-action-btn-quote",
+                                                        title: "Reply with quote",
+                                                        onclick: {
+                                                            let target = target.clone();
+                                                            move |_| {
+                                                                reply_target.set(Some(target.clone()));
+                                                                note.set(String::new());
+                                                            }
+                                                        },
+                                                        Icon { name: IconName::Quote, size: 12 }
+                                                        "Quote"
+                                                    }
+                                                    button {
+                                                        class: "message-action-btn message-action-btn-copy",
+                                                        title: "Copy message",
+                                                        onclick: {
+                                                            let text = message.text.clone();
+                                                            move |_| {
+                                                                let escaped = text
+                                                                    .replace('\\', "\\\\")
+                                                                    .replace('`', "\\`")
+                                                                    .replace('$', "\\$");
+                                                                let script = format!(
+                                                                    "navigator.clipboard.writeText(`{escaped}`).catch(() => {{}})"
+                                                                );
+                                                                document::eval(&script);
+                                                                note.set("Copied message text.".into());
+                                                            }
+                                                        },
+                                                        Icon { name: IconName::Copy, size: 12 }
+                                                        "Copy"
+                                                    }
+                                                    if !outgoing {
+                                                        {
+                                                            let resolve_name = device_name.clone();
+                                                            let known = known_pk.clone();
+                                                            rsx! {
+                                                                button {
+                                                                    class: "message-action-btn message-action-btn-block",
+                                                                    title: if already_blocked {
+                                                                        "Already blocked"
+                                                                    } else {
+                                                                        "Block this contact — drop future messages"
+                                                                    },
+                                                                    disabled: already_blocked,
+                                                                    onclick: move |_| {
+                                                                        let pubkey = known.clone().or_else(|| {
+                                                                            state()
+                                                                                .db
+                                                                                .unique_node_by_display_name(&resolve_name)
+                                                                                .ok()
+                                                                                .flatten()
+                                                                                .map(|n| n.pubkey)
+                                                                        });
+                                                                        let Some(pubkey) = pubkey else {
+                                                                            status_note(format!(
+                                                                                "Can't block {resolve_name} — no unique roster match yet."
+                                                                            ));
+                                                                            return;
+                                                                        };
+                                                                        block_confirm.set(Some((
+                                                                            pubkey,
+                                                                            block_label.clone(),
+                                                                        )));
+                                                                    },
+                                                                    Icon { name: IconName::Ban, size: 12 }
+                                                                    if already_blocked { "Blocked" } else { "Block" }
+                                                                }
+                                                            }
                                                         }
-                                                    },
-                                                    Icon { name: IconName::Reply, size: 12 }
-                                                    "Reply"
-                                                }
-                                                button {
-                                                    class: "inline-flex h-7 items-center gap-1 rounded px-2 text-[0.7rem] text-foreground hover:bg-muted cursor-pointer",
-                                                    title: "Reply with quote",
-                                                    onclick: {
-                                                        let target = target.clone();
-                                                        move |_| {
-                                                            reply_target.set(Some(target.clone()));
-                                                            note.set(String::new());
-                                                        }
-                                                    },
-                                                    Icon { name: IconName::Quote, size: 12 }
-                                                    "Quote"
-                                                }
-                                                button {
-                                                    class: "inline-flex h-7 items-center gap-1 rounded px-2 text-[0.7rem] text-foreground hover:bg-muted cursor-pointer",
-                                                    title: "Copy message",
-                                                    onclick: {
-                                                        let text = message.text.clone();
-                                                        move |_| {
-                                                            let escaped = text
-                                                                .replace('\\', "\\\\")
-                                                                .replace('`', "\\`")
-                                                                .replace('$', "\\$");
-                                                            let script = format!(
-                                                                "navigator.clipboard.writeText(`{escaped}`).catch(() => {{}})"
-                                                            );
-                                                            document::eval(&script);
-                                                            note.set("Copied message text.".into());
-                                                        }
-                                                    },
-                                                    Icon { name: IconName::Copy, size: 12 }
-                                                    "Copy"
+                                                    }
                                                 }
                                             }
                                         }
@@ -3760,11 +4280,20 @@ fn MessagesPage() -> Element {
                         }
                     }
                 }
+                BlockContactDialog {
+                    target: block_confirm,
+                    on_blocked: move |_| refresh.set(refresh() + 1),
+                }
             }
         };
     }
 
-    let on_channels_tab = messages_tab() == "channels";
+    let messages_tab_now = messages_tab();
+    let on_channels_tab = messages_tab_now == "channels";
+    let on_direct_tab = messages_tab_now == "direct";
+    let on_blocked_tab = messages_tab_now == "blocked";
+    let blocked_nodes = state().db.list_blocked_nodes().unwrap_or_default();
+    let blocked_count = blocked_nodes.len();
     rsx! {
         div { class: "mx-auto flex max-w-6xl flex-col gap-4",
             PageHeading { icon: IconName::Messages, title: "Messages".to_string(),
@@ -3787,7 +4316,7 @@ fn MessagesPage() -> Element {
                     }
                 }
                 button {
-                    class: if !on_channels_tab { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
+                    class: if on_direct_tab { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
                     onclick: move |_| {
                         messages_tab.set("direct".into());
                         selected_channel.set(None);
@@ -3797,6 +4326,22 @@ fn MessagesPage() -> Element {
                         if dm_unread_total > 0 {
                             span { class: "channel-unread-badge",
                                 if dm_unread_total > 99 { "99+" } else { "{dm_unread_total}" }
+                            }
+                        }
+                    }
+                }
+                button {
+                    class: if on_blocked_tab { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
+                    onclick: move |_| {
+                        messages_tab.set("blocked".into());
+                        selected_channel.set(None);
+                        selected_dm.set(None);
+                    },
+                    span { class: "inline-flex items-center gap-2",
+                        "Blocked"
+                        if blocked_count > 0 {
+                            span { class: "channel-unread-badge",
+                                if blocked_count > 99 { "99+" } else { "{blocked_count}" }
                             }
                         }
                     }
@@ -4064,7 +4609,7 @@ fn MessagesPage() -> Element {
                     }
                 }
             }
-            } else {
+            } else if on_direct_tab {
                 {
                     let dm_contacts: Vec<(String, String)> = state()
                         .db
@@ -4344,6 +4889,49 @@ fn MessagesPage() -> Element {
                                 }
                                 if !note().is_empty() {
                                     p { class: "text-xs text-amber-200", "{note}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                Card { title: "Blocked contacts".to_string(), icon: Some(IconName::Ban),
+                    p { class: "mb-3 text-sm text-muted-foreground",
+                        "Blocked nodes are dropped on receive for both channels and DMs. Enrollment is unchanged — unblock here to hear them again."
+                    }
+                    if blocked_nodes.is_empty() {
+                        p { class: "text-sm text-muted-foreground",
+                            "No blocked contacts. Use Block on an incoming channel message (when the sender can be resolved), or Block from an open DM."
+                        }
+                    } else {
+                        div { class: "flex flex-col gap-2",
+                            for row in blocked_nodes {
+                                {
+                                    let pubkey = row.pubkey.clone();
+                                    let short = pubkey.chars().take(12).collect::<String>();
+                                    rsx! {
+                                        div {
+                                            key: "{pubkey}",
+                                            class: "flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-background/60 px-3 py-2",
+                                            div { class: "min-w-0",
+                                                p { class: "truncate text-sm font-medium", "{row.label}" }
+                                                p { class: "font-mono text-xs text-muted-foreground", "{short}" }
+                                            }
+                                            Button {
+                                                kind: ButtonKind::Ghost,
+                                                onclick: move |_| {
+                                                    match state().db.unblock_node(&pubkey) {
+                                                        Ok(()) => {
+                                                            status_note("Contact unblocked.");
+                                                            refresh.set(refresh() + 1);
+                                                        }
+                                                        Err(err) => status_note(err.to_string()),
+                                                    }
+                                                },
+                                                "Unblock"
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

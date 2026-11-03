@@ -4429,10 +4429,19 @@ async fn handle_event(
                 .unwrap_or_else(|| format!("ch{}", message.channel_idx));
             // Channel frames have no pubkey — bind only when the display name
             // matches exactly one roster node (never guess on collisions).
-            let resolved = sender_name
-                .as_ref()
-                .and_then(|name| db.unique_node_by_name(name).ok().flatten());
+            let resolved = sender_name.as_ref().and_then(|name| {
+                db.unique_node_by_display_name(name)
+                    .ok()
+                    .flatten()
+                    .or_else(|| db.unique_node_by_name(name).ok().flatten())
+            });
             let sender_pubkey = resolved.as_ref().map(|n| n.pubkey.clone());
+            if let Some(ref pubkey) = sender_pubkey {
+                if db.is_blocked(pubkey).unwrap_or(false) {
+                    hq_log!(debug, "dropping channel RX from blocked {pubkey}");
+                    return Ok(());
+                }
+            }
             let display = if let Some(name) = sender_name.as_ref() {
                 format!("{name}: {body}")
             } else {
@@ -4552,6 +4561,12 @@ async fn on_direct(
         decide(&command, current, unique)
     };
     let pubkey = unique.then(|| matches[0].pubkey.clone());
+    if let Some(ref key) = pubkey {
+        if db.is_blocked(key).unwrap_or(false) {
+            hq_log!(debug, "dropping direct RX from blocked {key}");
+            return Ok(());
+        }
+    }
     let hops = hop_count_from_path_len(message.path_len).map(i64::from);
     let raw = json!({
         "prefix": prefix,

@@ -107,7 +107,7 @@ pub struct NodeRow {
     pub last_radio_id: Option<i64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DmThreadRow {
     pub pubkey: String,
     pub name: String,
@@ -366,6 +366,11 @@ impl Db {
                 notes TEXT NOT NULL DEFAULT '',
                 added_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS blocked_nodes (
+                pubkey TEXT PRIMARY KEY,
+                label TEXT NOT NULL DEFAULT '',
+                added_at INTEGER NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS positions_pubkey_time ON positions(pubkey, at);",
         );
         let _ = conn.execute_batch(
@@ -555,6 +560,11 @@ impl Db {
             CREATE TABLE IF NOT EXISTS bot_handled (
                 id TEXT PRIMARY KEY,
                 at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS blocked_nodes (
+                pubkey TEXT PRIMARY KEY,
+                label TEXT NOT NULL DEFAULT '',
+                added_at INTEGER NOT NULL
             );",
         );
         Ok(())
@@ -2169,6 +2179,29 @@ impl Db {
         self.set_setting(&Self::dm_last_read_key(pubkey), &message_id.to_string())
     }
 
+    /// Delete all direct messages for a peer and clear the last-read cursor.
+    /// Does not change enrollment or roster membership.
+    pub fn clear_dm_thread(&self, pubkey: &str) -> Result<u64> {
+        let key = pubkey.trim();
+        if key.is_empty() {
+            return Err(Error::Msg("Direct message peer required.".into()));
+        }
+        let conn = self.lock();
+        let deleted = conn.execute(
+            "DELETE FROM messages WHERE kind = 'direct' AND sender_pubkey = ?1",
+            params![key],
+        )? as u64;
+        if deleted > 0 {
+            conn.execute(
+                "DELETE FROM paths WHERE message_id IS NOT NULL AND message_id NOT IN (SELECT id FROM messages)",
+                [],
+            )?;
+        }
+        drop(conn);
+        let _ = self.set_setting(&Self::dm_last_read_key(key), "0");
+        Ok(deleted)
+    }
+
     pub fn list_dm_threads(&self) -> Result<Vec<DmThreadRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
@@ -2430,6 +2463,33 @@ impl Db {
                     || n.requested_name
                         .as_deref()
                         .is_some_and(|r| r.eq_ignore_ascii_case(needle))
+            })
+            .collect();
+        Ok(if matches.len() == 1 {
+            Some(matches.into_iter().next().unwrap())
+        } else {
+            None
+        })
+    }
+
+    /// Like [`Self::unique_node_by_name`], but also matches after stripping emoji /
+    /// punctuation (`PlumbHunter🤠` ↔ `PlumbHunter`). Still requires exactly one hit.
+    pub fn unique_node_by_display_name(&self, name: &str) -> Result<Option<NodeRow>> {
+        if let Some(node) = self.unique_node_by_name(name)? {
+            return Ok(Some(node));
+        }
+        let needle = ascii_alnum_key(name);
+        if needle.is_empty() {
+            return Ok(None);
+        }
+        let matches: Vec<_> = self
+            .list_nodes()?
+            .into_iter()
+            .filter(|n| {
+                ascii_alnum_key(&n.name) == needle
+                    || n.requested_name
+                        .as_deref()
+                        .is_some_and(|r| ascii_alnum_key(r) == needle)
             })
             .collect();
         Ok(if matches.len() == 1 {
@@ -3366,6 +3426,68 @@ impl Db {
         Ok(())
     }
 
+    pub fn list_blocked_nodes(&self) -> Result<Vec<BlockedNodeRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT pubkey, label, added_at FROM blocked_nodes ORDER BY added_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(BlockedNodeRow {
+                pubkey: row.get(0)?,
+                label: row.get(1)?,
+                added_at: row.get(2)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::from)
+    }
+
+    pub fn is_blocked(&self, pubkey: &str) -> Result<bool> {
+        let key = pubkey.trim();
+        if key.is_empty() {
+            return Ok(false);
+        }
+        let conn = self.lock();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM blocked_nodes WHERE pubkey = ?1",
+            params![key],
+            |row| row.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Drop future channel/DM traffic from this pubkey (does not change enrollment).
+    pub fn block_node(&self, pubkey: &str, label: &str) -> Result<()> {
+        let key = pubkey.trim();
+        if key.is_empty() {
+            return Err(Error::Msg("Missing pubkey.".into()));
+        }
+        let name = label.trim();
+        let fallback = key.chars().take(12).collect::<String>();
+        let stored = if name.is_empty() { fallback.as_str() } else { name };
+        self.lock().execute(
+            "INSERT INTO blocked_nodes (pubkey, label, added_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(pubkey) DO UPDATE SET label = excluded.label",
+            params![key, stored, unix_now()],
+        )?;
+        self.audit("block", key, stored)
+    }
+
+    pub fn unblock_node(&self, pubkey: &str) -> Result<()> {
+        let key = pubkey.trim();
+        if key.is_empty() {
+            return Err(Error::Msg("Missing pubkey.".into()));
+        }
+        let n = self
+            .lock()
+            .execute("DELETE FROM blocked_nodes WHERE pubkey = ?1", params![key])?;
+        if n == 0 {
+            return Err(Error::Msg("That contact is not blocked.".into()));
+        }
+        self.audit("unblock", key, "")
+    }
+
     pub fn update_tracked_notes(&self, pubkey: &str, notes: &str) -> Result<()> {
         let n = self.lock().execute(
             "UPDATE tracked_nodes SET notes = ?2 WHERE pubkey = ?1",
@@ -3628,6 +3750,13 @@ pub struct TrackedNodeRow {
     pub added_at: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockedNodeRow {
+    pub pubkey: String,
+    pub label: String,
+    pub added_at: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct ClaimedInfraRow {
     pub pubkey: String,
@@ -3731,6 +3860,15 @@ pub fn normalize_channel_name(raw: &str) -> Option<String> {
         return None;
     }
     Some(name.to_string())
+}
+
+/// Lowercase ASCII letters/digits only — strip emoji and punctuation for name match.
+fn ascii_alnum_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
 }
 
 pub fn unix_now() -> i64 {
@@ -3895,6 +4033,11 @@ CREATE TABLE IF NOT EXISTS tracked_nodes (
     pubkey TEXT PRIMARY KEY,
     label TEXT NOT NULL DEFAULT '',
     notes TEXT NOT NULL DEFAULT '',
+    added_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS blocked_nodes (
+    pubkey TEXT PRIMARY KEY,
+    label TEXT NOT NULL DEFAULT '',
     added_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS claimed_infra (
@@ -4330,6 +4473,41 @@ mod tests {
         assert_eq!(threads[0].unread_count, 1);
         db.set_dm_last_read("aa11", id2).unwrap();
         assert_eq!(db.total_dm_unread().unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn block_node_drops_and_unblocks() {
+        let (db, _, dir) = test_db();
+        assert!(!db.is_blocked("aa11").unwrap());
+        db.block_node("aa11", "Ada").unwrap();
+        assert!(db.is_blocked("aa11").unwrap());
+        assert_eq!(db.list_blocked_nodes().unwrap()[0].label, "Ada");
+        db.unblock_node("aa11").unwrap();
+        assert!(!db.is_blocked("aa11").unwrap());
+        assert!(db.list_blocked_nodes().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clear_dm_thread_removes_messages_and_unread() {
+        let (db, _, dir) = test_db();
+        db.upsert_contact("aa11", "Ada", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), true, None)
+            .unwrap();
+        let raw = json!({});
+        let id1 = db
+            .insert_message(
+                "direct", "rx", Some("aa11"), "aa11", None, Some(1), 10, "hi", "hi",
+                None, None, &raw, "received", None,
+            )
+            .unwrap()
+            .unwrap();
+        db.set_dm_last_read("aa11", id1).unwrap();
+        assert_eq!(db.list_dm_threads().unwrap().len(), 1);
+        assert_eq!(db.clear_dm_thread("aa11").unwrap(), 1);
+        assert!(db.list_dm_threads().unwrap().is_empty());
+        assert!(db.list_dm_messages("aa11", 50).unwrap().is_empty());
+        assert_eq!(db.dm_last_read("aa11").unwrap(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

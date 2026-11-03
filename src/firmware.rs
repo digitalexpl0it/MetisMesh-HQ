@@ -1561,6 +1561,35 @@ fn find_tool(names: &[&str]) -> Option<PathBuf> {
                 }
             }
         }
+        // pipx / pip --user bins (desktop PATH often omits ~/.local/bin).
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            let local = PathBuf::from(&home).join(".local").join("bin").join(name);
+            if local.is_file() {
+                return Some(local);
+            }
+            #[cfg(windows)]
+            {
+                let exe = PathBuf::from(&home).join(".local").join("bin").join(format!("{name}.exe"));
+                if exe.is_file() {
+                    return Some(exe);
+                }
+                if let Ok(appdata) = std::env::var("APPDATA") {
+                    if let Ok(entries) = std::fs::read_dir(PathBuf::from(appdata).join("Python")) {
+                        for entry in entries.flatten() {
+                            let scripts = entry.path().join("Scripts");
+                            let candidate = scripts.join(name);
+                            if candidate.is_file() {
+                                return Some(candidate);
+                            }
+                            let candidate_exe = scripts.join(format!("{name}.exe"));
+                            if candidate_exe.is_file() {
+                                return Some(candidate_exe);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     None
 }

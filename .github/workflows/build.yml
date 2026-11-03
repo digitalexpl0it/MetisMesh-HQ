@@ -23,9 +23,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Linux
-            os: ubuntu-24.04
-            artifact: metis-mesh-hq-linux-x86_64
+          - name: Ubuntu 26.04
+            os: ubuntu-26.04
+            artifact: metis-mesh-hq-ubuntu-26.04-x86_64
             binary: target/release/metis-mesh-hq
           - name: Windows
             os: windows-latest

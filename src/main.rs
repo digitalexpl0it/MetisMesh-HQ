@@ -6,6 +6,7 @@ mod brand;
 mod contact_export;
 mod contact_qr;
 mod db;
+mod deps;
 mod firmware;
 mod map_tiles;
 mod mesh_regions;
@@ -63,6 +64,10 @@ fn main() {
     firmware::spawn_sync_loop(db.clone());
     install(AppState { db, secrets, radio });
     hq_log!(info, "Metis Mesh HQ started · data {}", data.display());
+    if let Err(err) = deps::ensure_critical() {
+        eprintln!("{err}");
+        std::process::exit(1);
+    }
     launch_window();
 }
 

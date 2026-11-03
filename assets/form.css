@@ -973,6 +973,224 @@ option {
   background: rgba(61, 214, 140, 0.22);
 }
 
+/* First-run welcome wizard */
+.welcome-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.25rem;
+  background: rgba(8, 10, 14, 0.82);
+  backdrop-filter: blur(6px);
+}
+
+.welcome-card {
+  width: min(36rem, 100%);
+  max-height: min(90vh, 44rem);
+  overflow: auto;
+  padding: 1.35rem 1.4rem 1.25rem;
+  border-radius: 0.65rem;
+  border: 1px solid #ffffff24;
+  background: #12171e;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+}
+
+.welcome-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.welcome-logo {
+  height: 2.25rem;
+  max-width: 10rem;
+  object-fit: contain;
+  object-position: left;
+}
+
+.welcome-app-name {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #f4f4f5;
+}
+
+.welcome-title {
+  margin: 0 0 0.55rem;
+  font-size: 1.35rem;
+  font-weight: 650;
+  color: #fafafa;
+}
+
+.welcome-copy {
+  margin: 0 0 0.75rem;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  color: #d4d4d8;
+}
+
+.welcome-copy-muted {
+  color: #9aa3af;
+  font-size: 0.82rem;
+}
+
+.welcome-note {
+  margin: 0.5rem 0 0.85rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 0.4rem;
+  border: 1px solid #ffffff18;
+  background: #0b1220;
+  color: #c4c4cc;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.welcome-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  align-items: center;
+}
+
+.welcome-dep-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.welcome-dep-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.65rem 0.7rem;
+  border-radius: 0.45rem;
+  border: 1px solid #ffffff18;
+  background: #0d1218;
+}
+
+.welcome-dep-main {
+  display: flex;
+  gap: 0.65rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.welcome-dep-ok,
+.welcome-dep-miss {
+  flex-shrink: 0;
+  margin-top: 0.15rem;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.welcome-dep-ok { color: #3dd68c; }
+.welcome-dep-miss { color: #fbbf24; }
+
+.welcome-dep-label {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #f4f4f5;
+}
+
+.welcome-dep-detail,
+.welcome-dep-hint {
+  margin: 0.2rem 0 0;
+  font-size: 0.75rem;
+  color: #9aa3af;
+  line-height: 1.35;
+}
+
+.welcome-transport-tabs {
+  display: flex;
+  gap: 0.35rem;
+  margin: 0.75rem 0;
+}
+
+.welcome-transport {
+  flex: 1;
+  padding: 0.45rem 0.5rem;
+  border-radius: 0.4rem;
+  border: 1px solid #ffffff18;
+  background: transparent;
+  color: #d4d4d8;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.welcome-transport.active {
+  border-color: rgba(61, 214, 140, 0.45);
+  background: rgba(61, 214, 140, 0.12);
+  color: #f4f4f5;
+}
+
+.welcome-companion-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.welcome-tcp-grid {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.5rem;
+}
+
+.welcome-device-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  max-height: 12rem;
+  overflow: auto;
+}
+
+.welcome-device {
+  text-align: left;
+  padding: 0.5rem 0.65rem;
+  border-radius: 0.4rem;
+  border: 1px solid #ffffff18;
+  background: #0b1220;
+  color: #e4e4e7;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.welcome-device.active {
+  border-color: rgba(61, 214, 140, 0.5);
+  background: rgba(61, 214, 140, 0.1);
+}
+
+.about-meta {
+  display: grid;
+  gap: 0.65rem;
+  margin: 0.75rem 0 1rem;
+}
+
+.about-row {
+  display: grid;
+  grid-template-columns: 7.5rem minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  align-items: start;
+  font-size: 0.85rem;
+}
+
+.about-key {
+  color: #9aa3af;
+}
+
+.about-val {
+  color: #f4f4f5;
+  word-break: break-word;
+}
+
+
 .map-legend {
   position: absolute;
   left: 0.75rem;

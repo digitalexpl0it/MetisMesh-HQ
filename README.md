@@ -20,12 +20,12 @@ Communities stay separate until both headquarters agree to link. That bridge is 
 
 ## Install (standalone binary)
 
-GitHub Actions builds Linux (`x86_64`), Windows (`x86_64`), and macOS (`aarch64`) on every push to `main` and on version tags.
+GitHub Actions builds Ubuntu 26.04 (`x86_64`), Windows (`x86_64`), and macOS (`aarch64`) on every push to `main` and on version tags. Linux support is Ubuntu 26.04+ only.
 
 1. Download the archive for your OS from a [GitHub Release](https://github.com/digitalexpl0it/MetisMesh-HQ/releases) (preferred), or from the Actions tab artifacts on `main`.
 2. Unpack into a folder you own (for example `~/metis-hq/` or `C:\MetisHQ\`).
 3. Run the binary from that folder:
-   - Linux / macOS: `./metis-mesh-hq-linux-x86_64` (or the macOS name from the archive)
+   - Ubuntu / macOS: `./metis-mesh-hq-ubuntu-26.04-x86_64` (or the macOS name from the archive)
    - Windows: double-click or run `metis-mesh-hq-windows-x86_64.exe`
 4. First launch creates the per-user data folder (SQLite, firmware cache, backups, QR files):
    - Linux: `~/.MetisMeshHQ`
@@ -34,19 +34,23 @@ GitHub Actions builds Linux (`x86_64`), Windows (`x86_64`), and macOS (`aarch64`
    
    Override with `METIS_DATA_DIR=/path/to/dir` if you want the data elsewhere.
 
+5. First launch opens a **setup wizard**: checks Bluetooth / USB serial access, can install missing pieces (may prompt for admin / `pkexec`), and optionally connects a companion (BLE / USB / TCP). You can skip and finish later under Settings → Connect. Settings → About has version, license, GitHub, and data-folder path; **Run setup again** reopens the wizard.
+
 ### Runtime libraries
 
-- **Linux (Debian / Ubuntu):** install the WebKitGTK / GTK runtimes (not only the `-dev` packages used to compile):
+Critical UI libraries are probed before the window opens. On Debian/Ubuntu the app will try `pkexec apt-get install` for WebKitGTK/GTK if they are missing; on Windows it can download the WebView2 Evergreen bootstrapper. You can still install manually:
+
+- **Linux (Ubuntu 26.04+):**
 
   ```bash
   sudo apt-get update
   sudo apt-get install -y \
-    libwebkit2gtk-4.1-0 libgtk-3-0 \
+    libwebkit2gtk-4.1-0 libgtk-3-0t64 \
     libayatana-appindicator3-1 libsoup-3.0-0 \
     libjavascriptcoregtk-4.1-0 libdbus-1-3
   ```
 
-  Bluetooth needs BlueZ. USB serial needs ordinary udev/device access (often membership in `dialout`).
+  Bluetooth needs BlueZ. USB serial needs membership in `dialout` (log out/in after the wizard adds you).
 
 - **Windows:** Edge WebView2 runtime (usually already present on current Windows 10/11).
 - **macOS:** system WebKit (no extra install). First open may need right-click → Open if Gatekeeper blocks an unsigned binary.
@@ -69,7 +73,9 @@ That runs the Build workflow and attaches `metis-mesh-hq-*-v0.1.0.tar.gz` / `.zi
 - A MeshCore companion radio nearby
 - On Linux: WebKitGTK 4.1, GTK 3, D-Bus, and libudev headers (see below)
 
-### Linux packages (Debian / Ubuntu)
+### Linux packages (Ubuntu 26.04+)
+
+Supported Linux baseline is **Ubuntu 26.04** (and newer). Build deps:
 
 ```bash
 sudo apt-get update

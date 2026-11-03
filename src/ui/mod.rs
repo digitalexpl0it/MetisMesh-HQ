@@ -5,6 +5,7 @@ mod map_host;
 mod map_page;
 mod tracker_page;
 mod weather_page;
+mod welcome;
 mod widgets;
 
 use std::sync::{Arc, OnceLock};
@@ -34,6 +35,7 @@ use infra_page::InfraPage;
 use map_page::MapPage;
 use tracker_page::TrackerPage;
 use weather_page::WeatherPage;
+use welcome::{reopen_welcome, welcome_is_done, WelcomeFinishAction, WelcomeWizard};
 use widgets::{
     append_emoji, heard_icon_class, heard_within_week, Badge, BarMix, BarMixRow, BatteryChart,
     BatteryPill, BatterySample, Button, ButtonKind, Card, ChartSeries, Dialog, EmojiPickerButton,
@@ -257,6 +259,12 @@ const NAV_SEARCH_INDEX: &[NavSearchEntry] = &[
             "Device",
             "Flasher",
             "Diagnostics",
+            "About",
+            "version",
+            "license",
+            "GitHub",
+            "setup wizard",
+            "welcome",
             // HQ subtabs
             "Connect",
             "Preferences",
@@ -377,6 +385,8 @@ pub fn App() -> Element {
     let mut pin_form_key = use_signal(|| 0u64);
     let mut tick = use_signal(|| 0u64);
     let mut toast_tick = use_signal(|| 0u32);
+    let mut show_welcome = use_signal(|| !welcome_is_done());
+    let mut open_about_after_welcome = use_signal(|| false);
     let mut started = use_signal(|| false);
     if !started() {
         started.set(true);
@@ -422,6 +432,10 @@ pub fn App() -> Element {
     let expanded = nav_open();
     let nav_width = if expanded { "w-56" } else { "w-[4.5rem]" };
     let brand_logo = crate::brand::custom_logo_url(&state().db);
+    // Settings → "Run setup again" clears welcome_done; reopen the overlay.
+    if !welcome_is_done() && !show_welcome() {
+        show_welcome.set(true);
+    }
 
     rsx! {
         document::Title { "Metis Mesh HQ" }
@@ -657,6 +671,8 @@ pub fn App() -> Element {
                             Page::Settings => rsx! {
                                 SettingsPage {
                                     radio: radio.clone(),
+                                    prefer_about: open_about_after_welcome(),
+                                    on_about_consumed: move |_| open_about_after_welcome.set(false),
                                     on_request_pin: move |target: String| {
                                         let target = target.trim().to_string();
                                         if target.is_empty() {
@@ -673,6 +689,30 @@ pub fn App() -> Element {
                             },
                         }
                     }
+                }
+            }
+            if show_welcome() {
+                WelcomeWizard {
+                    radio: radio.clone(),
+                    on_finished: move |action| {
+                        show_welcome.set(false);
+                        if action == WelcomeFinishAction::OpenAbout {
+                            open_about_after_welcome.set(true);
+                            page.set(Page::Settings);
+                        }
+                    },
+                    on_request_pin: move |target: String| {
+                        let target = target.trim().to_string();
+                        if target.is_empty() {
+                            pin_error.set("Enter the Bluetooth name or address first.".into());
+                            pin_target.set(String::new());
+                        } else {
+                            pin_error.set(String::new());
+                            pin_target.set(target);
+                        }
+                        pin_form_key.set(pin_form_key() + 1);
+                        pin_open.set(true);
+                    },
                 }
             }
             ToastHost { tick: toast_frame }
@@ -4398,6 +4438,7 @@ enum SettingsTab {
     Device,
     Flasher,
     Diagnostics,
+    About,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -4639,7 +4680,12 @@ fn flip_boolish_var(value: &str) -> String {
 }
 
 #[component]
-fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Element {
+fn SettingsPage(
+    radio: RadioStatus,
+    prefer_about: bool,
+    on_about_consumed: EventHandler<()>,
+    on_request_pin: EventHandler<String>,
+) -> Element {
     let saved_name = state().db.setting("radio_name").ok().flatten().unwrap_or_default();
     let saved_hq = state()
         .db
@@ -4752,6 +4798,12 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
     let mut preset_open = use_signal(|| false);
     let mut preset_query = use_signal(String::new);
     let mut settings_tab = use_signal(|| SettingsTab::Hq);
+    let mut about_applied = use_signal(|| false);
+    if prefer_about && !about_applied() {
+        settings_tab.set(SettingsTab::About);
+        about_applied.set(true);
+        on_about_consumed.call(());
+    }
     let mut hq_tab = use_signal(|| HqTab::Connect);
     let mut services_tab = use_signal(|| ServicesTab::Site);
     let mut usb_scanned = use_signal(|| false);
@@ -5187,6 +5239,12 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                     onclick: move |_| settings_tab.set(SettingsTab::Diagnostics),
                     Icon { name: IconName::Messages, size: 14 }
                     "Diagnostics"
+                }
+                button {
+                    class: if settings_tab() == SettingsTab::About { "settings-tab settings-tab-active" } else { "settings-tab" },
+                    onclick: move |_| settings_tab.set(SettingsTab::About),
+                    Icon { name: IconName::Radio, size: 14 }
+                    "About"
                 }
             }
             if settings_tab() == SettingsTab::Hq {
@@ -9259,6 +9317,77 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                     p { class: "mt-2 text-xs text-muted-foreground",
                         "{log_rows.len()} shown · filter {crate::app_log::LogFilter::from_value(&log_filter()).label()}"
                         if log_autoscroll() { " · auto-scroll on" } else { " · auto-scroll off" }
+                    }
+                }
+            }
+
+            if settings_tab() == SettingsTab::About {
+                Card { title: "About".to_string(), icon: Some(IconName::Settings),
+                    p { class: "mb-2 text-sm text-muted-foreground",
+                        "Local offline emergency headquarters for MeshCore communities. No cloud account — this computer owns the radio link, roster, and bot."
+                    }
+                    {
+                        let version = env!("CARGO_PKG_VERSION");
+                        let data_path = crate::data_dir().display().to_string();
+                        let data_path_copy = data_path.clone();
+                        let repo = "https://github.com/digitalexpl0it/MetisMesh-HQ";
+                        rsx! {
+                            div { class: "about-meta",
+                                div { class: "about-row",
+                                    span { class: "about-key", "App" }
+                                    span { class: "about-val", "Metis Mesh HQ" }
+                                    span {}
+                                }
+                                div { class: "about-row",
+                                    span { class: "about-key", "Version" }
+                                    span { class: "about-val", "{version}" }
+                                    span {}
+                                }
+                                div { class: "about-row",
+                                    span { class: "about-key", "Author" }
+                                    span { class: "about-val", "DigitalExpl0it" }
+                                    span {}
+                                }
+                                div { class: "about-row",
+                                    span { class: "about-key", "License" }
+                                    span { class: "about-val", "MIT" }
+                                    span {}
+                                }
+                                div { class: "about-row",
+                                    span { class: "about-key", "Source" }
+                                    span { class: "about-val", "{repo}" }
+                                    Button {
+                                        kind: ButtonKind::Ghost,
+                                        onclick: move |_| copy_text_to_clipboard(repo),
+                                        Icon { name: IconName::Copy, size: 12 }
+                                        "Copy"
+                                    }
+                                }
+                                div { class: "about-row",
+                                    span { class: "about-key", "Data folder" }
+                                    span { class: "about-val", "{data_path}" }
+                                    Button {
+                                        kind: ButtonKind::Ghost,
+                                        onclick: move |_| copy_text_to_clipboard(&data_path_copy),
+                                        Icon { name: IconName::Copy, size: 12 }
+                                        "Copy"
+                                    }
+                                }
+                            }
+                            p { class: "mb-3 text-xs text-muted-foreground",
+                                "Credits: Dioxus, MapLibre, MeshCore / meshcore-rs."
+                            }
+                            div { class: "flex flex-wrap gap-2",
+                                Button {
+                                    kind: ButtonKind::Ghost,
+                                    onclick: move |_| {
+                                        reopen_welcome();
+                                        status_note("Setup wizard will open again.");
+                                    },
+                                    "Run setup again"
+                                }
+                            }
+                        }
                     }
                 }
             }

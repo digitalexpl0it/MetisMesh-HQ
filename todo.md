@@ -89,6 +89,7 @@ Mirror MeshCore community firmware while online; flash over USB when the interne
 HQ must run offline as a normal desktop app on operator laptops — no Docker, no cloud runtime. One program per OS.
 
 - [x] **H1** Standalone executables for **Linux**, **Windows**, and **macOS** (`dx` / Cargo desktop release builds); ship with bundled MapLibre assets; document install + first-run `data/` location
+- [x] **H1b** First-run welcome wizard (critical/soft deps install + optional companion connect) and Settings → About (version, author, MIT, GitHub, data path)
 - [ ] **H2** Smoke each target: window opens, SQLite creates under `data/`, BLE/USB paths degrade cleanly when hardware is absent
 - [ ] **H3** SQLite durability: confirm **WAL** journal mode on open (already set in `Db::open`); keep WAL + checkpoint behavior healthy under multi-radio ingest so the DB does not choke or lock up; note `-wal`/`-shm` beside the main file in backup docs
 

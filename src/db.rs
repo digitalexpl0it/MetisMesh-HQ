@@ -144,7 +144,8 @@ pub struct ChannelRow {
     pub role: String,
     pub active: bool,
     pub message_count: i64,
-    /// Messages newer than `channel_last_read_{slot}`; 0 if never opened.
+    /// Received (`rx`) messages newer than `channel_last_read_{slot}`; 0 if never opened.
+    /// Outbound HQ/bot posts do not count.
     pub unread_count: i64,
     pub last_message_at: Option<i64>,
     pub last_text: Option<String>,
@@ -1610,6 +1611,7 @@ impl Db {
                         SELECT COUNT(*) FROM messages m
                         WHERE m.kind = 'channel'
                           AND m.channel_idx = c.slot
+                          AND m.direction = 'rx'
                           AND m.id > COALESCE(
                             (SELECT CAST(s.value AS INTEGER) FROM settings s
                              WHERE s.key = 'channel_last_read_' || c.slot),
@@ -2169,6 +2171,7 @@ impl Db {
                         SELECT COUNT(*) FROM messages m3
                         WHERE m3.kind = 'direct'
                           AND m3.sender_pubkey = m.sender_pubkey
+                          AND m3.direction = 'rx'
                           AND m3.id > COALESCE(
                             (SELECT CAST(s.value AS INTEGER) FROM settings s
                              WHERE s.key = 'dm_last_read_' || lower(m.sender_pubkey)),
@@ -2179,7 +2182,9 @@ impl Db {
                     END
              FROM messages m
              LEFT JOIN nodes n ON n.pubkey = m.sender_pubkey
-             WHERE m.kind = 'direct' AND m.sender_pubkey IS NOT NULL AND m.sender_pubkey != ''
+             WHERE m.kind = 'direct'
+               AND m.direction = 'rx'
+               AND m.sender_pubkey IS NOT NULL AND m.sender_pubkey != ''
              GROUP BY m.sender_pubkey
              ORDER BY MAX(m.received_at) DESC, m.sender_pubkey",
         )?;
@@ -4175,6 +4180,43 @@ mod tests {
             .unwrap();
         assert_eq!(db.count_unnoticed_nodes().unwrap(), 0);
         assert!(db.get_node("aa11").unwrap().unwrap().noticed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn channel_unread_ignores_outbound_tx() {
+        let (db, _, dir) = test_db();
+        db.ensure_channel_row("Public", 0, "public", "general").unwrap();
+        let raw = json!({});
+        let rx1 = db
+            .insert_message(
+                "channel", "rx", Some("aa11"), "aa11", Some(0), Some(1), 10, "hello", "hello",
+                None, None, &raw, "received", None,
+            )
+            .unwrap()
+            .unwrap();
+        let _tx = db
+            .insert_message(
+                "channel", "tx", None, "HQ", Some(0), Some(0), 11, "bot reply", "bot reply",
+                None, None, &raw, "sent", None,
+            )
+            .unwrap()
+            .unwrap();
+        let rx2 = db
+            .insert_message(
+                "channel", "rx", Some("bb22"), "bb22", Some(0), Some(1), 12, "again", "again",
+                None, None, &raw, "received", None,
+            )
+            .unwrap()
+            .unwrap();
+        db.set_channel_last_read(0, rx1).unwrap();
+        let channels = db.list_channels().unwrap();
+        let public = channels.iter().find(|c| c.slot == 0).unwrap();
+        // Only rx2 is unread — the HQ TX between them must not inflate the badge.
+        assert_eq!(public.unread_count, 1, "tx must not count as unread");
+        assert_eq!(db.total_channel_unread().unwrap(), 1);
+        db.set_channel_last_read(0, rx2).unwrap();
+        assert_eq!(db.total_channel_unread().unwrap(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -33,6 +33,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 ureq = { version = "2", default-features = false, features = ["tls"] }
 uuid = "1"
 webpki-roots = "0.26"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bluer = { version = "0.17", features = ["bluetoothd"] }

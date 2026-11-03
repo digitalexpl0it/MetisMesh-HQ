@@ -294,7 +294,7 @@ pub fn CliPage(radio: RadioStatus) -> Element {
 
     rsx! {
         div { class: "mx-auto flex h-full min-h-0 max-w-4xl flex-col gap-3",
-            PageHeading { icon: IconName::Messages, title: "Device CLI".to_string(),
+            PageHeading { icon: IconName::Terminal, title: "Device CLI".to_string(),
                 "Run MeshCore CLI on this companion or a remote repeater, room / data server, or sensor. Command list follows the target role."
             }
             if !linked {

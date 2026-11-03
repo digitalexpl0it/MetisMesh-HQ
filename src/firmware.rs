@@ -150,8 +150,12 @@ pub struct IndexAsset {
     pub tag: String,
     pub name: String,
     pub bytes: u64,
+    /// Lowercase hex SHA-256 of the on-disk file (verified when possible).
     pub sha256: String,
     pub path: String,
+    /// True when `sha256` matched GitHub's release-asset `digest` at sync time.
+    #[serde(default)]
+    pub github_verified: bool,
 }
 
 impl FirmwareIndex {
@@ -175,13 +179,10 @@ impl FirmwareIndex {
         (count, bytes)
     }
 
-    fn has_asset(&self, tag: &str, name: &str, bytes: u64) -> bool {
-        self.assets.iter().any(|a| {
-            a.tag == tag
-                && a.name == name
-                && a.bytes == bytes
-                && Path::new(&a.path).is_file()
-        })
+    fn find_asset(&self, tag: &str, name: &str) -> Option<&IndexAsset> {
+        self.assets
+            .iter()
+            .find(|a| a.tag == tag && a.name == name)
     }
 }
 
@@ -812,6 +813,9 @@ struct GhAsset {
     name: String,
     size: u64,
     browser_download_url: String,
+    /// GitHub release-asset digest, e.g. `sha256:<64-hex>` (null on older assets).
+    #[serde(default)]
+    digest: Option<String>,
 }
 
 /// Latest then previous release tags per family (companion / repeater / room-server).
@@ -914,11 +918,72 @@ fn fetch_meshcore_releases() -> Result<BTreeMap<String, Vec<GhRelease>>, String>
     Ok(by_family)
 }
 
-fn download_file(url: &str, dest: &Path, expected_size: Option<u64>) -> Result<String, String> {
+/// Parse GitHub's `digest` field (`sha256:<hex>`) into lowercase hex without prefix.
+fn parse_github_digest(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let hex = if let Some(rest) = raw
+        .strip_prefix("sha256:")
+        .or_else(|| raw.strip_prefix("SHA256:"))
+    {
+        rest.trim()
+    } else {
+        raw
+    };
+    if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(hex.to_ascii_lowercase())
+}
+
+fn sha_eq(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+const DOWNLOAD_ATTEMPTS: u32 = 3;
+
+/// Download to `dest`, verifying size and optional SHA-256. Retries on corruption/mismatch.
+fn download_file(
+    url: &str,
+    dest: &Path,
+    expected_size: Option<u64>,
+    expected_sha256: Option<&str>,
+) -> Result<String, String> {
+    let mut last_err = String::new();
+    for attempt in 1..=DOWNLOAD_ATTEMPTS {
+        match download_file_once(url, dest, expected_size, expected_sha256) {
+            Ok(sha) => return Ok(sha),
+            Err(err) => {
+                hq_log!(
+                    warn,
+                    "firmware download attempt {attempt}/{DOWNLOAD_ATTEMPTS} failed for {}: {err}",
+                    dest.display()
+                );
+                let _ = fs::remove_file(dest);
+                let tmp = dest.with_extension("partial");
+                let _ = fs::remove_file(&tmp);
+                last_err = err;
+            }
+        }
+    }
+    Err(format!(
+        "Download failed after {DOWNLOAD_ATTEMPTS} attempts: {last_err}"
+    ))
+}
+
+fn download_file_once(
+    url: &str,
+    dest: &Path,
+    expected_size: Option<u64>,
+    expected_sha256: Option<&str>,
+) -> Result<String, String> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let tmp = dest.with_extension("partial");
+    let _ = fs::remove_file(&tmp);
     let resp = ureq::get(url)
         .set("User-Agent", USER_AGENT)
         .timeout(Duration::from_secs(600))
@@ -943,13 +1008,21 @@ fn download_file(url: &str, dest: &Path, expected_size: Option<u64>) -> Result<S
         if written != expected {
             let _ = fs::remove_file(&tmp);
             return Err(format!(
-                "Size mismatch for {}: got {written}, expected {expected}",
-                dest.display()
+                "incomplete or corrupt (size): got {written}, expected {expected}"
+            ));
+        }
+    }
+    let sha = hex::encode(hasher.finalize());
+    if let Some(expected) = expected_sha256 {
+        if !sha_eq(&sha, expected) {
+            let _ = fs::remove_file(&tmp);
+            return Err(format!(
+                "corrupt (sha256 mismatch): got {sha}, expected {expected}"
             ));
         }
     }
     fs::rename(&tmp, dest).map_err(|e| e.to_string())?;
-    Ok(hex::encode(hasher.finalize()))
+    Ok(sha)
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -964,6 +1037,47 @@ fn sha256_file(path: &Path) -> Result<String, String> {
         hasher.update(&buf[..n]);
     }
     Ok(hex::encode(hasher.finalize()))
+}
+
+/// Returns `(sha256, github_verified)` when the on-disk file matches size + trusted hashes.
+fn verify_local_file(
+    path: &Path,
+    expected_bytes: Option<u64>,
+    github_sha: Option<&str>,
+    manifest_sha: Option<&str>,
+) -> Result<(String, bool), String> {
+    if !path.is_file() {
+        return Err("file missing".into());
+    }
+    let meta = fs::metadata(path).map_err(|e| e.to_string())?;
+    let len = meta.len();
+    if let Some(expected) = expected_bytes {
+        if len != expected {
+            return Err(format!(
+                "incomplete or corrupt (size): got {len}, expected {expected}"
+            ));
+        }
+    }
+    if len == 0 {
+        return Err("file is empty".into());
+    }
+    let sha = sha256_file(path)?;
+    if let Some(expected) = github_sha {
+        if !sha_eq(&sha, expected) {
+            return Err(format!(
+                "corrupt (sha256 vs GitHub): got {sha}, expected {expected}"
+            ));
+        }
+        return Ok((sha, true));
+    }
+    if let Some(expected) = manifest_sha.filter(|s| !s.is_empty()) {
+        if !sha_eq(&sha, expected) {
+            return Err(format!(
+                "corrupt (sha256 vs local manifest): got {sha}, expected {expected}"
+            ));
+        }
+    }
+    Ok((sha, false))
 }
 
 // ---------- Sync ----------
@@ -1193,20 +1307,32 @@ fn run_sync(_db: &Db) -> Result<(), String> {
 
         if tag == static_tag {
             let url = format!("https://flasher.meshcore.io/firmware/{name}");
-            if dest.is_file() {
-                let meta = fs::metadata(&dest).map_err(|e| e.to_string())?;
-                let sha = sha256_file(&dest).unwrap_or_default();
-                next_assets.push(IndexAsset {
-                    family: "static".into(),
-                    tag: static_tag.into(),
-                    name,
-                    bytes: meta.len(),
-                    sha256: sha,
-                    path: dest.to_string_lossy().into_owned(),
-                });
-                continue;
+            let prior = index.find_asset(static_tag, &name);
+            let manifest_sha = prior.map(|a| a.sha256.as_str());
+            match verify_local_file(&dest, None, None, manifest_sha) {
+                Ok((sha, _)) => {
+                    let meta = fs::metadata(&dest).map_err(|e| e.to_string())?;
+                    next_assets.push(IndexAsset {
+                        family: "static".into(),
+                        tag: static_tag.into(),
+                        name,
+                        bytes: meta.len(),
+                        sha256: sha,
+                        path: dest.to_string_lossy().into_owned(),
+                        github_verified: false,
+                    });
+                    continue;
+                }
+                Err(reason) if dest.is_file() => {
+                    hq_log!(
+                        warn,
+                        "firmware: local CDN asset {name} failed check ({reason}); re-downloading"
+                    );
+                    let _ = fs::remove_file(&dest);
+                }
+                Err(_) => {}
             }
-            match download_file(&url, &dest, None) {
+            match download_file(&url, &dest, None, None) {
                 Ok(sha) => {
                     let meta = fs::metadata(&dest).map_err(|e| e.to_string())?;
                     next_assets.push(IndexAsset {
@@ -1216,6 +1342,7 @@ fn run_sync(_db: &Db) -> Result<(), String> {
                         bytes: meta.len(),
                         sha256: sha,
                         path: dest.to_string_lossy().into_owned(),
+                        github_verified: false,
                     });
                 }
                 Err(err) => hq_log!(warn, "firmware CDN skip {name}: {err}"),
@@ -1227,25 +1354,50 @@ fn run_sync(_db: &Db) -> Result<(), String> {
             hq_log!(warn, "firmware: missing GitHub asset {name} on {tag}");
             continue;
         };
-        if index.has_asset(&tag, &asset.name, asset.size) && dest.is_file() {
-            let sha = index
-                .assets
-                .iter()
-                .find(|a| a.tag == tag && a.name == asset.name)
-                .map(|a| a.sha256.clone())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| sha256_file(&dest).unwrap_or_default());
-            next_assets.push(IndexAsset {
-                family: family.clone(),
-                tag: tag.clone(),
-                name: asset.name.clone(),
-                bytes: asset.size,
-                sha256: sha,
-                path: dest.to_string_lossy().into_owned(),
-            });
-            continue;
+        let github_sha = asset
+            .digest
+            .as_deref()
+            .and_then(parse_github_digest);
+        let prior = index.find_asset(&tag, &asset.name);
+        let manifest_sha = prior.map(|a| a.sha256.as_str());
+
+        match verify_local_file(
+            &dest,
+            Some(asset.size),
+            github_sha.as_deref(),
+            manifest_sha,
+        ) {
+            Ok((sha, github_verified)) => {
+                next_assets.push(IndexAsset {
+                    family: family.clone(),
+                    tag: tag.clone(),
+                    name: asset.name.clone(),
+                    bytes: asset.size,
+                    sha256: sha,
+                    path: dest.to_string_lossy().into_owned(),
+                    github_verified,
+                });
+                continue;
+            }
+            Err(reason) if dest.is_file() => {
+                hq_log!(
+                    warn,
+                    "firmware: local {tag}/{name} failed check ({reason}); re-downloading"
+                );
+                set_sync(|s| {
+                    s.detail = format!("Re-downloading corrupt/incomplete {name}…");
+                });
+                let _ = fs::remove_file(&dest);
+            }
+            Err(_) => {}
         }
-        let sha = download_file(&asset.browser_download_url, &dest, Some(asset.size))?;
+
+        let sha = download_file(
+            &asset.browser_download_url,
+            &dest,
+            Some(asset.size),
+            github_sha.as_deref(),
+        )?;
         next_assets.push(IndexAsset {
             family,
             tag,
@@ -1253,6 +1405,7 @@ fn run_sync(_db: &Db) -> Result<(), String> {
             bytes: asset.size,
             sha256: sha,
             path: dest.to_string_lossy().into_owned(),
+            github_verified: github_sha.is_some(),
         });
     }
 
@@ -1683,6 +1836,8 @@ fn run_flash(req: FlashRequest) -> Result<(), String> {
     if meta.len() == 0 {
         return Err("Firmware file is empty.".into());
     }
+    // Refuse to flash a corrupt / incomplete / unindexed file (outage safety).
+    ensure_flash_path_trusted(&req.asset_path)?;
 
     if req.uf2 {
         return Err(format!(
@@ -1791,8 +1946,13 @@ pub fn resolve_flash_asset(
             .ok_or_else(|| {
                 format!("Missing {name}. Sync firmware while online, then try again.")
             })?;
+        // Presence/size only here — full SHA is enforced in run_flash (UI polls this often).
+        let path = PathBuf::from(&asset.path);
+        if !path.is_file() {
+            return Err(format!("Missing {name} on disk. Sync while online, then try again."));
+        }
         let uf2 = name.to_ascii_lowercase().ends_with(".uf2");
-        return Ok((PathBuf::from(asset.path), uf2));
+        return Ok((path, uf2));
     }
 
     let key = flash_kind_key(erase, &role.patterns);
@@ -1813,8 +1973,383 @@ pub fn resolve_flash_asset(
     let asset = find_local_asset(index, tag, &name).ok_or_else(|| {
         format!("Indexed asset {name} for {tag} is missing on disk.")
     })?;
+    let path = PathBuf::from(&asset.path);
+    if !path.is_file() {
+        return Err(format!(
+            "Indexed asset {name} for {tag} is missing on disk."
+        ));
+    }
     let uf2 = name.to_ascii_lowercase().ends_with(".uf2");
-    Ok((PathBuf::from(asset.path), uf2))
+    Ok((path, uf2))
+}
+
+/// Outage-readiness summary for Settings → Flasher.
+#[derive(Debug, Clone)]
+pub struct ReadinessReport {
+    pub selected: usize,
+    pub on_disk_assets: usize,
+    pub verified_ok: usize,
+    pub corrupt_or_incomplete: usize,
+    /// Selected roles that should have files but do not (excludes unpublished upstream).
+    pub missing_selected: usize,
+    /// Selected roles MeshCore did not publish for the chosen release (not an error).
+    pub unpublished_selected: usize,
+    pub github_verified: usize,
+    pub ready_for_outage: bool,
+    /// When true, `verified_ok` came from full SHA-256; otherwise size/presence only.
+    pub deep_checked: bool,
+    pub summary: String,
+}
+
+/// Fast readiness (size + presence). Prefer calling from a worker, not every UI frame.
+pub fn readiness_snapshot() -> ReadinessReport {
+    readiness_inner(false)
+}
+
+/// Full SHA-256 check of every indexed file (use from a worker / button, not every frame).
+pub fn readiness_report() -> ReadinessReport {
+    readiness_inner(true)
+}
+
+fn readiness_inner(deep: bool) -> ReadinessReport {
+    let selection = load_selection();
+    let index = FirmwareIndex::load();
+    let selected = selection.entries.len();
+    let mut verified_ok = 0usize;
+    let mut corrupt_or_incomplete = 0usize;
+    let mut github_verified = 0usize;
+    for asset in &index.assets {
+        let ok = if deep {
+            assert_asset_integrity(asset).is_ok()
+        } else {
+            let path = Path::new(&asset.path);
+            path.is_file()
+                && fs::metadata(path)
+                    .map(|m| m.len() == asset.bytes && m.len() > 0)
+                    .unwrap_or(false)
+        };
+        if ok {
+            verified_ok += 1;
+            if asset.github_verified {
+                github_verified += 1;
+            }
+        } else {
+            corrupt_or_incomplete += 1;
+        }
+    }
+    let on_disk_assets = index.assets.len();
+    let (missing_selected, unpublished_selected) = missing_and_unpublished(&selection, &index);
+    // Unpublished upstream roles are expected gaps — they must not block outage readiness.
+    let ready_for_outage =
+        selected > 0 && missing_selected == 0 && corrupt_or_incomplete == 0 && on_disk_assets > 0;
+    let check_word = if deep { "checksum-verified" } else { "on disk" };
+    let unpublished_note = if unpublished_selected > 0 {
+        format!(" · {unpublished_selected} selected role(s) not published upstream (OK to ignore)")
+    } else {
+        String::new()
+    };
+    let summary = if selected == 0 {
+        "Nothing selected — open Manage firmware and sync while online.".into()
+    } else if corrupt_or_incomplete > 0 {
+        format!(
+            "Not ready — {corrupt_or_incomplete} file(s) failed size/integrity. Sync now to repair."
+        )
+    } else if missing_selected > 0 {
+        format!(
+            "Not ready — {missing_selected} of {selected} selected role(s) still need a download. Sync now.{unpublished_note}"
+        )
+    } else if ready_for_outage {
+        format!(
+            "Ready for outage — {verified_ok} file(s) {check_word} ({github_verified} previously matched GitHub digest).{unpublished_note}"
+        )
+    } else {
+        "Sync firmware while online before an outage.".into()
+    };
+    ReadinessReport {
+        selected,
+        on_disk_assets,
+        verified_ok,
+        corrupt_or_incomplete,
+        missing_selected,
+        unpublished_selected,
+        github_verified,
+        ready_for_outage,
+        deep_checked: deep,
+        summary,
+    }
+}
+
+/// Returns `(truly_missing, unpublished_upstream)`.
+fn missing_and_unpublished(
+    selection: &FirmwareSelection,
+    index: &FirmwareIndex,
+) -> (usize, usize) {
+    if selection.entries.is_empty() {
+        return (0, 0);
+    }
+    let unpublished = load_unavailable_keys();
+    let Ok(catalog) = load_catalog() else {
+        // No catalog yet — treat empty index as all missing (except known unpublished).
+        if index.assets.is_empty() {
+            let unpub = selection
+                .entries
+                .iter()
+                .filter(|e| unpublished.contains(&e.key))
+                .count();
+            return (selection.entries.len().saturating_sub(unpub), unpub);
+        }
+        return (0, 0);
+    };
+    let offers = community_offers(&catalog);
+    let local_keys = local_offer_keys(&offers, index);
+    let mut missing = 0usize;
+    let mut unpub = 0usize;
+    for entry in &selection.entries {
+        if local_keys.contains(&entry.key) {
+            continue;
+        }
+        if unpublished.contains(&entry.key) {
+            unpub += 1;
+        } else {
+            missing += 1;
+        }
+    }
+    (missing, unpub)
+}
+
+fn assert_asset_integrity(asset: &IndexAsset) -> Result<(), String> {
+    let path = Path::new(&asset.path);
+    let manifest = if asset.sha256.trim().is_empty() {
+        None
+    } else {
+        Some(asset.sha256.as_str())
+    };
+    verify_local_file(path, Some(asset.bytes), None, manifest).map_err(|e| {
+        format!(
+            "{} ({e}). Re-sync while online before flashing.",
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+/// Refuse flash unless the path is in the locker index and matches the stored SHA-256.
+pub fn ensure_flash_path_trusted(path: &Path) -> Result<(), String> {
+    let index = FirmwareIndex::load();
+    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let asset = index.assets.iter().find(|a| {
+        let ap = Path::new(&a.path);
+        ap == path
+            || ap.canonicalize().ok().as_ref() == Some(&canon)
+            || a.path == path.to_string_lossy()
+    });
+    let Some(asset) = asset else {
+        return Err(
+            "That firmware file is not in the local locker index. Sync while online first.".into(),
+        );
+    };
+    assert_asset_integrity(asset)
+}
+
+/// Native save dialog for a firmware pack `.zip` (call on the UI thread).
+pub fn pick_export_locker_pack_path() -> Result<PathBuf, String> {
+    let stamp = now_unix();
+    rfd::FileDialog::new()
+        .set_title("Export firmware locker pack")
+        .add_filter("Firmware pack", &["zip"])
+        .set_file_name(format!("MetisMeshHQ-firmware-{stamp}.zip"))
+        .save_file()
+        .ok_or_else(|| "Export cancelled.".to_string())
+}
+
+/// Native open dialog for a firmware pack `.zip` (call on the UI thread).
+pub fn pick_import_locker_pack_path() -> Result<PathBuf, String> {
+    let zip_path = rfd::FileDialog::new()
+        .set_title("Import firmware locker pack")
+        .add_filter("Firmware pack", &["zip"])
+        .pick_file()
+        .ok_or_else(|| "Import cancelled.".to_string())?;
+    if zip_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("zip"))
+        != Some(true)
+    {
+        return Err("Pick a MetisMeshHQ-firmware-*.zip pack.".into());
+    }
+    Ok(zip_path)
+}
+
+/// Zip the firmware locker (index + releases) to `dest`.
+///
+/// Uses stored (no recompress) entries — firmware binaries are already compressed.
+/// Safe to call from a worker thread after [`pick_export_locker_pack_path`].
+pub fn export_locker_pack_to(dest: &Path) -> Result<PathBuf, String> {
+    let src = firmware_root();
+    if !src.is_dir() {
+        return Err("Firmware locker folder is empty. Sync while online first.".into());
+    }
+    write_locker_zip(&src, dest, now_unix())?;
+    Ok(dest.to_path_buf())
+}
+
+/// Replace the local locker from an exported `.zip` pack (must contain `index.json` at the root).
+/// Safe to call from a worker thread after [`pick_import_locker_pack_path`].
+pub fn import_locker_pack_from(zip_path: &Path) -> Result<PathBuf, String> {
+    let staging_parent = firmware_root()
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "Firmware data folder is missing.".to_string())?;
+    let staging = staging_parent.join(format!("firmware-import-{}", now_unix()));
+    if staging.exists() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+
+    let extract_result = (|| {
+        extract_locker_zip(zip_path, &staging)?;
+        if !staging.join("index.json").is_file() {
+            return Err(
+                "That zip is not a firmware pack (missing index.json at the archive root)."
+                    .into(),
+            );
+        }
+        let dest = firmware_root();
+        if dest.exists() {
+            let backup = dest.with_file_name(format!("firmware-backup-{}", now_unix()));
+            fs::rename(&dest, &backup).map_err(|e| {
+                format!(
+                    "Could not move existing locker aside ({}): {e}",
+                    dest.display()
+                )
+            })?;
+        }
+        fs::rename(&staging, &dest).map_err(|e| {
+            format!(
+                "Could not install imported locker at {}: {e}",
+                dest.display()
+            )
+        })?;
+        rewrite_index_paths_for_local_root()?;
+        Ok(dest)
+    })();
+
+    if extract_result.is_err() && staging.exists() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    extract_result
+}
+
+fn write_locker_zip(src: &Path, zip_path: &Path, stamp: i64) -> Result<(), String> {
+    let file = File::create(zip_path).map_err(|e| format!("Create {}: {e}", zip_path.display()))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .unix_permissions(0o644);
+
+    add_dir_to_zip(&mut zip, src, src, options)?;
+
+    let marker = serde_json::json!({
+        "format": "metis-mesh-hq-firmware-pack",
+        "version": 1,
+        "exported_at": stamp,
+        "container": "zip",
+    });
+    let marker_bytes =
+        serde_json::to_vec_pretty(&marker).map_err(|e| e.to_string())?;
+    zip.start_file("pack.json", options)
+        .map_err(|e| format!("zip pack.json: {e}"))?;
+    zip.write_all(&marker_bytes)
+        .map_err(|e| format!("zip pack.json write: {e}"))?;
+
+    zip.finish()
+        .map_err(|e| format!("Finish zip {}: {e}", zip_path.display()))?;
+    Ok(())
+}
+
+fn add_dir_to_zip(
+    zip: &mut zip::ZipWriter<File>,
+    root: &Path,
+    dir: &Path,
+    options: zip::write::SimpleFileOptions,
+) -> Result<(), String> {
+    for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let ty = entry.file_type().map_err(|e| e.to_string())?;
+        let rel = path
+            .strip_prefix(root)
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if ty.is_dir() {
+            let dir_name = if rel.ends_with('/') {
+                rel
+            } else {
+                format!("{rel}/")
+            };
+            zip.add_directory(&dir_name, options)
+                .map_err(|e| format!("zip dir {dir_name}: {e}"))?;
+            add_dir_to_zip(zip, root, &path, options)?;
+        } else if ty.is_file() {
+            // Skip a previous pack marker if re-exporting from an odd tree.
+            if rel == "pack.json" {
+                continue;
+            }
+            zip.start_file(&rel, options)
+                .map_err(|e| format!("zip start {rel}: {e}"))?;
+            let mut f = File::open(&path).map_err(|e| format!("Open {}: {e}", path.display()))?;
+            std::io::copy(&mut f, zip).map_err(|e| format!("zip copy {rel}: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn extract_locker_zip(zip_path: &Path, dest: &Path) -> Result<(), String> {
+    let file = File::open(zip_path).map_err(|e| format!("Open {}: {e}", zip_path.display()))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| format!("Read zip {}: {e}", zip_path.display()))?;
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("Zip entry {i}: {e}"))?;
+        let Some(enclosed) = entry.enclosed_name() else {
+            continue; // zip-slip / absolute path
+        };
+        let out = dest.join(&enclosed);
+        if entry.name().ends_with('/') {
+            fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+            continue;
+        }
+        if let Some(parent) = out.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let mut outfile =
+            File::create(&out).map_err(|e| format!("Create {}: {e}", out.display()))?;
+        std::io::copy(&mut entry, &mut outfile)
+            .map_err(|e| format!("Extract {}: {e}", out.display()))?;
+    }
+    Ok(())
+}
+
+fn rewrite_index_paths_for_local_root() -> Result<(), String> {
+    let mut index = FirmwareIndex::load();
+    for asset in &mut index.assets {
+        let tag_dir = release_dir(&asset.tag);
+        let by_name = tag_dir.join(&asset.name);
+        let by_basename = Path::new(&asset.path)
+            .file_name()
+            .map(|n| tag_dir.join(n));
+        let local = if by_name.is_file() {
+            by_name
+        } else if let Some(path) = by_basename.filter(|p| p.is_file()) {
+            path
+        } else {
+            by_name
+        };
+        asset.path = local.to_string_lossy().into_owned();
+    }
+    index.save()
 }
 
 pub fn load_index() -> FirmwareIndex {
@@ -1894,7 +2429,71 @@ mod tests {
     }
 
     #[test]
-    fn index_skips_present_asset() {
+    fn readiness_empty_locker_is_not_ready() {
+        // No selection / empty index → not ready (does not touch disk firmware root heavily).
+        let report = readiness_inner(false);
+        assert!(!report.deep_checked);
+        assert_eq!(report.ready_for_outage, report.selected > 0 && report.missing_selected == 0 && report.corrupt_or_incomplete == 0 && report.on_disk_assets > 0);
+    }
+
+    #[test]
+    fn parse_github_digest_accepts_sha256_prefix() {
+        let hex = "f7165848f9f5ddc578d7adbd1f566a394169385c73bd88bf60df7e759db8e08d";
+        assert_eq!(
+            parse_github_digest(&format!("sha256:{hex}")).as_deref(),
+            Some(hex)
+        );
+        assert_eq!(parse_github_digest(hex).as_deref(), Some(hex));
+        assert_eq!(parse_github_digest("sha256:deadbeef"), None);
+        assert_eq!(parse_github_digest(""), None);
+    }
+
+    #[test]
+    fn verify_local_file_detects_size_mismatch() {
+        let dir = std::env::temp_dir().join(format!(
+            "metis-fw-verify-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("blob.bin");
+        fs::write(&path, b"hello").unwrap();
+        let err = verify_local_file(&path, Some(99), None, None).unwrap_err();
+        assert!(err.contains("size"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_local_file_matches_manifest_sha() {
+        let dir = std::env::temp_dir().join(format!(
+            "metis-fw-sha-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("blob.bin");
+        let bytes = b"meshcore-firmware-test";
+        fs::write(&path, bytes).unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        let expected = hex::encode(hasher.finalize());
+        let (sha, github_verified) =
+            verify_local_file(&path, Some(bytes.len() as u64), None, Some(&expected)).unwrap();
+        assert_eq!(sha, expected);
+        assert!(!github_verified);
+        let github_err =
+            verify_local_file(&path, Some(bytes.len() as u64), Some(&"0".repeat(64)), None)
+                .unwrap_err();
+        assert!(github_err.contains("GitHub"), "{github_err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn index_find_asset_requires_matching_name() {
         let mut index = FirmwareIndex::default();
         index.assets.push(IndexAsset {
             family: "companion".into(),
@@ -1903,9 +2502,10 @@ mod tests {
             bytes: 10,
             sha256: "abc".into(),
             path: "/tmp/does-not-need-to-exist-for-false".into(),
+            github_verified: false,
         });
-        // Path missing → has_asset false
-        assert!(!index.has_asset("companion-v1.18.0", "a.bin", 10));
+        assert!(index.find_asset("companion-v1.18.0", "a.bin").is_some());
+        assert!(index.find_asset("companion-v1.18.0", "missing.bin").is_none());
     }
 
     #[test]
@@ -1990,6 +2590,7 @@ mod tests {
             bytes: 100,
             sha256: "abc".into(),
             path: "/tmp/x.bin".into(),
+            github_verified: false,
         });
         let seeded = auto_seed_selection_from_index(&[offer.clone()], &index);
         assert_eq!(seeded.entries.len(), 1);

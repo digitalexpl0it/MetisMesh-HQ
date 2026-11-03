@@ -32,6 +32,8 @@ pub enum IconName {
     Copy,
     Emoji,
     Weather,
+    /// Terminal window with prompt — Device CLI.
+    Terminal,
 }
 
 #[component]
@@ -191,6 +193,12 @@ fn icon_paths(name: IconName) -> &'static [&'static str] {
             "M5.6 18.4 7 17",
             "M17 7l1.4-1.4",
             "M16 14a4 4 0 1 0-7.5-1.5A3.5 3.5 0 1 0 9 18h7a3 3 0 0 0 0-6z",
+        ],
+        // Terminal — CLI prompt inside a window.
+        IconName::Terminal => &[
+            "M4 5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5z",
+            "m8 9 3 3-3 3",
+            "M13 15h4",
         ],
     }
 }

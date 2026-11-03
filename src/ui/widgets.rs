@@ -354,6 +354,9 @@ pub fn SlideDownPanel(
     wide: bool,
     on_close: EventHandler<()>,
     children: Element,
+    /// Pinned under the scrollable body (Save / Close actions).
+    #[props(default)]
+    footer: Option<Element>,
 ) -> Element {
     let shell_class = if open {
         "slide-down-shell slide-down-shell-open"
@@ -371,6 +374,7 @@ pub fn SlideDownPanel(
     } else {
         "slide-down-panel"
     };
+    let has_footer = footer.is_some();
     rsx! {
         div {
             class: "{shell_class}",
@@ -405,8 +409,14 @@ pub fn SlideDownPanel(
                         Icon { name: IconName::Close, size: 16 }
                     }
                 }
-                div { class: "slide-down-body",
+                div {
+                    class: if has_footer { "slide-down-body slide-down-body-with-footer" } else { "slide-down-body" },
                     {children}
+                }
+                if let Some(footer) = footer {
+                    div { class: "slide-down-footer",
+                        {footer}
+                    }
                 }
             }
         }

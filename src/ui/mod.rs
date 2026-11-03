@@ -8,7 +8,8 @@ mod weather_page;
 mod welcome;
 mod widgets;
 
-use std::sync::{Arc, OnceLock};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use chrono::{Local, TimeZone, Timelike};
 
@@ -238,7 +239,7 @@ const NAV_SEARCH_INDEX: &[NavSearchEntry] = &[
     NavSearchEntry {
         page: Page::Cli,
         title: "CLI",
-        icon: IconName::Radio,
+        icon: IconName::Terminal,
         topics: &[
             "device CLI",
             "companion CLI",
@@ -609,7 +610,7 @@ pub fn App() -> Element {
                                         onclick: move |_| page.set(Page::Tracker),
                                     }
                                     NavButton {
-                                        icon: IconName::Radio,
+                                        icon: IconName::Terminal,
                                         label: "CLI".to_string(),
                                         expanded,
                                         active: page() == Page::Cli,
@@ -3215,8 +3216,12 @@ fn MessagesPage() -> Element {
                 .ok()
                 .flatten()
                 .filter(|id| messages.iter().any(|message| message.id == *id));
+            // Match nav badge: only received traffic counts as unread (not HQ/bot TX).
             let new_count = match anchor {
-                Some(id) => messages.iter().filter(|message| message.id > id).count(),
+                Some(id) => messages
+                    .iter()
+                    .filter(|message| message.id > id && message.direction == "rx")
+                    .count(),
                 None => 0,
             };
             let show_banner = anchor.is_some() && new_count > 0;
@@ -4444,6 +4449,123 @@ enum SettingsTab {
     About,
 }
 
+/// Heavy Flasher panel data — rebuilt only when the cache key changes (not every 350ms poll).
+#[derive(Clone)]
+struct FlasherPanelCache {
+    key: String,
+    filtered: Vec<crate::firmware::DeviceChoice>,
+    selected_device: Option<crate::firmware::DeviceChoice>,
+    selected_role: Option<crate::firmware::RoleChoice>,
+    version_options: Vec<(String, String)>,
+    ports: Vec<crate::usb_serial::UsbPort>,
+    asset_ready: Option<(PathBuf, bool)>,
+    catalog_missing: bool,
+}
+
+fn flasher_panel_cache() -> &'static Mutex<Option<FlasherPanelCache>> {
+    static CACHE: OnceLock<Mutex<Option<FlasherPanelCache>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn load_flasher_panel_cache(
+    key: String,
+    selection: &crate::firmware::FirmwareSelection,
+    device: &str,
+    role: &str,
+    tag: &str,
+    erase: bool,
+    query: &str,
+) -> FlasherPanelCache {
+    if let Ok(guard) = flasher_panel_cache().lock() {
+        if let Some(cached) = guard.as_ref() {
+            if cached.key == key {
+                return cached.clone();
+            }
+        }
+    }
+    let index = crate::firmware::load_index();
+    let catalog = crate::firmware::load_catalog().ok();
+    let catalog_missing = catalog.is_none();
+    let devices = catalog
+        .as_ref()
+        .map(crate::firmware::community_devices)
+        .unwrap_or_default();
+    let selected_keys: std::collections::BTreeSet<_> =
+        selection.entries.iter().map(|e| e.key.clone()).collect();
+    let query_l = query.trim().to_ascii_lowercase();
+    let mut filtered: Vec<_> = devices
+        .iter()
+        .filter(|d| {
+            query_l.is_empty()
+                || d.name.to_ascii_lowercase().contains(&query_l)
+                || d.maker.to_ascii_lowercase().contains(&query_l)
+        })
+        .cloned()
+        .collect();
+    filtered.sort_by_key(|d| {
+        let preferred = d.roles.iter().any(|r| {
+            selected_keys.contains(&crate::firmware::selection_key(&d.name, &r.role))
+        });
+        (!preferred, d.name.to_ascii_lowercase())
+    });
+    let selected_device = devices
+        .iter()
+        .find(|d| d.name == device)
+        .cloned()
+        .or_else(|| filtered.first().cloned());
+    let selected_role = selected_device.as_ref().and_then(|d| {
+        d.roles
+            .iter()
+            .find(|r| r.role == role)
+            .cloned()
+            .or_else(|| d.roles.first().cloned())
+    });
+    let version_options: Vec<(String, String)> = if let Some(role_c) = selected_role.as_ref() {
+        if !role_c.static_versions.is_empty() {
+            role_c
+                .static_versions
+                .iter()
+                .map(|v| (v.version.clone(), v.version.clone()))
+                .collect()
+        } else {
+            let key_kind = crate::firmware::flash_kind_key(erase, &role_c.patterns);
+            let pattern = role_c.patterns.get(key_kind).cloned().unwrap_or_default();
+            if pattern.is_empty() {
+                Vec::new()
+            } else {
+                crate::firmware::local_versions_for_role(&index, &role_c.family, &pattern)
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let tag_effective = if !version_options.is_empty()
+        && version_options.iter().all(|(t, _)| t != tag)
+    {
+        version_options[0].0.clone()
+    } else {
+        tag.to_string()
+    };
+    let ports = crate::firmware::list_usb_ports_for_flash();
+    let asset_ready = selected_role.as_ref().and_then(|role_c| {
+        crate::firmware::resolve_flash_asset(&index, role_c, &tag_effective, erase).ok()
+    });
+    let built = FlasherPanelCache {
+        key,
+        filtered,
+        selected_device,
+        selected_role,
+        version_options,
+        ports,
+        asset_ready,
+        catalog_missing,
+    };
+    if let Ok(mut guard) = flasher_panel_cache().lock() {
+        *guard = Some(built.clone());
+    }
+    built
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DeviceTab {
     Identity,
@@ -4811,6 +4933,9 @@ fn SettingsPage(
     let mut services_tab = use_signal(|| ServicesTab::Site);
     let mut usb_scanned = use_signal(|| false);
     let mut flasher_tick = use_signal(|| 0u32);
+    let mut flasher_pack_note = use_signal(String::new);
+    let mut flasher_readiness =
+        use_signal(|| Option::<crate::firmware::ReadinessReport>::None);
     let mut flasher_device = use_signal(String::new);
     let mut flasher_role = use_signal(String::new);
     let mut flasher_tag = use_signal(String::new);
@@ -5145,11 +5270,30 @@ fn SettingsPage(
         state().radio.scan_usb();
     });
 
+    // Readiness (catalog + per-file metadata) is too heavy for the 350ms poll —
+    // refresh only when entering Flasher or after sync/tick bumps.
+    use_effect(move || {
+        if settings_tab() != SettingsTab::Flasher || flasher_manage_open() {
+            return;
+        }
+        let _ = flasher_tick();
+        spawn(async move {
+            let report = tokio::task::spawn_blocking(crate::firmware::readiness_snapshot).await;
+            if let Ok(report) = report {
+                flasher_readiness.set(Some(report));
+            }
+        });
+    });
+
     // Pause the global 350ms poll while Manage firmware is open — rebuilding
     // hundreds of rows + rescanning the asset index each tick freezes the UI.
+    // Also slow the Flasher tab: full catalog/index rebuild every 350ms locks the UI.
     let flasher_manage_blocking = settings_tab() == SettingsTab::Flasher && flasher_manage_open();
+    let on_flasher = settings_tab() == SettingsTab::Flasher;
     if !flasher_manage_blocking {
+        // Always subscribe so Diagnostics / sync notes stay live; Flasher uses flasher_tick.
         let _log_refresh = log_tick();
+        let _ = on_flasher;
     }
     let log_rows = if settings_tab() == SettingsTab::Diagnostics {
         crate::app_log::filtered(
@@ -8333,17 +8477,20 @@ fn SettingsPage(
             if settings_tab() == SettingsTab::Flasher {
             {
                 let manage_open = flasher_manage_open();
-                // Only poll sync/flash while Manage is closed (open freezes the 350ms loop).
+                // Rebuild device/catalog UI only on flasher_tick (Sync / integrity / import),
+                // not every 350ms — load_catalog + index + asset resolve was freezing the tab.
                 let flasher_bump = flasher_tick();
-                let _flasher_refresh = if manage_open {
-                    (0u32, flasher_bump)
-                } else {
-                    (log_tick(), flasher_bump)
-                };
+                let _flasher_refresh = flasher_bump;
                 let sync = crate::firmware::sync_status();
                 let flash = crate::firmware::flash_status();
                 let sync_busy = sync.running;
                 let flash_busy = flash.running;
+                // Light poll for sync/flash status text without reloading the catalog.
+                let _sync_poll = if manage_open {
+                    0u32
+                } else {
+                    log_tick()
+                };
                 let last_sync_label = if sync.last_ok_at > 0 {
                     crate::timefmt::format_stamp(&state().db, sync.last_ok_at)
                 } else {
@@ -8353,6 +8500,11 @@ fn SettingsPage(
                 let n_selected = selection.entries.len();
                 let disk_label = crate::firmware::format_bytes(sync.bytes_on_disk);
                 let full_set_label = crate::firmware::estimate_full_set_label();
+                let readiness = if manage_open {
+                    None
+                } else {
+                    flasher_readiness()
+                };
                 // While Manage is open, skip index/catalog/USB work — only the cached offer list.
                 let on_disk_keys = flasher_manage_on_disk();
                 let unavailable_keys = flasher_manage_unavailable();
@@ -8417,349 +8569,518 @@ fn SettingsPage(
                         flasher_manage_offers().is_empty(),
                     )
                 } else {
-                    let index = crate::firmware::load_index();
-                    let catalog = crate::firmware::load_catalog().ok();
-                    let catalog_missing = catalog.is_none();
-                    let devices = catalog
-                        .as_ref()
-                        .map(crate::firmware::community_devices)
-                        .unwrap_or_default();
-                    let selected_keys: std::collections::BTreeSet<_> =
-                        selection.entries.iter().map(|e| e.key.clone()).collect();
-                    let query = flasher_query().trim().to_ascii_lowercase();
-                    let mut filtered: Vec<_> = devices
-                        .iter()
-                        .filter(|d| {
-                            query.is_empty()
-                                || d.name.to_ascii_lowercase().contains(&query)
-                                || d.maker.to_ascii_lowercase().contains(&query)
-                        })
-                        .cloned()
-                        .collect();
-                    filtered.sort_by_key(|d| {
-                        let preferred = d.roles.iter().any(|r| {
-                            selected_keys
-                                .contains(&crate::firmware::selection_key(&d.name, &r.role))
-                        });
-                        (!preferred, d.name.to_ascii_lowercase())
-                    });
-                    let selected_device = devices
-                        .iter()
-                        .find(|d| d.name == flasher_device())
-                        .cloned()
-                        .or_else(|| filtered.first().cloned());
-                    if let Some(dev) = selected_device.as_ref() {
+                    let cache_key = format!(
+                        "{flasher_bump}|{}|{}|{}|{}|{}|{}|{}|{}",
+                        flasher_query(),
+                        flasher_device(),
+                        flasher_role(),
+                        flasher_tag(),
+                        flasher_erase(),
+                        sync.asset_count,
+                        sync.last_ok_at,
+                        n_selected,
+                    );
+                    let panel = load_flasher_panel_cache(
+                        cache_key,
+                        &selection,
+                        &flasher_device(),
+                        &flasher_role(),
+                        &flasher_tag(),
+                        flasher_erase(),
+                        &flasher_query(),
+                    );
+                    if let Some(dev) = panel.selected_device.as_ref() {
                         if flasher_device() != dev.name {
                             flasher_device.set(dev.name.clone());
                         }
                     }
-                    let selected_role = selected_device.as_ref().and_then(|d| {
-                        d.roles
-                            .iter()
-                            .find(|r| r.role == flasher_role())
-                            .cloned()
-                            .or_else(|| d.roles.first().cloned())
-                    });
-                    if let Some(role) = selected_role.as_ref() {
+                    if let Some(role) = panel.selected_role.as_ref() {
                         if flasher_role() != role.role {
                             flasher_role.set(role.role.clone());
                         }
                     }
-                    let version_options: Vec<(String, String)> =
-                        if let Some(role) = selected_role.as_ref() {
-                            if !role.static_versions.is_empty() {
-                                role.static_versions
-                                    .iter()
-                                    .map(|v| (v.version.clone(), v.version.clone()))
-                                    .collect()
-                            } else {
-                                let key =
-                                    crate::firmware::flash_kind_key(flasher_erase(), &role.patterns);
-                                let pattern = role.patterns.get(key).cloned().unwrap_or_default();
-                                if pattern.is_empty() {
-                                    Vec::new()
-                                } else {
-                                    crate::firmware::local_versions_for_role(
-                                        &index,
-                                        &role.family,
-                                        &pattern,
-                                    )
-                                }
-                            }
-                        } else {
-                            Vec::new()
-                        };
-                    if !version_options.is_empty()
-                        && version_options
+                    if !panel.version_options.is_empty()
+                        && panel
+                            .version_options
                             .iter()
-                            .all(|(tag, _name)| tag != &flasher_tag())
+                            .all(|(tag, _)| tag != &flasher_tag())
                     {
-                        flasher_tag.set(version_options[0].0.clone());
+                        flasher_tag.set(panel.version_options[0].0.clone());
                     }
-                    let ports = crate::firmware::list_usb_ports_for_flash();
                     if flasher_port().is_empty() {
-                        if let Some(port) = ports.first() {
+                        if let Some(port) = panel.ports.first() {
                             flasher_port.set(port.path.clone());
                         }
                     }
-                    let asset_ready = selected_role.as_ref().and_then(|role| {
-                        crate::firmware::resolve_flash_asset(
-                            &index,
-                            role,
-                            &flasher_tag(),
-                            flasher_erase(),
-                        )
-                        .ok()
-                    });
                     (
-                        filtered,
-                        selected_device,
-                        selected_role,
-                        version_options,
-                        ports,
-                        asset_ready,
-                        catalog_missing,
+                        panel.filtered,
+                        panel.selected_device,
+                        panel.selected_role,
+                        panel.version_options,
+                        panel.ports,
+                        panel.asset_ready,
+                        panel.catalog_missing,
                     )
                 };
                 rsx! {
                     Card { title: "Firmware library".to_string(), icon: Some(IconName::Radio),
-                        p { class: "mb-3 text-sm text-muted-foreground",
-                            "Select boards and roles in Manage firmware, then sync only those packages for offline USB flashing. MIT-licensed MeshCore community firmware; HQ only stores and flashes it."
+                        div { class: "flasher-lib",
+                        p { class: "flasher-lib__intro",
+                            "Keep MeshCore community firmware offline for USB flashing. Choose boards in Manage, sync while online; flash is blocked if a checksum fails."
                         }
-                        p { class: "mb-2 text-sm",
-                            if sync_busy {
-                                "Syncing · {sync.detail}"
-                            } else if !sync.last_error.is_empty() {
-                                "Last error · {sync.last_error}"
-                            } else if n_selected == 0 {
-                                "Nothing selected — open Manage firmware to choose boards and roles."
-                            } else if sync.asset_count == 0 {
-                                "{n_selected} selected · not on disk yet. Press Sync now while online."
-                            } else {
-                                "{sync.detail}"
+
+                        // --- Outage status ---
+                        if let Some(ready) = readiness.as_ref() {
+                            p {
+                                class: if ready.ready_for_outage {
+                                    "flasher-lib__banner flasher-lib__banner--ready"
+                                } else {
+                                    "flasher-lib__banner flasher-lib__banner--warn"
+                                },
+                                "{ready.summary}"
                             }
+                        } else if sync_busy {
+                            p { class: "flasher-lib__meta", "Syncing · {sync.detail}" }
+                        } else if !sync.last_error.is_empty() {
+                            p { class: "flasher-lib__meta flasher-lib__meta-warn", "Last error · {sync.last_error}" }
                         }
-                        p { class: "mb-2 text-xs text-muted-foreground",
-                            "{n_selected} selected · disk used {disk_label}"
+
+                        // --- Compact metrics ---
+                        {
+                            let (sel, on_disk, verified, missing, unpublished, bad, github, deep) =
+                                if let Some(ready) = readiness.as_ref() {
+                                    (
+                                        ready.selected,
+                                        ready.on_disk_assets,
+                                        ready.verified_ok,
+                                        ready.missing_selected,
+                                        ready.unpublished_selected,
+                                        ready.corrupt_or_incomplete,
+                                        ready.github_verified,
+                                        ready.deep_checked,
+                                    )
+                                } else {
+                                    (n_selected, sync.asset_count as usize, 0, 0, 0, 0, 0, false)
+                                };
+                            let verified_label = if on_disk > 0 {
+                                format!("{verified}/{on_disk}")
+                            } else {
+                                "—".into()
+                            };
+                            rsx! {
+                                div { class: "flasher-lib__metrics",
+                                    div { class: "flasher-lib__metric",
+                                        p { class: "flasher-lib__metric-label", "Selected" }
+                                        p { class: "flasher-lib__metric-value", "{sel}" }
+                                    }
+                                    div { class: "flasher-lib__metric",
+                                        p { class: "flasher-lib__metric-label", "On disk" }
+                                        p { class: "flasher-lib__metric-value", "{on_disk}" }
+                                    }
+                                    div { class: "flasher-lib__metric",
+                                        p { class: "flasher-lib__metric-label", "Size" }
+                                        p { class: "flasher-lib__metric-value", "{disk_label}" }
+                                    }
+                                    div { class: "flasher-lib__metric",
+                                        p { class: "flasher-lib__metric-label",
+                                            if deep { "Checksum OK" } else { "Verified" }
+                                        }
+                                        p { class: "flasher-lib__metric-value", "{verified_label}" }
+                                    }
+                                }
+                                if missing > 0 || bad > 0 || unpublished > 0 || github > 0 {
+                                    p { class: "flasher-lib__meta",
+                                        if missing > 0 {
+                                            span { "Missing {missing}" }
+                                        }
+                                        if bad > 0 {
+                                            if missing > 0 { span { " · " } }
+                                            span { class: "flasher-lib__meta-warn", "Bad {bad}" }
+                                        }
+                                        if unpublished > 0 {
+                                            if missing > 0 || bad > 0 { span { " · " } }
+                                            span { "Unpublished {unpublished} (OK)" }
+                                        }
+                                        if github > 0 {
+                                            if missing > 0 || bad > 0 || unpublished > 0 { span { " · " } }
+                                            span { "{github} GitHub-verified" }
+                                        }
+                                    }
+                                }
+                            }
                         }
                         if !last_sync_label.is_empty() {
-                            p { class: "mb-3 text-xs text-muted-foreground",
-                                "Last successful sync: {last_sync_label}"
+                            p { class: "flasher-lib__meta",
+                                "Last successful sync · {last_sync_label}"
                             }
                         }
+
+                        // --- Library actions ---
+                        div { class: "flasher-lib__section",
+                            p { class: "flasher-lib__section-title", "Library" }
+                            div { class: "flasher-lib__actions",
+                                Button {
+                                    disabled: sync_busy,
+                                    onclick: move |_| {
+                                        crate::firmware::start_sync(state().db.clone());
+                                        flasher_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                    },
+                                    Icon { name: IconName::Scan, size: 14 }
+                                    if sync_busy { "Syncing…" } else { "Sync now" }
+                                }
+                                Button {
+                                    kind: ButtonKind::Ghost,
+                                    onclick: move |_| {
+                                        let catalog = crate::firmware::load_catalog().ok();
+                                        let offers = catalog
+                                            .as_ref()
+                                            .map(crate::firmware::community_offers)
+                                            .unwrap_or_default();
+                                        // Open immediately with a cheap draft; disk hints load in background.
+                                        // Do not let background work rewrite draft / Download-all (race).
+                                        let had_selection = crate::firmware::selection_file_exists();
+                                        let sel = if had_selection {
+                                            crate::firmware::load_selection()
+                                        } else {
+                                            crate::firmware::FirmwareSelection::default()
+                                        };
+                                        let mut draft = std::collections::BTreeMap::new();
+                                        for entry in sel.entries.iter() {
+                                            draft.insert(entry.key.clone(), entry.clone());
+                                        }
+                                        let all_selected = sel.download_all
+                                            || crate::firmware::selection_covers_all_offers(
+                                                &sel,
+                                                &offers,
+                                            );
+                                        flasher_manage_offers.set(offers.clone());
+                                        flasher_manage_on_disk.set(std::collections::BTreeSet::new());
+                                        flasher_manage_unavailable
+                                            .set(crate::firmware::load_unavailable_keys());
+                                        flasher_manage_family_tags
+                                            .set(std::collections::BTreeMap::new());
+                                        flasher_manage_draft.set(draft);
+                                        flasher_manage_query.set(String::new());
+                                        flasher_manage_expanded
+                                            .set(std::collections::BTreeSet::new());
+                                        flasher_download_all.set(all_selected);
+                                        flasher_manage_open.set(true);
+                                        spawn(async move {
+                                            let offers_bg = offers;
+                                            let result = tokio::task::spawn_blocking(move || {
+                                                let index = crate::firmware::load_index();
+                                                let seeded = if had_selection {
+                                                    None
+                                                } else {
+                                                    Some(crate::firmware::load_or_seed_selection(
+                                                        &offers_bg,
+                                                        &index,
+                                                    ))
+                                                };
+                                                let on_disk = crate::firmware::local_offer_keys(
+                                                    &offers_bg,
+                                                    &index,
+                                                );
+                                                let family_tags =
+                                                    crate::firmware::family_tags_from_index(
+                                                        &index,
+                                                    );
+                                                let unavailable =
+                                                    crate::firmware::load_unavailable_keys();
+                                                (seeded, on_disk, family_tags, unavailable)
+                                            })
+                                            .await;
+                                            match result {
+                                                Ok((seeded, on_disk, family_tags, unavailable)) => {
+                                                    if let Some(seeded) = seeded {
+                                                        if !seeded.entries.is_empty()
+                                                            && flasher_manage_draft().is_empty()
+                                                        {
+                                                            let mut draft_map =
+                                                                std::collections::BTreeMap::new();
+                                                            for entry in seeded.entries {
+                                                                draft_map.insert(
+                                                                    entry.key.clone(),
+                                                                    entry,
+                                                                );
+                                                            }
+                                                            let all_selected = crate::firmware::selection_covers_all_offers(
+                                                                &crate::firmware::FirmwareSelection {
+                                                                    download_all: false,
+                                                                    entries: draft_map
+                                                                        .values()
+                                                                        .cloned()
+                                                                        .collect(),
+                                                                    updated_at: 0,
+                                                                },
+                                                                &flasher_manage_offers(),
+                                                            );
+                                                            flasher_manage_draft.set(draft_map);
+                                                            flasher_download_all.set(all_selected);
+                                                        }
+                                                    }
+                                                    flasher_manage_on_disk.set(on_disk);
+                                                    flasher_manage_unavailable.set(unavailable);
+                                                    flasher_manage_family_tags.set(family_tags);
+                                                }
+                                                Err(err) => {
+                                                    hq_log!(
+                                                        warn,
+                                                        "firmware manage preload: {err}"
+                                                    );
+                                                }
+                                            }
+                                        });
+                                    },
+                                    "Manage firmware…"
+                                }
+                            }
+                        }
+
+                        // --- USB pack ---
+                        div { class: "flasher-lib__section",
+                            p { class: "flasher-lib__section-title", "USB pack" }
+                            div { class: "flasher-lib__actions",
+                                Button {
+                                    kind: ButtonKind::Ghost,
+                                    disabled: sync_busy,
+                                    onclick: move |_| {
+                                        flasher_pack_note.set("Checking integrity…".into());
+                                        spawn(async move {
+                                            let report = tokio::task::spawn_blocking(
+                                                crate::firmware::readiness_report,
+                                            )
+                                            .await;
+                                            match report {
+                                                Ok(r) => {
+                                                    let kind = if r.ready_for_outage {
+                                                        crate::toast::ToastKind::Success
+                                                    } else {
+                                                        crate::toast::ToastKind::Warn
+                                                    };
+                                                    crate::toast::push(kind, r.summary.clone());
+                                                    flasher_readiness.set(Some(r));
+                                                    flasher_pack_note.set(String::new());
+                                                }
+                                                Err(err) => {
+                                                    let msg = format!(
+                                                        "Integrity check failed: {err}"
+                                                    );
+                                                    flasher_pack_note.set(String::new());
+                                                    crate::toast::push(
+                                                        crate::toast::ToastKind::Error,
+                                                        msg,
+                                                    );
+                                                }
+                                            }
+                                        });
+                                    },
+                                    "Check integrity"
+                                }
+                                Button {
+                                    kind: ButtonKind::Ghost,
+                                    disabled: sync_busy,
+                                    onclick: move |_| {
+                                        let dest = match crate::firmware::pick_export_locker_pack_path()
+                                        {
+                                            Ok(path) => path,
+                                            Err(_) => return, // cancelled
+                                        };
+                                        flasher_pack_note.set("Exporting zip pack…".into());
+                                        spawn(async move {
+                                            let result = tokio::task::spawn_blocking(move || {
+                                                crate::firmware::export_locker_pack_to(&dest)
+                                            })
+                                            .await;
+                                            match result {
+                                                Ok(Ok(path)) => {
+                                                    flasher_pack_note.set(String::new());
+                                                    crate::toast::push(
+                                                        crate::toast::ToastKind::Success,
+                                                        format!(
+                                                            "Firmware pack exported to {}",
+                                                            path.display()
+                                                        ),
+                                                    );
+                                                }
+                                                Ok(Err(err)) => {
+                                                    flasher_pack_note.set(String::new());
+                                                    crate::toast::push(
+                                                        crate::toast::ToastKind::Error,
+                                                        err,
+                                                    );
+                                                }
+                                                Err(err) => {
+                                                    flasher_pack_note.set(String::new());
+                                                    crate::toast::push(
+                                                        crate::toast::ToastKind::Error,
+                                                        format!("Export failed: {err}"),
+                                                    );
+                                                }
+                                            }
+                                        });
+                                    },
+                                    "Export pack"
+                                }
+                                Button {
+                                    kind: ButtonKind::Ghost,
+                                    disabled: sync_busy,
+                                    onclick: move |_| {
+                                        let zip_path = match crate::firmware::pick_import_locker_pack_path()
+                                        {
+                                            Ok(path) => path,
+                                            Err(_) => return,
+                                        };
+                                        flasher_pack_note.set("Importing zip pack…".into());
+                                        spawn(async move {
+                                            let result = tokio::task::spawn_blocking(move || {
+                                                crate::firmware::import_locker_pack_from(
+                                                    &zip_path,
+                                                )
+                                            })
+                                            .await;
+                                            match result {
+                                                Ok(Ok(_)) => {
+                                                    flasher_pack_note.set(String::new());
+                                                    crate::toast::push(
+                                                        crate::toast::ToastKind::Success,
+                                                        "Firmware pack imported. Run Check integrity.",
+                                                    );
+                                                    flasher_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                                }
+                                                Ok(Err(err)) => {
+                                                    flasher_pack_note.set(String::new());
+                                                    crate::toast::push(
+                                                        crate::toast::ToastKind::Error,
+                                                        err,
+                                                    );
+                                                }
+                                                Err(err) => {
+                                                    flasher_pack_note.set(String::new());
+                                                    crate::toast::push(
+                                                        crate::toast::ToastKind::Error,
+                                                        format!("Import failed: {err}"),
+                                                    );
+                                                }
+                                            }
+                                        });
+                                    },
+                                    "Import pack"
+                                }
+                            }
+                            if !flasher_pack_note().is_empty() {
+                                p { class: "flasher-lib__note", "{flasher_pack_note}" }
+                            }
+                        }
+
+                        // --- On-disk folder ---
                         {
                             let folder = crate::firmware::firmware_root_display();
                             rsx! {
-                                p { class: "mb-2 font-mono text-xs text-muted-foreground break-all",
-                                    "{folder}"
-                                }
-                                div { class: "mb-3 flex flex-wrap gap-2",
-                                    Button {
-                                        disabled: sync_busy,
-                                        onclick: move |_| {
-                                            crate::firmware::start_sync(state().db.clone());
-                                            flasher_tick.with_mut(|n| *n = n.wrapping_add(1));
-                                        },
-                                        Icon { name: IconName::Scan, size: 14 }
-                                        if sync_busy { "Syncing…" } else { "Sync now" }
-                                    }
-                                    Button {
-                                        kind: ButtonKind::Ghost,
-                                        onclick: move |_| {
-                                            let catalog = crate::firmware::load_catalog().ok();
-                                            let offers = catalog
-                                                .as_ref()
-                                                .map(crate::firmware::community_offers)
-                                                .unwrap_or_default();
-                                            // Open immediately with a cheap draft; disk hints load in background.
-                                            // Do not let background work rewrite draft / Download-all (race).
-                                            let had_selection = crate::firmware::selection_file_exists();
-                                            let sel = if had_selection {
-                                                crate::firmware::load_selection()
-                                            } else {
-                                                crate::firmware::FirmwareSelection::default()
-                                            };
-                                            let mut draft = std::collections::BTreeMap::new();
-                                            for entry in sel.entries.iter() {
-                                                draft.insert(entry.key.clone(), entry.clone());
-                                            }
-                                            let all_selected = sel.download_all
-                                                || crate::firmware::selection_covers_all_offers(
-                                                    &sel,
-                                                    &offers,
-                                                );
-                                            flasher_manage_offers.set(offers.clone());
-                                            flasher_manage_on_disk.set(std::collections::BTreeSet::new());
-                                            flasher_manage_unavailable
-                                                .set(crate::firmware::load_unavailable_keys());
-                                            flasher_manage_family_tags
-                                                .set(std::collections::BTreeMap::new());
-                                            flasher_manage_draft.set(draft);
-                                            flasher_manage_query.set(String::new());
-                                            flasher_manage_expanded
-                                                .set(std::collections::BTreeSet::new());
-                                            flasher_download_all.set(all_selected);
-                                            flasher_manage_open.set(true);
-                                            spawn(async move {
-                                                let offers_bg = offers;
-                                                let result = tokio::task::spawn_blocking(move || {
-                                                    let index = crate::firmware::load_index();
-                                                    let seeded = if had_selection {
-                                                        None
-                                                    } else {
-                                                        Some(crate::firmware::load_or_seed_selection(
-                                                            &offers_bg,
-                                                            &index,
-                                                        ))
-                                                    };
-                                                    let on_disk = crate::firmware::local_offer_keys(
-                                                        &offers_bg,
-                                                        &index,
+                                div { class: "flasher-lib__panel",
+                                    p { class: "flasher-lib__section-title", "On this computer" }
+                                    p { class: "flasher-lib__path", "{folder}" }
+                                    div { class: "flasher-lib__actions",
+                                        Button {
+                                            kind: ButtonKind::Ghost,
+                                            onclick: {
+                                                let folder = folder.clone();
+                                                move |_| {
+                                                    let escaped = folder
+                                                        .replace('\\', "\\\\")
+                                                        .replace('`', "\\`")
+                                                        .replace('$', "\\$");
+                                                    let _ = document::eval(
+                                                        &format!(
+                                                            "navigator.clipboard.writeText(`{escaped}`).catch(() => {{}})"
+                                                        ),
                                                     );
-                                                    let family_tags =
-                                                        crate::firmware::family_tags_from_index(
-                                                            &index,
-                                                        );
-                                                    let unavailable =
-                                                        crate::firmware::load_unavailable_keys();
-                                                    (seeded, on_disk, family_tags, unavailable)
-                                                })
-                                                .await;
-                                                match result {
-                                                    Ok((seeded, on_disk, family_tags, unavailable)) => {
-                                                        if let Some(seeded) = seeded {
-                                                            if !seeded.entries.is_empty()
-                                                                && flasher_manage_draft().is_empty()
-                                                            {
-                                                                let mut draft_map =
-                                                                    std::collections::BTreeMap::new();
-                                                                for entry in seeded.entries {
-                                                                    draft_map.insert(
-                                                                        entry.key.clone(),
-                                                                        entry,
-                                                                    );
-                                                                }
-                                                                let all_selected = crate::firmware::selection_covers_all_offers(
-                                                                    &crate::firmware::FirmwareSelection {
-                                                                        download_all: false,
-                                                                        entries: draft_map
-                                                                            .values()
-                                                                            .cloned()
-                                                                            .collect(),
-                                                                        updated_at: 0,
-                                                                    },
-                                                                    &flasher_manage_offers(),
-                                                                );
-                                                                flasher_manage_draft.set(draft_map);
-                                                                flasher_download_all.set(all_selected);
-                                                            }
-                                                        }
-                                                        flasher_manage_on_disk.set(on_disk);
-                                                        flasher_manage_unavailable.set(unavailable);
-                                                        flasher_manage_family_tags.set(family_tags);
-                                                    }
+                                                    crate::toast::push(
+                                                        crate::toast::ToastKind::Success,
+                                                        "Firmware path copied",
+                                                    );
+                                                }
+                                            },
+                                            Icon { name: IconName::Copy, size: 14 }
+                                            "Copy path"
+                                        }
+                                        Button {
+                                            kind: ButtonKind::Ghost,
+                                            onclick: move |_| {
+                                                match crate::firmware::open_firmware_folder() {
+                                                    Ok(()) => status_note("Opening firmware folder…"),
                                                     Err(err) => {
-                                                        hq_log!(
-                                                            warn,
-                                                            "firmware manage preload: {err}"
-                                                        );
+                                                        hq_log!(warn, "open firmware folder: {err}");
+                                                        status_note(format!("Open folder failed: {err}"));
                                                     }
                                                 }
-                                            });
-                                        },
-                                        "Manage firmware…"
-                                    }
-                                    Button {
-                                        kind: ButtonKind::Ghost,
-                                        onclick: {
-                                            let folder = folder.clone();
-                                            move |_| {
-                                                let escaped = folder
-                                                    .replace('\\', "\\\\")
-                                                    .replace('`', "\\`")
-                                                    .replace('$', "\\$");
-                                                let _ = document::eval(
-                                                    &format!(
-                                                        "navigator.clipboard.writeText(`{escaped}`).catch(() => {{}})"
-                                                    ),
-                                                );
-                                            }
-                                        },
-                                        Icon { name: IconName::Copy, size: 14 }
-                                        "Copy path"
-                                    }
-                                    Button {
-                                        kind: ButtonKind::Ghost,
-                                        onclick: move |_| {
-                                            // Detached file-manager open — never a modal file dialog.
-                                            match crate::firmware::open_firmware_folder() {
-                                                Ok(()) => status_note("Opening firmware folder…"),
-                                                Err(err) => {
-                                                    hq_log!(warn, "open firmware folder: {err}");
-                                                    status_note(format!("Open folder failed: {err}"));
-                                                }
-                                            }
-                                        },
-                                        "Open folder"
+                                            },
+                                            "Open folder"
+                                        }
                                     }
                                 }
                             }
                         }
-                        div { class: "flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center",
-                            label { class: "flex items-center gap-2 text-sm",
-                                input {
-                                    r#type: "checkbox",
-                                    checked: flasher_sync_enabled(),
-                                    oninput: move |_| {
-                                        let next = !flasher_sync_enabled();
-                                        flasher_sync_enabled.set(next);
-                                        crate::services::set_setting_bool(
-                                            &state().db,
-                                            "firmware_sync_enabled",
-                                            next,
-                                        );
+
+                        // --- Background sync ---
+                        div { class: "flasher-lib__panel",
+                            p { class: "flasher-lib__section-title", "Background sync" }
+                            div { class: "flasher-lib__sync-row",
+                                label { class: "flasher-lib__sync-toggle",
+                                    input {
+                                        r#type: "checkbox",
+                                        checked: flasher_sync_enabled(),
+                                        oninput: move |_| {
+                                            let next = !flasher_sync_enabled();
+                                            flasher_sync_enabled.set(next);
+                                            crate::services::set_setting_bool(
+                                                &state().db,
+                                                "firmware_sync_enabled",
+                                                next,
+                                            );
+                                        }
                                     }
+                                    "When online"
                                 }
-                                "Background sync when online"
-                            }
-                            div { class: "flex min-w-0 items-center gap-2 text-sm",
-                                label {
-                                    class: "shrink-0 text-muted-foreground",
-                                    r#for: "firmware-sync-interval",
-                                    "Check every"
-                                }
-                                SelectInput {
-                                    id: "firmware-sync-interval".to_string(),
-                                    value: flasher_sync_interval(),
-                                    onchange: move |event: FormEvent| {
-                                        let raw = event.value();
-                                        let hours = crate::firmware::normalize_sync_interval_hours(
-                                            raw.parse::<u64>().unwrap_or(12),
-                                        );
-                                        flasher_sync_interval.set(hours.to_string());
-                                        let _ = state().db.set_setting(
-                                            "firmware_sync_interval_hours",
-                                            &hours.to_string(),
-                                        );
-                                    },
-                                    option {
-                                        value: "12",
-                                        style: "background-color: #101418; color: #f4f4f5;",
-                                        "12 hours"
+                                div { class: "flasher-lib__sync-interval",
+                                    label {
+                                        r#for: "firmware-sync-interval",
+                                        "Check every"
                                     }
-                                    option {
-                                        value: "24",
-                                        style: "background-color: #101418; color: #f4f4f5;",
-                                        "1 day"
-                                    }
-                                    option {
-                                        value: "720",
-                                        style: "background-color: #101418; color: #f4f4f5;",
-                                        "30 days"
+                                    SelectInput {
+                                        id: "firmware-sync-interval".to_string(),
+                                        value: flasher_sync_interval(),
+                                        onchange: move |event: FormEvent| {
+                                            let raw = event.value();
+                                            let hours = crate::firmware::normalize_sync_interval_hours(
+                                                raw.parse::<u64>().unwrap_or(12),
+                                            );
+                                            flasher_sync_interval.set(hours.to_string());
+                                            let _ = state().db.set_setting(
+                                                "firmware_sync_interval_hours",
+                                                &hours.to_string(),
+                                            );
+                                        },
+                                        option {
+                                            value: "12",
+                                            style: "background-color: #101418; color: #f4f4f5;",
+                                            "12 hours"
+                                        }
+                                        option {
+                                            value: "24",
+                                            style: "background-color: #101418; color: #f4f4f5;",
+                                            "1 day"
+                                        }
+                                        option {
+                                            value: "720",
+                                            style: "background-color: #101418; color: #f4f4f5;",
+                                            "30 days"
+                                        }
                                     }
                                 }
                             }
                         }
+                        } // .flasher-lib
                     }
                     SlideDownPanel {
                         open: flasher_manage_open(),
@@ -8768,6 +9089,38 @@ fn SettingsPage(
                         icon: Some(IconName::Radio),
                         wide: true,
                         on_close: move |_| flasher_manage_open.set(false),
+                        footer: rsx! {
+                            Button {
+                                disabled: sync_busy,
+                                onclick: move |_| {
+                                    let draft = flasher_manage_draft();
+                                    let offers = flasher_manage_offers();
+                                    let entries: Vec<_> = draft.into_values().collect();
+                                    let mut sel = crate::firmware::FirmwareSelection {
+                                        updated_at: 0,
+                                        download_all: flasher_download_all(),
+                                        entries,
+                                    };
+                                    if crate::firmware::selection_covers_all_offers(&sel, &offers) {
+                                        sel.download_all = true;
+                                    }
+                                    if let Err(err) = crate::firmware::save_selection(&sel) {
+                                        hq_log!(warn, "save firmware selection: {err}");
+                                        return;
+                                    }
+                                    flasher_manage_open.set(false);
+                                    crate::firmware::start_sync(state().db.clone());
+                                    flasher_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                },
+                                Icon { name: IconName::Scan, size: 14 }
+                                "Save & sync"
+                            }
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| flasher_manage_open.set(false),
+                                "Close"
+                            }
+                        },
                         div { class: "mb-3",
                             TextInput {
                                 value: flasher_manage_query(),
@@ -8998,39 +9351,6 @@ fn SettingsPage(
                                         }
                                     }
                                 }
-                            }
-                        }
-                        div { class: "flex flex-wrap gap-2",
-                            Button {
-                                disabled: sync_busy,
-                                onclick: move |_| {
-                                    let draft = flasher_manage_draft();
-                                    let offers = flasher_manage_offers();
-                                    let entries: Vec<_> = draft.into_values().collect();
-                                    let mut sel = crate::firmware::FirmwareSelection {
-                                        updated_at: 0,
-                                        download_all: flasher_download_all(),
-                                        entries,
-                                    };
-                                    // Keep the flag honest if every offer is checked even without the toggle.
-                                    if crate::firmware::selection_covers_all_offers(&sel, &offers) {
-                                        sel.download_all = true;
-                                    }
-                                    if let Err(err) = crate::firmware::save_selection(&sel) {
-                                        hq_log!(warn, "save firmware selection: {err}");
-                                        return;
-                                    }
-                                    flasher_manage_open.set(false);
-                                    crate::firmware::start_sync(state().db.clone());
-                                    flasher_tick.with_mut(|n| *n = n.wrapping_add(1));
-                                },
-                                Icon { name: IconName::Scan, size: 14 }
-                                "Save & sync"
-                            }
-                            Button {
-                                kind: ButtonKind::Ghost,
-                                onclick: move |_| flasher_manage_open.set(false),
-                                "Close"
                             }
                         }
                     }
@@ -9406,6 +9726,25 @@ fn SettingsPage(
                                 }
                             }
                         }
+                    }
+                }
+                Card { title: "Offline runbook (first hour)".to_string(), icon: Some(IconName::Inbox),
+                    p { class: "mb-2 text-sm text-muted-foreground",
+                        "For volunteers when the Internet is down. Full printable copy: docs/OFFLINE_RUNBOOK.md in the source tree."
+                    }
+                    ol { class: "mb-3 list-decimal space-y-1 pl-5 text-sm text-foreground",
+                        li { "Power the laptop (AC or UPS) and the companion radio. Disable sleep." }
+                        li { "Open Metis Mesh HQ — no cloud login." }
+                        li { "Settings → Connect: confirm the companion is connected (Refresh USB if the port moved)." }
+                        li { "Open Map, then Messages — post a short channel check-in so the room knows HQ is live." }
+                        li { "Roster: approve only people you trust. Secrets never appear in the message list." }
+                        li { "Flash only from Settings → Flasher after Sync shows Ready for outage (or Import pack from a USB .zip)." }
+                    }
+                    p { class: "mb-2 text-sm text-muted-foreground",
+                        "Battery / UPS: size for laptop + USB radio (often 2–4 hours). Keep vents clear. Mesh traffic does not need Internet once firmware is already synced."
+                    }
+                    p { class: "text-xs text-muted-foreground",
+                        "Do not present HQ traffic as FEMA, NWS, or law enforcement."
                     }
                 }
             }

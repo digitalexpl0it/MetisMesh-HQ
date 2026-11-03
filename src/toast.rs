@@ -118,6 +118,8 @@ pub fn infer_kind(message: &str) -> ToastKind {
         || lower.contains("created")
         || lower.contains("cleared")
         || lower.contains("applied")
+        || lower.contains("exported")
+        || lower.contains("imported")
         || lower.contains("is now")
         || lower.contains("keep →")
         || lower.contains("keep ->")

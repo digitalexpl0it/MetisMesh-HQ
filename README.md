@@ -12,7 +12,8 @@ Churches, neighborhoods, and volunteer groups run this on a regular computer sit
 - Claims and admin-verifies infrastructure (repeaters / rooms / sensors) over LoRa through the primary companion
 - Maps nodes with MapLibre + a local style (and optional PMTiles offline packs)
 - Tracks an operator whitelist of devices expected to share GPS (Tracker)
-- Offline firmware locker + USB flasher; encrypted HQ backup/restore
+- Offline firmware locker + USB flasher (checksums, Ready-for-outage status, export/import `.zip` pack); encrypted HQ backup/restore
+- Volunteer offline runbook (`docs/OFFLINE_RUNBOOK.md` and Settings → About)
 - Stores messages and contacts in SQLite under the per-user data folder
 - Puts channel secrets in the OS keyring when it can; otherwise a locked-down file
 

@@ -83,6 +83,7 @@ Mirror MeshCore community firmware while online; flash over USB when the interne
 - [x] **G2** Background sync (12h / Sync now / enable toggle); offline UI still flashes from cache
 - [x] **G3** Settings → Flasher: device/role/version/port; ESP32 via esptool; nRF52 via adafruit-nrfutil or UF2 path; erase off by default
 - [x] **G4** Selective locker + Manage overlay: `selection.json`, Download-all (~1 GB), Latest/Previous, fuzzy/zebra/pills; sync downloads only the checked set and prunes orphans
+- [x] **G5** Outage readiness: Flasher “Ready for outage” banner; SHA-256 flash guard; Check integrity; Export/Import locker pack (`.zip`); offline runbook (About + `docs/OFFLINE_RUNBOOK.md`)
 
 ## Phase H — Standalone desktop ship
 

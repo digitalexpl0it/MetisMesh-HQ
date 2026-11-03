@@ -13,7 +13,7 @@ Churches, neighborhoods, and volunteer groups run this on a regular computer sit
 - Maps nodes with MapLibre + a local style (and optional PMTiles offline packs)
 - Tracks an operator whitelist of devices expected to share GPS (Tracker)
 - Offline firmware locker + USB flasher; encrypted HQ backup/restore
-- Stores messages and contacts in SQLite under `data/`
+- Stores messages and contacts in SQLite under the per-user data folder
 - Puts channel secrets in the OS keyring when it can; otherwise a locked-down file
 
 Communities stay separate until both headquarters agree to link. That bridge is not in this MVP yet — the data model leaves room for it.
@@ -27,7 +27,12 @@ GitHub Actions builds Linux (`x86_64`), Windows (`x86_64`), and macOS (`aarch64`
 3. Run the binary from that folder:
    - Linux / macOS: `./metis-mesh-hq-linux-x86_64` (or the macOS name from the archive)
    - Windows: double-click or run `metis-mesh-hq-windows-x86_64.exe`
-4. First launch creates `./data/` next to your current working directory for SQLite, firmware cache, backups, and QR files. Override with `METIS_DATA_DIR=/path/to/dir` if you want the data elsewhere.
+4. First launch creates the per-user data folder (SQLite, firmware cache, backups, QR files):
+   - Linux: `~/.MetisMeshHQ`
+   - macOS: `~/Library/Application Support/MetisMeshHQ`
+   - Windows: `%APPDATA%\MetisMeshHQ`
+   
+   Override with `METIS_DATA_DIR=/path/to/dir` if you want the data elsewhere.
 
 ### Runtime libraries
 
@@ -91,7 +96,7 @@ Or:
 cargo run --release
 ```
 
-On first launch it creates `data/` (gitignored) for the database and QR cache.
+On first launch it creates the per-user data folder (`~/.MetisMeshHQ` on Linux — see Install) for the database and QR cache.
 
 ## Build releases yourself
 
@@ -107,7 +112,7 @@ Binary lands at `target/release/metis-mesh-hq` (`.exe` on Windows). MapLibre and
 | --- | --- |
 | `src/` | App, radio task, SQLite, map tiles, UI |
 | `assets/` | MapLibre, CSS, presets, offline map bits |
-| `data/` | Local DB + QR SVGs (not in git) |
+| profile data dir | Local DB + QR SVGs (`~/.MetisMeshHQ` on Linux; not in git) |
 | `.github/workflows/` | Cross-platform builds |
 
 ## Notes worth knowing

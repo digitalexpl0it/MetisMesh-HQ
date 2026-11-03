@@ -92,12 +92,7 @@ fn set_download(status: DownloadStatus) {
 }
 
 pub fn tiles_dir() -> PathBuf {
-    let root = if let Some(path) = std::env::var_os("METIS_DATA_DIR") {
-        PathBuf::from(path)
-    } else {
-        PathBuf::from("data")
-    };
-    let dir = root.join("map-tiles");
+    let dir = crate::data_dir().join("map-tiles");
     let _ = std::fs::create_dir_all(&dir);
     dir
 }

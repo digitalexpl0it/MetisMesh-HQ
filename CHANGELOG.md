@@ -6,6 +6,8 @@
 
 - Standalone Linux / Windows / macOS release binaries via CI (`cargo build --release`); tag `v*` publishes a GitHub Release
 - CI fixes: `libudev-dev` on Linux, Windows-safe USB by-id test, unique SQLite snapshot temp paths
+- Data folder moved to the user profile: Linux `~/.MetisMeshHQ`, macOS `…/MetisMeshHQ`, Windows `%APPDATA%\MetisMeshHQ` (`METIS_DATA_DIR` still overrides)
+- Default EmergHQ header logo embedded in the binary (release packages no longer show a broken image)
 
 ### Radio pool
 

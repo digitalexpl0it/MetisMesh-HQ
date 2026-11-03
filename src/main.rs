@@ -33,6 +33,13 @@ use ui::{install, App, AppState};
 
 fn main() {
     let data = data_dir();
+    if let Err(err) = std::fs::create_dir_all(&data) {
+        eprintln!(
+            "unable to create the headquarters data folder {}: {err}",
+            data.display()
+        );
+        std::process::exit(1);
+    }
     let db = Db::open(&data.join("metis.db")).unwrap_or_else(|err| {
         eprintln!("unable to open the headquarters database: {err}");
         std::process::exit(1);
@@ -358,9 +365,42 @@ fn quiet_linux_titlebar(window: &dioxus::desktop::tao::window::Window) {
     }
 }
 
+/// HQ local store: SQLite, secrets fallback, firmware, map packs, backups, QR.
+///
+/// Override with `METIS_DATA_DIR`. Default is per-user profile storage:
+/// - Linux: `~/.MetisMeshHQ`
+/// - macOS: `~/Library/Application Support/MetisMeshHQ`
+/// - Windows: `%APPDATA%\MetisMeshHQ`
 pub(crate) fn data_dir() -> PathBuf {
     if let Some(path) = std::env::var_os("METIS_DATA_DIR") {
         return PathBuf::from(path);
     }
-    PathBuf::from("data")
+    default_profile_data_dir().unwrap_or_else(|| PathBuf::from("data"))
+}
+
+fn default_profile_data_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        let base = std::env::var_os("APPDATA")?;
+        return Some(PathBuf::from(base).join("MetisMeshHQ"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME")?;
+        return Some(
+            PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("MetisMeshHQ"),
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let home = std::env::var_os("HOME")?;
+        return Some(PathBuf::from(home).join(".MetisMeshHQ"));
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
 }

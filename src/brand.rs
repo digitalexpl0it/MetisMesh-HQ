@@ -12,6 +12,10 @@ const MAX_BYTES: u64 = 2 * 1024 * 1024;
 const SETTING_FILE: &str = "brand_logo";
 const SETTING_REV: &str = "brand_logo_rev";
 
+/// Bundled EmergHQ mark — shipped inside the binary (release packages have no assets/).
+const DEFAULT_LOGO_PNG: &[u8] = include_bytes!("../assets/emerghq_logo.png");
+const DEFAULT_LOGO_NAME: &str = "__default.png";
+
 pub fn init(data_dir: &Path) {
     let dir = data_dir.join("brand");
     let _ = fs::create_dir_all(&dir);
@@ -22,7 +26,12 @@ fn brand_dir() -> PathBuf {
     BRAND_DIR
         .get()
         .cloned()
-        .unwrap_or_else(|| PathBuf::from("data/brand"))
+        .unwrap_or_else(|| crate::data_dir().join("brand"))
+}
+
+/// URL for the bundled default logo (works in cargo-built desktop releases).
+pub fn default_logo_url() -> &'static str {
+    "metis://localhost/brand/__default.png"
 }
 
 fn sanitize_filename(name: &str) -> Option<String> {
@@ -109,7 +118,11 @@ pub fn logo_disk_path(db: &Db) -> Option<PathBuf> {
 
 /// Read bytes for the custom protocol handler. Returns `(bytes, content_type)`.
 pub fn read_brand_file(name: &str) -> Option<(Vec<u8>, &'static str)> {
-    let name = sanitize_filename(name)?;
+    let raw = name.trim().split('?').next().unwrap_or("").trim();
+    if raw.eq_ignore_ascii_case(DEFAULT_LOGO_NAME) {
+        return Some((DEFAULT_LOGO_PNG.to_vec(), "image/png"));
+    }
+    let name = sanitize_filename(raw)?;
     let path = brand_dir().join(&name);
     let bytes = fs::read(path).ok()?;
     Some((bytes, content_type(&name)))

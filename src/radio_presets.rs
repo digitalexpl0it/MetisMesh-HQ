@@ -61,15 +61,8 @@ fn trim_float(value: f64) -> String {
     }
 }
 
-fn data_dir() -> PathBuf {
-    if let Some(path) = std::env::var_os("METIS_DATA_DIR") {
-        return PathBuf::from(path);
-    }
-    PathBuf::from("data")
-}
-
 pub fn presets_cache_path() -> PathBuf {
-    data_dir().join(CACHE_NAME)
+    crate::data_dir().join(CACHE_NAME)
 }
 
 fn bundled_presets() -> Vec<RadioPreset> {

@@ -522,13 +522,14 @@
   function isolateMapContainerFromDioxus(container) {
     if (!container || container.__metisDioxusSeal) return;
     container.__metisDioxusSeal = true;
-    ["click", "mousedown", "mouseup", "pointerdown", "pointerup", "dblclick"].forEach(
+    ["click", "mousedown", "mouseup", "pointerdown", "pointerup", "dblclick", "wheel"].forEach(
       function (type) {
         container.addEventListener(
           type,
           function (ev) {
             // Bubble-phase stop so MapLibre target handlers still run, but the
             // event never reaches the Dioxus root (null element id → console error).
+            // Wheel: keep trackpad zoom on the map; do not let the page chrome eat it.
             try {
               ev.stopPropagation();
             } catch (_) {}
@@ -673,9 +674,20 @@
         center: [lng, lat],
         zoom: zoom,
         attributionControl: true,
+        // Explicit: trackpad / wheel zoom must stay on (WebKitGTK can feel inert otherwise).
+        interactive: true,
+        scrollZoom: true,
+        boxZoom: true,
+        dragPan: true,
+        dragRotate: false,
+        keyboard: true,
+        doubleClickZoom: true,
+        touchZoomRotate: true,
+        cooperativeGestures: false,
       });
-      map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
       this.maps[mapId] = map;
+      this.ensureScrollZoom(mapId);
+      this.ensureZoomControls(mapId);
       this.tipPopups[mapId] = new maplibregl.Popup({
         closeButton: false,
         closeOnClick: false,
@@ -847,10 +859,98 @@
       } catch (_) {}
     },
 
+    /** Trackpad / mouse wheel zoom — re-enable and keep gestures on the canvas. */
+    ensureScrollZoom: function (mapId) {
+      var map = this.maps[mapId];
+      if (!map) return;
+      try {
+        map.scrollZoom.enable();
+        // Slightly snappier than MapLibre defaults on desktop trackpads.
+        if (typeof map.scrollZoom.setWheelZoomRate === "function") {
+          map.scrollZoom.setWheelZoomRate(1 / 300);
+        }
+        if (typeof map.scrollZoom.setZoomRate === "function") {
+          map.scrollZoom.setZoomRate(1 / 80);
+        }
+        map.touchZoomRotate.enable();
+        map.doubleClickZoom.enable();
+      } catch (_) {}
+      var canvas = null;
+      try {
+        canvas = map.getCanvas();
+      } catch (_) {}
+      if (canvas && !canvas.__metisWheelSeal) {
+        canvas.__metisWheelSeal = true;
+        // Bubble-phase only: MapLibre already handled the wheel; stop the page chrome
+        // (hq-main scroll / Dioxus) from eating the gesture afterward.
+        canvas.addEventListener(
+          "wheel",
+          function (ev) {
+            try {
+              ev.stopPropagation();
+            } catch (_) {}
+          },
+          { passive: true }
+        );
+      }
+    },
+
+    removeZoomControls: function (mapId) {
+      var el = this._zoomControls && this._zoomControls[mapId];
+      if (el && el.parentNode) {
+        try {
+          el.parentNode.removeChild(el);
+        } catch (_) {}
+      }
+      if (this._zoomControls) delete this._zoomControls[mapId];
+    },
+
+    /** HQ-styled +/- in the map stage top-right (Tailwind preflight blanks MapLibre icons). */
+    ensureZoomControls: function (mapId) {
+      var map = this.maps[mapId];
+      if (!map) return;
+      var container = map.getContainer();
+      var stage = container && container.parentElement;
+      if (!stage) return;
+      this.removeZoomControls(mapId);
+      var wrap = document.createElement("div");
+      wrap.className = "map-zoom-controls";
+      wrap.setAttribute("role", "group");
+      wrap.setAttribute("aria-label", "Map zoom");
+      var btnIn = document.createElement("button");
+      btnIn.type = "button";
+      btnIn.className = "map-zoom-btn";
+      btnIn.title = "Zoom in";
+      btnIn.setAttribute("aria-label", "Zoom in");
+      btnIn.textContent = "+";
+      var btnOut = document.createElement("button");
+      btnOut.type = "button";
+      btnOut.className = "map-zoom-btn";
+      btnOut.title = "Zoom out";
+      btnOut.setAttribute("aria-label", "Zoom out");
+      btnOut.textContent = "−";
+      wrap.appendChild(btnIn);
+      wrap.appendChild(btnOut);
+      stage.appendChild(wrap);
+      if (!this._zoomControls) this._zoomControls = {};
+      this._zoomControls[mapId] = wrap;
+      wireSealedClick(btnIn, function () {
+        try {
+          map.zoomIn({ duration: 220 });
+        } catch (_) {}
+      });
+      wireSealedClick(btnOut, function () {
+        try {
+          map.zoomOut({ duration: 220 });
+        } catch (_) {}
+      });
+    },
+
     destroy: function (mapId) {
       this.teardownCoverageDrag(mapId);
       this.clearRegionDraft(mapId);
       this.clearSonar(mapId);
+      this.removeZoomControls(mapId);
       var map = this.maps[mapId];
       if (this._resizeObs && this._resizeObs[mapId]) {
         try {

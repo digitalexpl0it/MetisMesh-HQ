@@ -630,7 +630,7 @@ pub fn App() -> Element {
                             } else {
                                 img {
                                     class: "h-9 max-w-[14rem] object-contain object-left",
-                                    src: asset!("/assets/emerghq_logo.png"),
+                                    src: "{crate::brand::default_logo_url()}",
                                     alt: "EmergHQ",
                                 }
                             }
@@ -6059,9 +6059,9 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                             div { class: "flex flex-col gap-1",
                                 label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground",
                                     if mqtt_pass_saved {
-                                        "Password (saved under data/ · leave blank to keep)"
+                                        "Password (saved in HQ data folder · leave blank to keep)"
                                     } else {
-                                        "Password (saved under data/mqtt-weather.pass · 0600)"
+                                        "Password (saved as mqtt-weather.pass in HQ data folder · 0600)"
                                     }
                                 }
                                 TextInput {
@@ -6327,7 +6327,7 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                         } else {
                             img {
                                 class: "mb-3 h-12 max-w-xs object-contain object-left rounded border border-border bg-background p-2",
-                                src: asset!("/assets/emerghq_logo.png"),
+                                src: "{crate::brand::default_logo_url()}",
                                 alt: "Default EmergHQ logo",
                             }
                         }
@@ -6823,7 +6823,7 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                         div { class: "mb-4 rounded-md border border-border bg-background/50 p-3",
                             label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "Schedule" }
                             p { class: "mb-2 text-xs text-muted-foreground",
-                                "Automatic backups need a passphrase saved under data/ (0600). Changing the dropdown alone does nothing — enter matching passphrases above, then Save schedule."
+                                "Automatic backups need a passphrase saved in the HQ data folder (0600). Changing the dropdown alone does nothing — enter matching passphrases above, then Save schedule."
                             }
                             p { class: "mb-2 text-xs text-muted-foreground",
                                 "Currently saved: {backup_schedule_saved()}"
@@ -6901,7 +6901,7 @@ fn SettingsPage(radio: RadioStatus, on_request_pin: EventHandler<String>) -> Ele
                     rsx! {
                         if backups.is_empty() {
                             p { class: "mb-3 text-sm text-muted-foreground",
-                                "No backups in data/backups yet. Create one above, or open a .metisbak file."
+                                "No backups yet. Create one above, or open a .metisbak file."
                             }
                         } else {
                             div { class: "mb-3",

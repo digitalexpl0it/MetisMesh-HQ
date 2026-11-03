@@ -905,6 +905,7 @@ option {
   border-radius: 0.55rem;
   overflow: hidden;
   background: #0b1220;
+  overscroll-behavior: none;
 }
 
 /* Fill the stage. Keep MapLibre’s own relative layout — forcing
@@ -915,11 +916,61 @@ option {
   width: 100%;
   height: 100%;
   min-height: 0;
+  overscroll-behavior: none;
+  touch-action: none;
 }
 
 .map-canvas .maplibregl-map {
   width: 100% !important;
   height: 100% !important;
+}
+
+/* Custom +/- (MapLibre NavigationControl icons are blanked by Tailwind preflight). */
+.map-zoom-controls {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 0.45rem;
+  border: 1px solid #ffffff24;
+  background: rgba(16, 20, 24, 0.94);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  pointer-events: auto;
+}
+
+.map-zoom-btn {
+  display: inline-flex;
+  width: 2.1rem;
+  height: 2.1rem;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #e4e4e7;
+  font-size: 1.15rem;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+}
+
+.map-zoom-btn + .map-zoom-btn {
+  border-top: 1px solid #ffffff18;
+}
+
+.map-zoom-btn:hover {
+  background: rgba(61, 214, 140, 0.14);
+  color: #3dd68c;
+}
+
+.map-zoom-btn:active {
+  background: rgba(61, 214, 140, 0.22);
 }
 
 .map-legend {

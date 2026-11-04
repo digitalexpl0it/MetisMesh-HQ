@@ -108,7 +108,7 @@ pub fn TrackerPage() -> Element {
             section { class: "rounded-lg border border-border bg-card/40 p-4",
                 h3 { class: "mb-1 text-sm font-semibold", "On Tracker ({tracked.len()})" }
                 p { class: "mb-3 text-xs text-muted-foreground",
-                    "Map → Tracked shows these nodes plus HQ, with breadcrumb trails from heard position updates."
+                    "Map → Tracked shows these nodes plus HQ. Use Map → Tracker to select devices and plot trail lines with bend waypoints."
                 }
                 if tracked.is_empty() {
                     p { class: "text-sm text-muted-foreground",

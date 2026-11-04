@@ -12,17 +12,16 @@ use crate::radio::SyncPhase;
 
 use super::icons::{Icon, IconName};
 use super::map_host::{
-    dark_basemap_style, load_saved_basemap, load_saved_camera, map_bind_node_clicks, map_destroy,
-    map_ease_to, map_exists, map_fit_bounds, map_fly_to, map_get_camera, map_init,
-    map_pulse_at, map_set_geojson, map_camera_from_global, map_clear_region_draft,
-    map_is_moving,
-    map_place_region_draft, map_region_draft_seq, map_set_nodes, map_set_style,
-    map_set_visibility, map_snapshot_region_draft, map_take_favorite_toggle,
-    map_take_selection, region_draft_from_placement, save_basemap, save_camera,
-    BasemapKind, MapCamera, RegionDraftConfirm, MAP_CONTAINER_ID,
+    dark_basemap_style, load_saved_basemap, load_saved_camera, map_bind_node_clicks,
+    map_bind_waypoint_clicks, map_destroy, map_ease_to, map_exists, map_fit_bounds, map_fly_to,
+    map_get_camera, map_init, map_pulse_at, map_set_geojson, map_camera_from_global,
+    map_clear_region_draft, map_is_moving, map_place_region_draft, map_region_draft_seq,
+    map_set_nodes, map_set_style, map_set_visibility, map_snapshot_region_draft,
+    map_take_favorite_toggle, map_take_selection, region_draft_from_placement, save_basemap,
+    save_camera, BasemapKind, MapCamera, RegionDraftConfirm, MAP_CONTAINER_ID,
 };
 use super::state;
-use super::widgets::{Button, ButtonKind, PageHeading, SelectInput};
+use super::widgets::{Button, ButtonKind, PageHeading, SelectInput, SlideDownPanel};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NodeFilter {
@@ -115,6 +114,105 @@ fn type_color(enrollment: &str, contact_type: u8) -> &'static str {
         4 => "#fb923c", // Sensor
         _ => "#94a3b8",
     }
+}
+
+/// Distinct trail palette so multi-device overlays stay readable.
+const TRAIL_PALETTE: &[&str] = &[
+    "#38bdf8", "#f472b6", "#34d399", "#fbbf24", "#fb923c", "#a78bfa", "#f87171", "#2dd4bf",
+];
+
+const TRAIL_BEND_MIN_M: f64 = 75.0;
+const TRAIL_BEND_HEADING_DEG: f64 = 35.0;
+const TRAIL_WAYPOINT_CAP: usize = 50;
+
+fn trail_color_for_pubkey(pubkey: &str) -> &'static str {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in pubkey.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    TRAIL_PALETTE[(h as usize) % TRAIL_PALETTE.len()]
+}
+
+fn haversine_m(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
+    const R: f64 = 6_371_000.0;
+    let (phi1, phi2) = (lat1.to_radians(), lat2.to_radians());
+    let d_phi = (lat2 - lat1).to_radians();
+    let d_lambda = (lon2 - lon1).to_radians();
+    let a =
+        (d_phi / 2.0).sin().powi(2) + phi1.cos() * phi2.cos() * (d_lambda / 2.0).sin().powi(2);
+    2.0 * R * a.sqrt().asin()
+}
+
+fn bearing_deg(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
+    let phi1 = lat1.to_radians();
+    let phi2 = lat2.to_radians();
+    let d_lambda = (lon2 - lon1).to_radians();
+    let y = d_lambda.sin() * phi2.cos();
+    let x = phi1.cos() * phi2.sin() - phi1.sin() * phi2.cos() * d_lambda.cos();
+    y.atan2(x).to_degrees().rem_euclid(360.0)
+}
+
+fn heading_delta_deg(a: f64, b: f64) -> f64 {
+    let d = (b - a).abs() % 360.0;
+    if d > 180.0 {
+        360.0 - d
+    } else {
+        d
+    }
+}
+
+/// Thin chronologically ordered `(lon, lat, at)` samples to bend pins.
+/// Always keeps first and last; caps at `max_keep`.
+fn thin_trail_bends(pts: &[(f64, f64, i64)], max_keep: usize) -> Vec<usize> {
+    if pts.is_empty() {
+        return Vec::new();
+    }
+    if pts.len() == 1 {
+        return vec![0];
+    }
+    let mut keep = vec![0usize];
+    let mut dist_since = 0.0_f64;
+    let mut last_bearing: Option<f64> = None;
+    for i in 1..pts.len() {
+        let (lon0, lat0, _) = pts[i - 1];
+        let (lon1, lat1, _) = pts[i];
+        let d = haversine_m(lon0, lat0, lon1, lat1);
+        dist_since += d;
+        let brg = bearing_deg(lon0, lat0, lon1, lat1);
+        let bend = last_bearing
+            .map(|prev| heading_delta_deg(prev, brg) >= TRAIL_BEND_HEADING_DEG)
+            .unwrap_or(false);
+        if dist_since >= TRAIL_BEND_MIN_M || bend {
+            keep.push(i);
+            dist_since = 0.0;
+        }
+        if d > 1.0 {
+            last_bearing = Some(brg);
+        }
+    }
+    let last = pts.len() - 1;
+    if keep.last().copied() != Some(last) {
+        keep.push(last);
+    }
+    if max_keep < 2 || keep.len() <= max_keep {
+        return keep;
+    }
+    let mut out = Vec::with_capacity(max_keep);
+    out.push(keep[0]);
+    let inner = max_keep - 2;
+    if inner > 0 && keep.len() > 2 {
+        for j in 0..inner {
+            let t = (j + 1) as f64 / (inner + 1) as f64;
+            let idx = (t * (keep.len() - 1) as f64).round() as usize;
+            let idx = idx.clamp(1, keep.len() - 2);
+            out.push(keep[idx]);
+        }
+    }
+    out.push(keep[keep.len() - 1]);
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 fn type_key(enrollment: &str, contact_type: u8) -> &'static str {
@@ -291,9 +389,33 @@ struct MapModel {
     snr: Value,
     noise: Value,
     trails: Value,
+    waypoints: Value,
     note: String,
     bounds: Option<(f64, f64, f64, f64)>,
     pmtiles_ok: bool,
+}
+
+fn display_name_for_key(
+    key: &str,
+    rows: &[crate::db::NodeRow],
+    tracked_labels: &HashMap<String, String>,
+) -> String {
+    if let Some(node) = rows.iter().find(|n| n.pubkey == key) {
+        let name = node.name.trim();
+        if !name.is_empty() {
+            return name.to_string();
+        }
+        if !node.prefix.is_empty() {
+            return node.prefix.clone();
+        }
+    }
+    if let Some(label) = tracked_labels.get(key) {
+        let label = label.trim();
+        if !label.is_empty() {
+            return label.to_string();
+        }
+    }
+    key.chars().take(12).collect()
 }
 
 fn build_model(
@@ -306,6 +428,7 @@ fn build_model(
     show_noise: bool,
     favorites: &HashSet<String>,
     tracked: &HashSet<String>,
+    trail_selection: &HashSet<String>,
     basemap: BasemapKind,
 ) -> MapModel {
     let db = &state().db;
@@ -430,17 +553,24 @@ fn build_model(
         TrailWindow::Day => Some(now - 86_400),
         TrailWindow::All => None,
     };
-    let trail_keys: Vec<String> = if filter == NodeFilter::Tracked || !tracked.is_empty() {
-        tracked.iter().cloned().collect()
-    } else {
-        Vec::new()
-    };
-    let show_trails = filter == NodeFilter::Tracked && !trail_keys.is_empty();
-    let trail_features: Vec<Value> = if show_trails {
+    let tracked_labels: HashMap<String, String> = db
+        .list_tracked_nodes()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| (t.pubkey, t.label))
+        .collect();
+    // Overlay selection ∩ current Tracker whitelist (ignore stale keys).
+    let trail_keys: Vec<String> = trail_selection
+        .iter()
+        .filter(|k| tracked.contains(*k))
+        .cloned()
+        .collect();
+    let show_trails = !trail_keys.is_empty();
+    let (trail_features, waypoint_features): (Vec<Value>, Vec<Value>) = if show_trails {
         let points = db
             .positions_for_pubkeys(&trail_keys, trail_since)
             .unwrap_or_default();
-        let mut by_key: HashMap<String, Vec<(f64, f64)>> = HashMap::new();
+        let mut by_key: HashMap<String, Vec<(f64, f64, i64)>> = HashMap::new();
         for p in points {
             if p.lat == 0.0 && p.lon == 0.0 {
                 continue;
@@ -448,30 +578,54 @@ fn build_model(
             by_key
                 .entry(p.pubkey)
                 .or_default()
-                .push((p.lon, p.lat));
+                .push((p.lon, p.lat, p.at));
         }
-        by_key
-            .into_iter()
-            .filter_map(|(key, coords)| {
-                if coords.len() < 2 {
-                    return None;
-                }
-                let node = rows.iter().find(|n| n.pubkey == key);
-                let color = node
-                    .map(|n| type_color(n.enrollment.as_str(), n.contact_type))
-                    .unwrap_or("#38bdf8");
-                Some(json!({
+        let mut trails = Vec::new();
+        let mut waypoints = Vec::new();
+        for (key, samples) in by_key {
+            let color = trail_color_for_pubkey(&key);
+            let name = display_name_for_key(&key, &rows, &tracked_labels);
+            if samples.len() >= 2 {
+                let coords: Vec<[f64; 2]> =
+                    samples.iter().map(|(lon, lat, _)| [*lon, *lat]).collect();
+                trails.push(json!({
                     "type": "Feature",
-                    "properties": { "pubkey": key, "color": color },
+                    "properties": {
+                        "pubkey": key.clone(),
+                        "color": color,
+                        "name": name.clone(),
+                    },
                     "geometry": {
                         "type": "LineString",
                         "coordinates": coords,
                     }
-                }))
-            })
-            .collect()
+                }));
+            }
+            let kept = thin_trail_bends(&samples, TRAIL_WAYPOINT_CAP);
+            for idx in kept {
+                let Some((lon, lat, at)) = samples.get(idx).copied() else {
+                    continue;
+                };
+                let at_label = crate::timefmt::format_stamp(db, at);
+                waypoints.push(json!({
+                    "type": "Feature",
+                    "properties": {
+                        "pubkey": key.clone(),
+                        "color": color,
+                        "name": name.clone(),
+                        "at": at,
+                        "at_label": at_label,
+                    },
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [lon, lat],
+                    }
+                }));
+            }
+        }
+        (trails, waypoints)
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
 
     let since = match window {
@@ -636,16 +790,18 @@ fn build_model(
         "Tracker list is empty. Add devices under Tracker — they must share location to move.".into()
     } else if node_features.is_empty() {
         "No GPS fixes yet. Positions appear when a node advertises coordinates.".into()
-    } else if filter == NodeFilter::Tracked {
+    } else if show_trails {
         format!(
-            "{} tracked on map · {} trail(s){}{}",
+            "{} GPS nodes · {} trail(s) · {} waypoint(s){}",
             node_features.len(),
             trail_features.len(),
-            if trail_features.is_empty() {
-                " · trails grow after position updates"
-            } else {
-                ""
-            },
+            waypoint_features.len(),
+            basemap_note
+        )
+    } else if filter == NodeFilter::Tracked {
+        format!(
+            "{} tracked on map · open Tracker to plot trails{}",
+            node_features.len(),
             basemap_note
         )
     } else if hq_pos.is_none() {
@@ -667,6 +823,7 @@ fn build_model(
         snr: collection(snr_features),
         noise: collection(noise_features),
         trails: collection(trail_features),
+        waypoints: collection(waypoint_features),
         note,
         bounds,
         pmtiles_ok,
@@ -738,6 +895,21 @@ fn trail_layers() -> Value {
     }])
 }
 
+fn waypoint_layers() -> Value {
+    json!([{
+        "id": "track-waypoints",
+        "type": "circle",
+        "source": "track-waypoints",
+        "paint": {
+            "circle-radius": 5,
+            "circle-color": ["coalesce", ["get", "color"], "#38bdf8"],
+            "circle-opacity": 0.9,
+            "circle-stroke-width": 1.5,
+            "circle-stroke-color": "#0b1220"
+        }
+    }])
+}
+
 fn filter_chip(active: bool) -> &'static str {
     if active {
         "map-chip map-chip-active"
@@ -790,6 +962,9 @@ pub fn MapPage() -> Element {
     let mut trail_window = use_signal(|| TrailWindow::Day);
     // Soft-follow a tracked pubkey (empty = off).
     let mut follow_pubkey = use_signal(String::new);
+    // Session-only overlay selection (empty = no trails/waypoints).
+    let mut trail_selection = use_signal(HashSet::<String>::new);
+    let mut tracker_panel_open = use_signal(|| false);
     let mut basemap = use_signal(load_saved_basemap);
     let mut cluster = use_signal(|| true);
     let mut show_solid = use_signal(|| true);
@@ -817,6 +992,21 @@ pub fn MapPage() -> Element {
         .db
         .tracked_pubkey_set()
         .unwrap_or_default();
+    // Drop removed Tracker keys and clear follow if deselected.
+    {
+        let sel = trail_selection();
+        if sel.iter().any(|k| !tracked.contains(k)) {
+            trail_selection.set(
+                sel.into_iter()
+                    .filter(|k| tracked.contains(k))
+                    .collect(),
+            );
+        }
+        let follow = follow_pubkey();
+        if !follow.is_empty() && !trail_selection().contains(&follow) {
+            follow_pubkey.set(String::new());
+        }
+    }
     let model = build_model(
         filter(),
         window(),
@@ -827,6 +1017,7 @@ pub fn MapPage() -> Element {
         show_noise(),
         &favorites(),
         &tracked,
+        &trail_selection(),
         basemap(),
     );
 
@@ -907,6 +1098,7 @@ pub fn MapPage() -> Element {
             .db
             .tracked_pubkey_set()
             .unwrap_or_default();
+        let selection_now = trail_selection();
         // Peek basemap — style swaps own the re-push via tick bump after setStyle.
         let snapshot = build_model(
             filter(),
@@ -918,6 +1110,7 @@ pub fn MapPage() -> Element {
             show_noise(),
             &favorites(),
             &tracked_now,
+            &selection_now,
             *basemap.peek(),
         );
         let nodes = snapshot.nodes.clone();
@@ -926,6 +1119,7 @@ pub fn MapPage() -> Element {
         let snr = snapshot.snr.clone();
         let noise = snapshot.noise.clone();
         let trails = snapshot.trails.clone();
+        let waypoints = snapshot.waypoints.clone();
         let bounds = snapshot.bounds;
         let do_fit = !fitted() && bounds.is_some();
         let do_cluster = cluster();
@@ -936,9 +1130,11 @@ pub fn MapPage() -> Element {
             map_set_geojson("snr-points", &snr, &snr_layers()).await;
             map_set_geojson("noise-points", &noise, &noise_layers()).await;
             map_set_geojson("track-trails", &trails, &trail_layers()).await;
+            map_set_geojson("track-waypoints", &waypoints, &waypoint_layers()).await;
             // GL pin/label layers (HTML markers removed).
             map_bind_node_clicks("node-pins").await;
             map_bind_node_clicks("node-labels").await;
+            map_bind_waypoint_clicks("track-waypoints").await;
             if do_fit {
                 if let Some((w, s, e, n)) = bounds {
                     map_fit_bounds(w, s, e, n).await;
@@ -1332,12 +1528,21 @@ pub fn MapPage() -> Element {
                     }
                     button {
                         class: filter_chip(filter() == NodeFilter::Tracked),
-                        title: "Tracked whitelist + HQ (trails from position history)",
+                        title: "Show Tracker whitelist + HQ pins",
                         onclick: move |_| {
                             filter.set(NodeFilter::Tracked);
                             fitted.set(false);
                         },
                         "Tracked"
+                    }
+                    button {
+                        class: filter_chip(tracker_panel_open() || !trail_selection().is_empty()),
+                        title: "Select tracked devices to plot trails and waypoints",
+                        onclick: move |_| {
+                            tracker_panel_open.set(!tracker_panel_open());
+                        },
+                        Icon { name: IconName::Track, size: 14 }
+                        "Tracker"
                     }
                     button {
                         class: filter_chip(filter() == NodeFilter::Favorites),
@@ -1420,60 +1625,27 @@ pub fn MapPage() -> Element {
                         option { value: "24h", style: "background-color:#101418;color:#f4f4f5;", "Last 24 hours" }
                     }
                 }
-                if filter() == NodeFilter::Tracked {
-                    div { class: "min-w-[9rem]",
-                        SelectInput {
-                            id: "map-trail-window".to_string(),
-                            value: match trail_window() {
-                                TrailWindow::Hour => "1h".to_string(),
-                                TrailWindow::SixHours => "6h".to_string(),
-                                TrailWindow::Day => "24h".to_string(),
-                                TrailWindow::All => "all".to_string(),
-                            },
-                            onchange: move |event: FormEvent| {
-                                trail_window.set(match event.value().as_str() {
-                                    "1h" => TrailWindow::Hour,
-                                    "6h" => TrailWindow::SixHours,
-                                    "all" => TrailWindow::All,
-                                    _ => TrailWindow::Day,
-                                });
-                            },
-                            option { value: "1h", style: "background-color:#101418;color:#f4f4f5;", "Trails: 1 hour" }
-                            option { value: "6h", style: "background-color:#101418;color:#f4f4f5;", "Trails: 6 hours" }
-                            option { value: "24h", style: "background-color:#101418;color:#f4f4f5;", "Trails: 24 hours" }
-                            option { value: "all", style: "background-color:#101418;color:#f4f4f5;", "Trails: all" }
-                        }
-                    }
+                if !trail_selection().is_empty() {
                     {
+                        let selected = trail_selection();
                         let follow_opts: Vec<(String, String)> = {
                             let nodes = state().db.list_nodes().unwrap_or_default();
                             let mut rows = state()
                                 .db
                                 .list_tracked_nodes()
                                 .unwrap_or_default();
+                            rows.retain(|t| selected.contains(&t.pubkey));
                             rows.sort_by(|a, b| {
                                 a.label.to_lowercase().cmp(&b.label.to_lowercase())
                             });
+                            let labels: HashMap<String, String> = rows
+                                .iter()
+                                .map(|t| (t.pubkey.clone(), t.label.clone()))
+                                .collect();
                             rows.into_iter()
                                 .map(|t| {
-                                    let label = nodes
-                                        .iter()
-                                        .find(|n| n.pubkey == t.pubkey)
-                                        .map(|n| {
-                                            if n.name.trim().is_empty() {
-                                                n.prefix.clone()
-                                            } else {
-                                                n.name.clone()
-                                            }
-                                        })
-                                        .filter(|s| !s.is_empty())
-                                        .unwrap_or_else(|| {
-                                            if t.label.is_empty() {
-                                                t.pubkey.chars().take(12).collect()
-                                            } else {
-                                                t.label
-                                            }
-                                        });
+                                    let label =
+                                        display_name_for_key(&t.pubkey, &nodes, &labels);
                                     (t.pubkey, label)
                                 })
                                 .collect()
@@ -1497,6 +1669,128 @@ pub fn MapPage() -> Element {
                                             value: "{key}",
                                             style: "background-color:#101418;color:#f4f4f5;",
                                             "Follow: {label}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            {
+                let mut tracked_rows = state().db.list_tracked_nodes().unwrap_or_default();
+                tracked_rows.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+                let nodes = state().db.list_nodes().unwrap_or_default();
+                let selected = trail_selection();
+                let selection_count = selected.len();
+                let footer = rsx! {
+                    div { class: "map-tracker-footer",
+                        div { class: "min-w-[9rem] flex-1",
+                            SelectInput {
+                                id: "map-trail-window".to_string(),
+                                value: match trail_window() {
+                                    TrailWindow::Hour => "1h".to_string(),
+                                    TrailWindow::SixHours => "6h".to_string(),
+                                    TrailWindow::Day => "24h".to_string(),
+                                    TrailWindow::All => "all".to_string(),
+                                },
+                                onchange: move |event: FormEvent| {
+                                    trail_window.set(match event.value().as_str() {
+                                        "1h" => TrailWindow::Hour,
+                                        "6h" => TrailWindow::SixHours,
+                                        "all" => TrailWindow::All,
+                                        _ => TrailWindow::Day,
+                                    });
+                                },
+                                option { value: "1h", style: "background-color:#101418;color:#f4f4f5;", "Trails: 1 hour" }
+                                option { value: "6h", style: "background-color:#101418;color:#f4f4f5;", "Trails: 6 hours" }
+                                option { value: "24h", style: "background-color:#101418;color:#f4f4f5;", "Trails: 24 hours" }
+                                option { value: "all", style: "background-color:#101418;color:#f4f4f5;", "Trails: all" }
+                            }
+                        }
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| {
+                                let keys: HashSet<String> = state()
+                                    .db
+                                    .tracked_pubkey_set()
+                                    .unwrap_or_default();
+                                trail_selection.set(keys);
+                            },
+                            "Select all"
+                        }
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| {
+                                trail_selection.set(HashSet::new());
+                                follow_pubkey.set(String::new());
+                            },
+                            "Clear"
+                        }
+                        Button {
+                            kind: ButtonKind::Primary,
+                            onclick: move |_| tracker_panel_open.set(false),
+                            "Close"
+                        }
+                    }
+                };
+                rsx! {
+                    SlideDownPanel {
+                        open: tracker_panel_open(),
+                        title: "Tracker overlay".to_string(),
+                        subtitle: if selection_count == 0 {
+                            "Select devices to plot trails and bend waypoints.".to_string()
+                        } else {
+                            format!("{selection_count} selected · thinned bend pins with timestamps")
+                        },
+                        icon: Some(IconName::Track),
+                        on_close: move |_| tracker_panel_open.set(false),
+                        footer: Some(footer),
+                        if tracked_rows.is_empty() {
+                            p { class: "text-sm text-muted-foreground",
+                                "Nothing on the Tracker whitelist yet. Add devices under Tracker, then select them here."
+                            }
+                        } else {
+                            ul { class: "map-tracker-list",
+                                for row in tracked_rows.into_iter() {
+                                    {
+                                        let key = row.pubkey.clone();
+                                        let key_toggle = key.clone();
+                                        let checked = selected.contains(&key);
+                                        let color = trail_color_for_pubkey(&key);
+                                        let labels: HashMap<String, String> =
+                                            [(key.clone(), row.label.clone())].into_iter().collect();
+                                        let label = display_name_for_key(&key, &nodes, &labels);
+                                        let age = nodes
+                                            .iter()
+                                            .find(|n| n.pubkey == key)
+                                            .and_then(|n| n.last_advert.or(n.last_heard))
+                                            .map(|ts| relative_ago(Some(ts)))
+                                            .unwrap_or_else(|| "no fix".into());
+                                        rsx! {
+                                            li { class: "map-tracker-row",
+                                                label { class: "map-tracker-label",
+                                                    input {
+                                                        r#type: "checkbox",
+                                                        checked: checked,
+                                                        onchange: move |_| {
+                                                            let mut next = trail_selection();
+                                                            if next.contains(&key_toggle) {
+                                                                next.remove(&key_toggle);
+                                                            } else {
+                                                                next.insert(key_toggle.clone());
+                                                            }
+                                                            trail_selection.set(next);
+                                                        },
+                                                    }
+                                                    span {
+                                                        class: "map-tracker-swatch",
+                                                        style: "background-color: {color};",
+                                                    }
+                                                    span { class: "map-tracker-name", "{label}" }
+                                                    span { class: "map-tracker-age", "{age}" }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1991,5 +2285,68 @@ pub fn MapPage() -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{thin_trail_bends, trail_color_for_pubkey, TRAIL_WAYPOINT_CAP};
+
+    #[test]
+    fn trail_colors_are_stable_per_key() {
+        assert_eq!(
+            trail_color_for_pubkey("aa11bb22"),
+            trail_color_for_pubkey("aa11bb22")
+        );
+        // Palette has 8 slots; sample enough keys that at least two colors appear.
+        let colors: std::collections::HashSet<_> = (0..32u32)
+            .map(|i| trail_color_for_pubkey(&format!("node-{i}")))
+            .collect();
+        assert!(colors.len() > 1);
+    }
+
+    #[test]
+    fn thin_keeps_endpoints_on_straight_line() {
+        // ~10 m steps east along a parallel — sparsify by distance.
+        let mut pts = Vec::new();
+        for i in 0..40 {
+            pts.push((-122.0 + i as f64 * 0.00012, 45.0, 1_700_000_000 + i));
+        }
+        let kept = thin_trail_bends(&pts, TRAIL_WAYPOINT_CAP);
+        assert_eq!(kept.first().copied(), Some(0));
+        assert_eq!(kept.last().copied(), Some(pts.len() - 1));
+        assert!(kept.len() < pts.len());
+        assert!(kept.len() <= TRAIL_WAYPOINT_CAP);
+    }
+
+    #[test]
+    fn thin_keeps_sharp_corner() {
+        // Go east, then north — heading change should retain the bend.
+        let mut pts = Vec::new();
+        for i in 0..10 {
+            pts.push((-122.0 + i as f64 * 0.001, 45.0, i));
+        }
+        let bend_idx = pts.len();
+        for i in 0..10 {
+            pts.push((-122.0 + 9.0 * 0.001, 45.0 + i as f64 * 0.001, 10 + i));
+        }
+        let kept = thin_trail_bends(&pts, TRAIL_WAYPOINT_CAP);
+        assert!(
+            kept.contains(&bend_idx) || kept.iter().any(|&i| (i as isize - bend_idx as isize).abs() <= 1),
+            "expected bend near index {bend_idx}, kept={kept:?}"
+        );
+    }
+
+    #[test]
+    fn thin_respects_cap() {
+        let mut pts = Vec::new();
+        for i in 0..500 {
+            // Large steps so nearly every sample is a bend/distance hit.
+            pts.push((-122.0 + i as f64 * 0.01, 45.0 + (i % 3) as f64 * 0.01, i));
+        }
+        let kept = thin_trail_bends(&pts, 20);
+        assert!(kept.len() <= 20);
+        assert_eq!(kept.first().copied(), Some(0));
+        assert_eq!(kept.last().copied(), Some(pts.len() - 1));
     }
 }

@@ -4070,6 +4070,7 @@ impl Db {
                     pubkey: row.get(0)?,
                     lat: row.get(1)?,
                     lon: row.get(2)?,
+                    at: row.get(3)?,
                 })
             })?;
             for row in rows {
@@ -4198,6 +4199,7 @@ pub struct PositionPoint {
     pub pubkey: String,
     pub lat: f64,
     pub lon: f64,
+    pub at: i64,
 }
 
 /// Drop the extra oldest row when we fetched `limit + 1` to detect has_older.
@@ -5282,6 +5284,50 @@ mod tests {
         db.set_channel_appearance("Public", None).unwrap();
         let back = db.resolved_appearance("Public").unwrap();
         assert_eq!(back.bg_opacity, 30);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn positions_for_pubkeys_includes_at() {
+        let (db, _secrets, dir) = test_db();
+        db.upsert_contact(
+            "aa11",
+            "Ada",
+            1,
+            0,
+            -1,
+            &[],
+            1,
+            45_000_000,
+            -122_000_000,
+            1,
+            &json!({}),
+            false,
+            None,
+        )
+        .unwrap();
+        db.upsert_contact(
+            "aa11",
+            "Ada",
+            1,
+            0,
+            -1,
+            &[],
+            2,
+            45_100_000,
+            -122_100_000,
+            2,
+            &json!({}),
+            false,
+            None,
+        )
+        .unwrap();
+        let pts = db
+            .positions_for_pubkeys(&["aa11".into()], None)
+            .unwrap();
+        assert!(pts.len() >= 2, "expected position breadcrumbs, got {}", pts.len());
+        assert!(pts.iter().all(|p| p.at > 0));
+        assert!(pts.windows(2).all(|w| w[0].at <= w[1].at));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

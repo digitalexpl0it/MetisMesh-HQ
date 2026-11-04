@@ -1192,6 +1192,66 @@ option {
   background: rgba(61, 214, 140, 0.12);
 }
 
+.map-tracker-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.map-tracker-row {
+  margin: 0;
+}
+
+.map-tracker-label {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 0.4rem;
+  border: 1px solid #ffffff14;
+  background: #101418;
+  cursor: pointer;
+}
+
+.map-tracker-label:hover {
+  border-color: #ffffff28;
+}
+
+.map-tracker-swatch {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 9999px;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 1px #0b1220;
+}
+
+.map-tracker-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.875rem;
+  color: #f4f4f5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.map-tracker-age {
+  flex-shrink: 0;
+  font-size: 0.7rem;
+  color: #9aa3af;
+}
+
+.map-tracker-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+}
+
 .map-toggle {
   display: inline-flex;
   align-items: center;

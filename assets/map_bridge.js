@@ -42,6 +42,18 @@
     );
   }
 
+  function waypointHtml(props) {
+    var name = escapeHtml(props.name || "Device");
+    var atLabel = escapeHtml(props.at_label || "");
+    return (
+      '<div class="metis-map-tip metis-map-waypoint-tip"><strong>' +
+      name +
+      "</strong>" +
+      (atLabel ? "<div>" + atLabel + "</div>" : "") +
+      "</div>"
+    );
+  }
+
   function detailHtml(props) {
     var name = escapeHtml(props.name || "Node");
     var typeLabel = escapeHtml(props.type_label || "Node");
@@ -1918,6 +1930,37 @@
         if (props.cluster || props.point_count) return;
         var coords = e.features[0].geometry && e.features[0].geometry.coordinates;
         self.showDetail(mapId, coords || e.lngLat, props);
+      });
+      map.on("mouseenter", layerId, function () {
+        map.getCanvas().style.cursor = "pointer";
+      });
+      map.on("mouseleave", layerId, function () {
+        map.getCanvas().style.cursor = "";
+      });
+    },
+
+    showWaypoint: function (mapId, lngLat, props) {
+      var map = this.maps[mapId];
+      var popup = this.detailPopups[mapId];
+      if (!map || !popup) return;
+      this.hideTip(mapId);
+      this.detailOpen[mapId] = true;
+      popup.setLngLat(lngLat).setHTML(waypointHtml(props)).addTo(map);
+    },
+
+    bindWaypointClicks: function (mapId, layerId) {
+      var map = this.maps[mapId];
+      if (!map) return;
+      var key = "__metisWaypointClick_" + mapId + "_" + layerId;
+      if (map[key]) return;
+      map[key] = true;
+      var self = this;
+      map.on("click", layerId, function (e) {
+        e.preventDefault();
+        if (!e.features || !e.features.length) return;
+        var props = e.features[0].properties || {};
+        var coords = e.features[0].geometry && e.features[0].geometry.coordinates;
+        self.showWaypoint(mapId, coords || e.lngLat, props);
       });
       map.on("mouseenter", layerId, function () {
         map.getCanvas().style.cursor = "pointer";

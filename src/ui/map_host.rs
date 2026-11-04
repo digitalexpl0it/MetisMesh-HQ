@@ -235,6 +235,19 @@ pub async fn map_bind_node_clicks(layer_id: &str) {
     let _ = document::eval(&js).await;
 }
 
+pub async fn map_bind_waypoint_clicks(layer_id: &str) {
+    let js = format!(
+        r#"(() => {{
+  if (!window.MetisMap) return;
+  window.MetisMap.bindWaypointClicks({id}, {layer});
+  return true;
+}})()"#,
+        id = escape_js_string(MAP_ID),
+        layer = escape_js_string(layer_id),
+    );
+    let _ = document::eval(&js).await;
+}
+
 /// Ephemeral sonar rings at a lon/lat (`kind`: message | arrive | move).
 pub async fn map_pulse_at(lng: f64, lat: f64, color: Option<&str>, kind: &str) {
     let js = format!(

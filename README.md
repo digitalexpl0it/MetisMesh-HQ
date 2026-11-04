@@ -21,7 +21,7 @@ Churches, neighborhoods, and volunteer groups run this on a regular computer sit
 - **Firmware locker** — mirror community firmware while online; flash over USB when the internet is gone (Ready-for-outage, checksums, export/import pack)
 - **Backup** — passphrase-encrypted HQ archive (SQLite + channel secrets); restore with confirm
 - **Local-first storage** — SQLite under the per-user data folder; channel secrets in the OS keyring when possible (otherwise a locked-down file)
-- **Help** — in-app operator guide and shareable radio-user signup steps; offline runbook in `docs/OFFLINE_RUNBOOK.md` and Settings → About
+- **Help** — in-app operator guide, shareable radio-user signup steps, and the full offline runbook (Settings → About links here; `docs/OFFLINE_RUNBOOK.md` mirrors Help for GitHub)
 
 Communities stay separate until both headquarters agree to link. That bridge is not in this MVP yet — the data model leaves room for it.
 

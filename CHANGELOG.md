@@ -44,7 +44,7 @@
 - Encrypted backup/restore; contact bulk import/export
 - Offline firmware locker + selective Manage overlay + USB flasher
 - Firmware sync verifies SHA-256 against GitHub release `digest` when present, stores hashes in `index.json`, re-checks on-disk files, and re-downloads corrupt/incomplete assets (up to 3 attempts)
-- Outage readiness: Flasher ready banner, flash blocked on integrity failure, Check integrity / Export pack / Import pack (`.zip`); Settings → About offline runbook; `docs/OFFLINE_RUNBOOK.md`
+- Outage readiness: Flasher ready banner, flash blocked on integrity failure, Check integrity / Export pack / Import pack (`.zip`); full offline runbook in Help (About keeps a short checklist + Open Help); `docs/OFFLINE_RUNBOOK.md` mirrors Help for GitHub
 - Channel/DM unread badges count received traffic only (HQ/bot TX no longer inflate “new”)
 - Firmware Manage Save & Close pinned in a sticky slide-down footer so they stay visible on short windows
 

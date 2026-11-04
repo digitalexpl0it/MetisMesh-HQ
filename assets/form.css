@@ -3269,6 +3269,52 @@ option {
   color: #f4f4f5;
 }
 
+.help-subhead {
+  margin: 1rem 0 0.45rem;
+  font-size: 0.8rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #9aa3af;
+}
+
+.help-subhead:first-of-type {
+  margin-top: 0.35rem;
+}
+
+.help-table {
+  width: 100%;
+  margin: 0 0 0.75rem;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: #d4d4d8;
+}
+
+.help-table th,
+.help-table td {
+  padding: 0.4rem 0.55rem;
+  border: 1px solid #ffffff14;
+  text-align: left;
+  vertical-align: top;
+}
+
+.help-table th {
+  background: rgba(0, 0, 0, 0.28);
+  color: #9aa3af;
+  font-weight: 600;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.help-table td:first-child {
+  width: 6.5rem;
+  white-space: nowrap;
+  color: #e4e4e7;
+  font-weight: 550;
+}
+
 .help-section p {
   margin: 0 0 0.65rem;
   font-size: 0.875rem;

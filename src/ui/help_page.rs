@@ -60,7 +60,7 @@ const TOPICS: &[HelpTopic] = &[
     },
     HelpTopic {
         id: "help-offline",
-        label: "First hour offline",
+        label: "Offline runbook",
     },
 ];
 
@@ -462,18 +462,138 @@ pub fn HelpPage() -> Element {
                     section { id: "help-offline", class: "help-section",
                         h3 { class: "help-section-title",
                             Icon { name: IconName::Clock, size: 16 }
-                            "First hour offline"
+                            "Offline runbook — first hour without Internet"
                         }
+                        p {
+                            "One-page guide for church / community volunteers when the WAN is down. Keep this Help topic open on the HQ laptop (or print the screen)."
+                        }
+
+                        h4 { class: "help-subhead", "Before the outage (do this while online)" }
                         ol { class: "help-steps",
-                            li { "Power laptop (AC/UPS) and companion; disable sleep." }
-                            li { "Open HQ — no cloud login." }
-                            li { "Settings → Connect: confirm primary companion." }
-                            li { "Map + Messages check-in on your community channel." }
-                            li { "Roster / Inbox: approve only trusted signups." }
-                            li { "Flash only from Flasher cache (or Import pack) when Ready." }
+                            li { "Install Metis Mesh HQ and finish the setup wizard (Bluetooth / USB dialout / optional flashers)." }
+                            li { "Connect the MeshCore companion radio (BLE, USB, or TCP)." }
+                            li {
+                                strong { "Settings → Flasher → Manage firmware" }
+                                ": select the boards and roles you actually own → "
+                                strong { "Save & sync" }
+                                "."
+                            }
+                            li {
+                                "Wait until Flasher says "
+                                strong { "Ready for outage" }
+                                ". Optionally "
+                                strong { "Check integrity" }
+                                ", then "
+                                strong { "Export pack" }
+                                " to a "
+                                code { "MetisMeshHQ-firmware-*.zip" }
+                                " on a USB stick."
+                            }
+                            li { "Leave the laptop on UPS or wall power; disable sleep while HQ is the desk radio." }
+                        }
+
+                        h4 { class: "help-subhead", "First hour offline" }
+                        ol { class: "help-steps",
+                            li {
+                                strong { "Power" }
+                                " — laptop on AC or UPS; companion radio powered. Do not let the OS sleep."
+                            }
+                            li {
+                                strong { "Open HQ" }
+                                " — start Metis Mesh HQ from the desktop / Start menu (no cloud login)."
+                            }
+                            li {
+                                strong { "Radio" }
+                                " — Settings → Connect: confirm the companion shows connected. If USB moved ports, Refresh ports and reconnect."
+                            }
+                            li {
+                                strong { "Map" }
+                                " — open Map; confirm local pins / last-heard nodes (self-reported GPS only)."
+                            }
+                            li {
+                                strong { "Channel" }
+                                " — open Messages; post a short check-in on your community channel so volunteers know HQ is live."
+                            }
+                            li {
+                                strong { "Roster" }
+                                " — approve pending enrollments only for people you trust; secrets are never shown in the log."
+                            }
+                            li {
+                                strong { "Flash only from cache" }
+                                " — Settings → Flasher. Flash is blocked if a file fails checksum. If the locker is empty, "
+                                strong { "Import pack" }
+                                " and pick the USB "
+                                code { ".zip" }
+                                "."
+                            }
+                        }
+
+                        h4 { class: "help-subhead", "What the HQ computer needs on battery / UPS" }
+                        table { class: "help-table",
+                            thead {
+                                tr {
+                                    th { "Need" }
+                                    th { "Guidance" }
+                                }
+                            }
+                            tbody {
+                                tr {
+                                    td { "Runtime" }
+                                    td { "Size the UPS for laptop + USB radio (often 2–4 hours minimum for a desk shift)." }
+                                }
+                                tr {
+                                    td { "Sleep" }
+                                    td { "Turn off suspend/hibernate while HQ is on duty." }
+                                }
+                                tr {
+                                    td { "Display" }
+                                    td { "Dim the screen to save power; keep the window open so status stays visible." }
+                                }
+                                tr {
+                                    td { "Network" }
+                                    td { "Internet is optional once firmware is synced. Mesh traffic is radio-local." }
+                                }
+                                tr {
+                                    td { "Heat / dust" }
+                                    td { "Keep vents clear; a closed closet kills laptops on UPS." }
+                                }
+                            }
+                        }
+
+                        h4 { class: "help-subhead", "Do / don’t" }
+                        ul { class: "help-bullets",
+                            li {
+                                strong { "Do" }
+                                " treat HQ as the local system of record (roster, map, bot, audit log)."
+                            }
+                            li {
+                                strong { "Do" }
+                                " flash only indexed, verified firmware from this machine’s locker."
+                            }
+                            li {
+                                strong { "Don’t" }
+                                " present HQ messages as FEMA, NWS, or law enforcement."
+                            }
+                            li {
+                                strong { "Don’t" }
+                                " share channel secrets in chat or screenshots."
+                            }
+                        }
+
+                        h4 { class: "help-subhead", "Where things live" }
+                        p {
+                            "Settings → About shows version and the data folder path ("
+                            code { "~/.MetisMeshHQ" }
+                            " on Linux). The live database is "
+                            code { "metis.db" }
+                            " plus optional "
+                            code { "metis.db-wal" }
+                            " / "
+                            code { "metis.db-shm" }
+                            " — use Settings → Backup for a consistent copy, or include all three if you copy the folder cold."
                         }
                         p { class: "help-muted",
-                            "Printable copy: docs/OFFLINE_RUNBOOK.md. Settings → About also keeps a short checklist."
+                            "This Help topic is the operator copy shipped in the app. Settings → About keeps a short reminder checklist."
                         }
                         div { class: "help-actions",
                             Button {

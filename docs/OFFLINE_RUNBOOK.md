@@ -1,6 +1,9 @@
 # Offline runbook — first hour without Internet
 
-One page for church / community volunteers running **Metis Mesh HQ** when the WAN is down. Print this or keep it next to the HQ laptop.
+> **Canonical copy for operators:** open **Help → Offline runbook** inside Metis Mesh HQ.
+> This file mirrors that in-app topic for GitHub / print-from-source. Standalone installs do not ship a separate markdown viewer.
+
+One page for church / community volunteers running **Metis Mesh HQ** when the WAN is down. Prefer the in-app Help page on the HQ laptop.
 
 ## Before the outage (do this while online)
 

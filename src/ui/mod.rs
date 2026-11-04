@@ -11344,9 +11344,9 @@ fn SettingsPage(
                         }
                     }
                 }
-                Card { title: "Offline runbook (first hour)".to_string(), icon: Some(IconName::Inbox),
+                Card { title: "Offline runbook (first hour)".to_string(), icon: Some(IconName::Help),
                     p { class: "mb-2 text-sm text-muted-foreground",
-                        "For volunteers when the Internet is down. Full printable copy: docs/OFFLINE_RUNBOOK.md in the source tree."
+                        "For volunteers when the Internet is down. The full runbook (before the outage, first hour, UPS tips, do/don’t) lives in the app under Help → Offline runbook — no separate markdown viewer needed."
                     }
                     ol { class: "mb-3 list-decimal space-y-1 pl-5 text-sm text-foreground",
                         li { "Power the laptop (AC or UPS) and the companion radio. Disable sleep." }
@@ -11356,11 +11356,14 @@ fn SettingsPage(
                         li { "Roster: approve only people you trust. Secrets never appear in the message list." }
                         li { "Flash only from Settings → Flasher after Sync shows Ready for outage (or Import pack from a USB .zip)." }
                     }
-                    p { class: "mb-2 text-sm text-muted-foreground",
-                        "Battery / UPS: size for laptop + USB radio (often 2–4 hours). Keep vents clear. Mesh traffic does not need Internet once firmware is already synced."
+                    p { class: "mb-3 text-sm text-muted-foreground",
+                        "Battery / UPS: size for laptop + USB radio (often 2–4 hours). Keep vents clear. Mesh traffic does not need Internet once firmware is already synced. Do not present HQ traffic as FEMA, NWS, or law enforcement."
                     }
-                    p { class: "text-xs text-muted-foreground",
-                        "Do not present HQ traffic as FEMA, NWS, or law enforcement."
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        onclick: move |_| on_open_help.call(()),
+                        Icon { name: IconName::Help, size: 14 }
+                        "Open offline runbook in Help"
                     }
                 }
             }

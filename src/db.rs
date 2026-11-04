@@ -153,6 +153,17 @@ pub struct MessageRow {
     pub snr: Option<f64>,
 }
 
+/// Latest stored mesh path for a node (map Trace highlight).
+#[derive(Debug, Clone)]
+pub struct NodePathRow {
+    pub path: Vec<u8>,
+    pub hash_size: i64,
+    #[allow(dead_code)] // exposed for future Trace detail UI
+    pub source: String,
+    #[allow(dead_code)]
+    pub created_at: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct RfSampleRow {
     #[allow(dead_code)]
@@ -217,6 +228,7 @@ pub struct PurgePreview {
     pub paths: i64,
     pub positions: i64,
     pub telemetry: i64,
+    pub infra_status: i64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -407,6 +419,59 @@ impl Db {
         );
         let _ = conn.execute(
             "ALTER TABLE claimed_infra ADD COLUMN verified_at INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS infra_status_samples (
+                id INTEGER PRIMARY KEY,
+                pubkey TEXT NOT NULL,
+                at INTEGER NOT NULL,
+                battery_mv INTEGER NOT NULL,
+                noise_floor INTEGER NOT NULL,
+                last_rssi INTEGER NOT NULL,
+                snr REAL NOT NULL,
+                airtime_ms INTEGER NOT NULL,
+                rx_airtime_ms INTEGER NOT NULL,
+                uptime_s INTEGER NOT NULL,
+                nb_recv INTEGER NOT NULL,
+                nb_sent INTEGER NOT NULL,
+                flood_sent INTEGER NOT NULL,
+                direct_sent INTEGER NOT NULL,
+                tx_power_dbm INTEGER,
+                tx_queue_len INTEGER,
+                raw_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS infra_status_samples_pubkey_time
+                ON infra_status_samples(pubkey, at);
+            CREATE TABLE IF NOT EXISTS infra_status_latest (
+                pubkey TEXT PRIMARY KEY,
+                probed_at INTEGER NOT NULL,
+                battery_mv INTEGER NOT NULL,
+                noise_floor INTEGER NOT NULL,
+                last_rssi INTEGER NOT NULL,
+                snr REAL NOT NULL,
+                airtime_ms INTEGER NOT NULL,
+                rx_airtime_ms INTEGER NOT NULL,
+                uptime_s INTEGER NOT NULL,
+                nb_recv INTEGER NOT NULL,
+                nb_sent INTEGER NOT NULL,
+                flood_sent INTEGER NOT NULL,
+                direct_sent INTEGER NOT NULL,
+                tx_power_dbm INTEGER,
+                tx_queue_len INTEGER,
+                ver TEXT NOT NULL DEFAULT '',
+                radio TEXT NOT NULL DEFAULT '',
+                clock TEXT NOT NULL DEFAULT '',
+                neighbors TEXT NOT NULL DEFAULT '',
+                raw_json TEXT NOT NULL DEFAULT '{}'
+            );",
+        );
+        let _ = conn.execute(
+            "ALTER TABLE infra_status_samples ADD COLUMN tx_queue_len INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE infra_status_latest ADD COLUMN tx_queue_len INTEGER",
             [],
         );
         let _ = conn.execute_batch(
@@ -942,8 +1007,14 @@ impl Db {
         if self.setting("svc_map_upload_api_url")?.is_none() {
             self.set_setting(
                 "svc_map_upload_api_url",
-                "https://map.meshcore.dev/api/v1/uploader/node",
+                "https://map.meshcore.io/api/v1/uploader/node",
             )?;
+        } else if let Some(url) = self.setting("svc_map_upload_api_url")? {
+            // map.meshcore.dev now 307s to .io; ureq won't follow POST+307.
+            let fixed = crate::services::map_upload::normalize_map_api_url(&url);
+            if fixed != url {
+                self.set_setting("svc_map_upload_api_url", &fixed)?;
+            }
         }
         if self.setting("svc_map_upload_interval_secs")?.is_none() {
             self.set_setting("svc_map_upload_interval_secs", "3600")?;
@@ -1250,6 +1321,116 @@ impl Db {
 
     pub fn message_keep_cutoff(keep: &str) -> Option<i64> {
         Self::message_keep_seconds(keep).map(|secs| unix_now() - secs)
+    }
+
+    /// Auto LoRa status probe while companion is Ready: `0` = connect-only, else minutes.
+    pub fn infra_probe_interval_mins(&self) -> i64 {
+        crate::services::setting_i64(self, "infra_probe_interval_mins", 0).clamp(0, 24 * 60)
+    }
+
+    pub fn set_infra_probe_interval_mins(&self, mins: i64) -> Result<()> {
+        let mins = match mins {
+            0 | 15 | 30 | 60 => mins,
+            _ if mins <= 0 => 0,
+            _ => 15,
+        };
+        self.set_setting("infra_probe_interval_mins", &mins.to_string())
+    }
+
+    /// Max claimed nodes per auto / Refresh-all sweep (1..=10).
+    pub fn infra_probe_max_targets(&self) -> usize {
+        crate::services::setting_i64(self, "infra_probe_max_targets", 5)
+            .clamp(1, 10) as usize
+    }
+
+    pub fn set_infra_probe_max_targets(&self, n: i64) -> Result<()> {
+        let n = n.clamp(1, 10);
+        self.set_setting("infra_probe_max_targets", &n.to_string())
+    }
+
+    /// Per-pubkey sample cap for `infra_status_samples` (50..=5000, default 500).
+    pub fn infra_status_sample_cap(&self) -> i64 {
+        crate::services::setting_i64(self, "infra_status_sample_cap", 500).clamp(50, 5_000)
+    }
+
+    pub fn set_infra_status_sample_cap(&self, cap: i64) -> Result<()> {
+        let cap = cap.clamp(50, 5_000);
+        self.set_setting("infra_status_sample_cap", &cap.to_string())
+    }
+
+    /// Repeater status history keep: `7d` | `30d` | `90d` | `forever`.
+    pub fn infra_status_keep(&self) -> Result<String> {
+        Ok(self
+            .setting("infra_status_keep")?
+            .unwrap_or_else(|| "forever".into()))
+    }
+
+    pub fn set_infra_status_keep(&self, keep: &str) -> Result<()> {
+        let normalized = match keep {
+            "7d" | "30d" | "90d" | "forever" => keep,
+            _ => "forever",
+        };
+        self.set_setting("infra_status_keep", normalized)
+    }
+
+    pub fn infra_status_keep_seconds(keep: &str) -> Option<i64> {
+        match keep {
+            "7d" => Some(7 * 24 * 60 * 60),
+            "30d" => Some(30 * 24 * 60 * 60),
+            "90d" => Some(90 * 24 * 60 * 60),
+            _ => None,
+        }
+    }
+
+    pub fn infra_status_keep_cutoff(keep: &str) -> Option<i64> {
+        Self::infra_status_keep_seconds(keep).map(|secs| unix_now() - secs)
+    }
+
+    /// Delete repeater status samples older than `cutoff`. Latest row is kept.
+    pub fn purge_infra_status(&self, cutoff: i64) -> Result<i64> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "DELETE FROM infra_status_samples WHERE at < ?1",
+            params![cutoff],
+        )?;
+        conn.execute(
+            "INSERT INTO audit (at, action, pubkey, detail) VALUES (?1, 'purge_infra_status', '', ?2)",
+            params![unix_now(), format!("cutoff={cutoff} deleted={n}")],
+        )?;
+        Ok(n as i64)
+    }
+
+    /// Apply `infra_status_keep` age trim + re-cap each pubkey to the configured limit.
+    pub fn apply_infra_status_keep(&self) -> Result<i64> {
+        let keep = self.infra_status_keep()?;
+        let mut deleted = 0i64;
+        if let Some(cutoff) = Self::infra_status_keep_cutoff(&keep) {
+            deleted += self.purge_infra_status(cutoff)?;
+        }
+        let cap = self.infra_status_sample_cap();
+        let conn = self.lock();
+        let keys: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT pubkey FROM infra_status_samples",
+            )?;
+            let rows = stmt.query_map([], |r| r.get(0))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            out
+        };
+        for key in keys {
+            let n = conn.execute(
+                "DELETE FROM infra_status_samples WHERE pubkey = ?1 AND id NOT IN (
+                    SELECT id FROM infra_status_samples WHERE pubkey = ?1
+                    ORDER BY at DESC LIMIT ?2
+                 )",
+                params![key, cap],
+            )?;
+            deleted += n as i64;
+        }
+        Ok(deleted)
     }
 
     /// Normalize a keep token; returns `None` for "use global default".
@@ -2894,6 +3075,27 @@ impl Db {
         Ok(())
     }
 
+    /// Most recent path row for a node (operator / advert / out_path / path_update).
+    pub fn latest_path_for_pubkey(&self, pubkey: &str) -> Result<Option<NodePathRow>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT path, hash_size, source, created_at FROM paths
+                 WHERE node_pubkey = ?1
+                 ORDER BY id DESC LIMIT 1",
+                params![pubkey],
+                |row| {
+                    Ok(NodePathRow {
+                        path: row.get(0)?,
+                        hash_size: row.get(1)?,
+                        source: row.get(2)?,
+                        created_at: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
     fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRow> {
         Ok(MessageRow {
             id: row.get(0)?,
@@ -3538,6 +3740,7 @@ impl Db {
             paths: count_older(&conn, "paths", "created_at", cutoff)?,
             positions: count_older(&conn, "positions", "at", cutoff)?,
             telemetry: count_older(&conn, "telemetry_samples", "at", cutoff)?,
+            infra_status: count_older(&conn, "infra_status_samples", "at", cutoff)?,
         })
     }
 
@@ -3553,6 +3756,10 @@ impl Db {
         conn.execute("DELETE FROM positions WHERE at < ?1", params![cutoff])?;
         conn.execute(
             "DELETE FROM telemetry_samples WHERE at < ?1",
+            params![cutoff],
+        )?;
+        conn.execute(
+            "DELETE FROM infra_status_samples WHERE at < ?1",
             params![cutoff],
         )?;
         conn.execute(
@@ -4018,8 +4225,17 @@ impl Db {
     }
 
     pub fn unclaim_infra(&self, pubkey: &str) -> Result<()> {
-        self.lock()
-            .execute("DELETE FROM claimed_infra WHERE pubkey = ?1", params![pubkey])?;
+        let conn = self.lock();
+        conn.execute("DELETE FROM claimed_infra WHERE pubkey = ?1", params![pubkey])?;
+        conn.execute(
+            "DELETE FROM infra_status_samples WHERE pubkey = ?1",
+            params![pubkey],
+        )?;
+        conn.execute(
+            "DELETE FROM infra_status_latest WHERE pubkey = ?1",
+            params![pubkey],
+        )?;
+        drop(conn);
         let _ = self.audit("unclaim_infra", pubkey, "");
         Ok(())
     }
@@ -4045,6 +4261,370 @@ impl Db {
             return Err(Error::Msg("That node is not on the Infrastructure list.".into()));
         }
         Ok(())
+    }
+
+    /// Persist a binary status sample and upsert the latest card for `pubkey`.
+    pub fn insert_infra_status_sample(
+        &self,
+        sample: &InfraStatusSample,
+        extras: Option<(&str, &str, &str, &str)>,
+    ) -> Result<()> {
+        // Read settings before taking the DB lock (settings also lock).
+        let cap = self.infra_status_sample_cap();
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO infra_status_samples (
+                pubkey, at, battery_mv, noise_floor, last_rssi, snr,
+                airtime_ms, rx_airtime_ms, uptime_s, nb_recv, nb_sent,
+                flood_sent, direct_sent, tx_power_dbm, tx_queue_len, raw_json
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+            params![
+                sample.pubkey,
+                sample.at,
+                sample.battery_mv,
+                sample.noise_floor,
+                sample.last_rssi,
+                sample.snr,
+                sample.airtime_ms,
+                sample.rx_airtime_ms,
+                sample.uptime_s,
+                sample.nb_recv,
+                sample.nb_sent,
+                sample.flood_sent,
+                sample.direct_sent,
+                sample.tx_power_dbm,
+                sample.tx_queue_len,
+                sample.raw_json,
+            ],
+        )?;
+        conn.execute(
+            "DELETE FROM infra_status_samples WHERE pubkey = ?1 AND id NOT IN (
+                SELECT id FROM infra_status_samples WHERE pubkey = ?1
+                ORDER BY at DESC LIMIT ?2
+             )",
+            params![sample.pubkey, cap],
+        )?;
+        let (ver, radio, clock, neighbors) = extras.unwrap_or(("", "", "", ""));
+        let prev = conn
+            .query_row(
+                "SELECT ver, radio, clock, neighbors, tx_power_dbm, tx_queue_len
+                 FROM infra_status_latest WHERE pubkey = ?1",
+                params![sample.pubkey],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let (keep_ver, keep_radio, keep_clock, keep_neighbors, keep_tx, keep_queue) =
+            prev.unwrap_or_default();
+        let ver = if ver.is_empty() { keep_ver } else { ver.to_string() };
+        let radio = if radio.is_empty() {
+            keep_radio
+        } else {
+            radio.to_string()
+        };
+        let clock = if clock.is_empty() {
+            keep_clock
+        } else {
+            clock.to_string()
+        };
+        let neighbors = if neighbors.is_empty() {
+            keep_neighbors
+        } else {
+            neighbors.to_string()
+        };
+        let tx_power = sample.tx_power_dbm.or(keep_tx);
+        let tx_queue = sample.tx_queue_len.or(keep_queue);
+        conn.execute(
+            "INSERT INTO infra_status_latest (
+                pubkey, probed_at, battery_mv, noise_floor, last_rssi, snr,
+                airtime_ms, rx_airtime_ms, uptime_s, nb_recv, nb_sent,
+                flood_sent, direct_sent, tx_power_dbm, tx_queue_len,
+                ver, radio, clock, neighbors, raw_json
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
+             ON CONFLICT(pubkey) DO UPDATE SET
+                probed_at = excluded.probed_at,
+                battery_mv = excluded.battery_mv,
+                noise_floor = excluded.noise_floor,
+                last_rssi = excluded.last_rssi,
+                snr = excluded.snr,
+                airtime_ms = excluded.airtime_ms,
+                rx_airtime_ms = excluded.rx_airtime_ms,
+                uptime_s = excluded.uptime_s,
+                nb_recv = excluded.nb_recv,
+                nb_sent = excluded.nb_sent,
+                flood_sent = excluded.flood_sent,
+                direct_sent = excluded.direct_sent,
+                tx_power_dbm = excluded.tx_power_dbm,
+                tx_queue_len = excluded.tx_queue_len,
+                ver = excluded.ver,
+                radio = excluded.radio,
+                clock = excluded.clock,
+                neighbors = excluded.neighbors,
+                raw_json = excluded.raw_json",
+            params![
+                sample.pubkey,
+                sample.at,
+                sample.battery_mv,
+                sample.noise_floor,
+                sample.last_rssi,
+                sample.snr,
+                sample.airtime_ms,
+                sample.rx_airtime_ms,
+                sample.uptime_s,
+                sample.nb_recv,
+                sample.nb_sent,
+                sample.flood_sent,
+                sample.direct_sent,
+                tx_power,
+                tx_queue,
+                ver,
+                radio,
+                clock,
+                neighbors,
+                sample.raw_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_infra_status_cli_fields(
+        &self,
+        pubkey: &str,
+        tx_power_dbm: Option<i64>,
+        ver: Option<&str>,
+        radio: Option<&str>,
+        clock: Option<&str>,
+        neighbors: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.lock();
+        let Some(mut row) = conn
+            .query_row(
+                "SELECT probed_at, battery_mv, noise_floor, last_rssi, snr,
+                        airtime_ms, rx_airtime_ms, uptime_s, nb_recv, nb_sent,
+                        flood_sent, direct_sent, tx_power_dbm, tx_queue_len,
+                        ver, radio, clock, neighbors, raw_json
+                 FROM infra_status_latest WHERE pubkey = ?1",
+                params![pubkey],
+                |r| {
+                    Ok(InfraStatusLatest {
+                        pubkey: pubkey.to_string(),
+                        probed_at: r.get(0)?,
+                        battery_mv: r.get(1)?,
+                        noise_floor: r.get(2)?,
+                        last_rssi: r.get(3)?,
+                        snr: r.get(4)?,
+                        airtime_ms: r.get(5)?,
+                        rx_airtime_ms: r.get(6)?,
+                        uptime_s: r.get(7)?,
+                        nb_recv: r.get(8)?,
+                        nb_sent: r.get(9)?,
+                        flood_sent: r.get(10)?,
+                        direct_sent: r.get(11)?,
+                        tx_power_dbm: r.get(12)?,
+                        tx_queue_len: r.get(13)?,
+                        ver: r.get(14)?,
+                        radio: r.get(15)?,
+                        clock: r.get(16)?,
+                        neighbors: r.get(17)?,
+                        raw_json: r.get(18)?,
+                    })
+                },
+            )
+            .optional()?
+        else {
+            // No binary sample yet — only store CLI text if we create a stub.
+            if tx_power_dbm.is_none()
+                && ver.is_none()
+                && radio.is_none()
+                && clock.is_none()
+                && neighbors.is_none()
+            {
+                return Ok(());
+            }
+            conn.execute(
+                "INSERT INTO infra_status_latest (
+                    pubkey, probed_at, battery_mv, noise_floor, last_rssi, snr,
+                    airtime_ms, rx_airtime_ms, uptime_s, nb_recv, nb_sent,
+                    flood_sent, direct_sent, tx_power_dbm, tx_queue_len,
+                    ver, radio, clock, neighbors, raw_json
+                 ) VALUES (?1,?2,0,0,0,0,0,0,0,0,0,0,0,?3,NULL,?4,?5,?6,?7,'{}')",
+                params![
+                    pubkey,
+                    unix_now(),
+                    tx_power_dbm,
+                    ver.unwrap_or(""),
+                    radio.unwrap_or(""),
+                    clock.unwrap_or(""),
+                    neighbors.unwrap_or(""),
+                ],
+            )?;
+            return Ok(());
+        };
+        if let Some(v) = tx_power_dbm {
+            row.tx_power_dbm = Some(v);
+        }
+        if let Some(v) = ver {
+            if !v.is_empty() {
+                row.ver = v.to_string();
+            }
+        }
+        if let Some(v) = radio {
+            if !v.is_empty() {
+                row.radio = v.to_string();
+            }
+        }
+        if let Some(v) = clock {
+            if !v.is_empty() {
+                row.clock = v.to_string();
+            }
+        }
+        if let Some(v) = neighbors {
+            if !v.is_empty() {
+                row.neighbors = v.to_string();
+            }
+        }
+        conn.execute(
+            "UPDATE infra_status_latest SET
+                tx_power_dbm = ?2, ver = ?3, radio = ?4, clock = ?5, neighbors = ?6
+             WHERE pubkey = ?1",
+            params![
+                pubkey,
+                row.tx_power_dbm,
+                row.ver,
+                row.radio,
+                row.clock,
+                row.neighbors,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_infra_status_latest(&self, pubkey: &str) -> Result<Option<InfraStatusLatest>> {
+        self.lock()
+            .query_row(
+                "SELECT pubkey, probed_at, battery_mv, noise_floor, last_rssi, snr,
+                        airtime_ms, rx_airtime_ms, uptime_s, nb_recv, nb_sent,
+                        flood_sent, direct_sent, tx_power_dbm, tx_queue_len,
+                        ver, radio, clock, neighbors, raw_json
+                 FROM infra_status_latest WHERE pubkey = ?1",
+                params![pubkey],
+                |r| {
+                    Ok(InfraStatusLatest {
+                        pubkey: r.get(0)?,
+                        probed_at: r.get(1)?,
+                        battery_mv: r.get(2)?,
+                        noise_floor: r.get(3)?,
+                        last_rssi: r.get(4)?,
+                        snr: r.get(5)?,
+                        airtime_ms: r.get(6)?,
+                        rx_airtime_ms: r.get(7)?,
+                        uptime_s: r.get(8)?,
+                        nb_recv: r.get(9)?,
+                        nb_sent: r.get(10)?,
+                        flood_sent: r.get(11)?,
+                        direct_sent: r.get(12)?,
+                        tx_power_dbm: r.get(13)?,
+                        tx_queue_len: r.get(14)?,
+                        ver: r.get(15)?,
+                        radio: r.get(16)?,
+                        clock: r.get(17)?,
+                        neighbors: r.get(18)?,
+                        raw_json: r.get(19)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn list_infra_status_latest(&self) -> Result<Vec<InfraStatusLatest>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT pubkey, probed_at, battery_mv, noise_floor, last_rssi, snr,
+                    airtime_ms, rx_airtime_ms, uptime_s, nb_recv, nb_sent,
+                    flood_sent, direct_sent, tx_power_dbm, tx_queue_len,
+                    ver, radio, clock, neighbors, raw_json
+             FROM infra_status_latest ORDER BY probed_at DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(InfraStatusLatest {
+                pubkey: r.get(0)?,
+                probed_at: r.get(1)?,
+                battery_mv: r.get(2)?,
+                noise_floor: r.get(3)?,
+                last_rssi: r.get(4)?,
+                snr: r.get(5)?,
+                airtime_ms: r.get(6)?,
+                rx_airtime_ms: r.get(7)?,
+                uptime_s: r.get(8)?,
+                nb_recv: r.get(9)?,
+                nb_sent: r.get(10)?,
+                flood_sent: r.get(11)?,
+                direct_sent: r.get(12)?,
+                tx_power_dbm: r.get(13)?,
+                tx_queue_len: r.get(14)?,
+                ver: r.get(15)?,
+                radio: r.get(16)?,
+                clock: r.get(17)?,
+                neighbors: r.get(18)?,
+                raw_json: r.get(19)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn infra_status_samples_since(
+        &self,
+        pubkey: &str,
+        since_unix: i64,
+    ) -> Result<Vec<InfraStatusSample>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT pubkey, at, battery_mv, noise_floor, last_rssi, snr,
+                    airtime_ms, rx_airtime_ms, uptime_s, nb_recv, nb_sent,
+                    flood_sent, direct_sent, tx_power_dbm, tx_queue_len, raw_json
+             FROM infra_status_samples
+             WHERE pubkey = ?1 AND at >= ?2
+             ORDER BY at ASC
+             LIMIT 2000",
+        )?;
+        let rows = stmt.query_map(params![pubkey, since_unix], |r| {
+            Ok(InfraStatusSample {
+                pubkey: r.get(0)?,
+                at: r.get(1)?,
+                battery_mv: r.get(2)?,
+                noise_floor: r.get(3)?,
+                last_rssi: r.get(4)?,
+                snr: r.get(5)?,
+                airtime_ms: r.get(6)?,
+                rx_airtime_ms: r.get(7)?,
+                uptime_s: r.get(8)?,
+                nb_recv: r.get(9)?,
+                nb_sent: r.get(10)?,
+                flood_sent: r.get(11)?,
+                direct_sent: r.get(12)?,
+                tx_power_dbm: r.get(13)?,
+                tx_queue_len: r.get(14)?,
+                raw_json: r.get(15)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     /// Position breadcrumbs for trail drawing (oldest → newest per query order).
@@ -4192,6 +4772,54 @@ impl ClaimedInfraRow {
     pub fn is_verified(&self) -> bool {
         self.verified_at > 0
     }
+}
+
+/// One binary status sample from a claimed repeater / room / sensor.
+#[derive(Debug, Clone)]
+pub struct InfraStatusSample {
+    pub pubkey: String,
+    pub at: i64,
+    pub battery_mv: i64,
+    pub noise_floor: i64,
+    pub last_rssi: i64,
+    pub snr: f64,
+    pub airtime_ms: i64,
+    pub rx_airtime_ms: i64,
+    pub uptime_s: i64,
+    pub nb_recv: i64,
+    pub nb_sent: i64,
+    pub flood_sent: i64,
+    pub direct_sent: i64,
+    pub tx_power_dbm: Option<i64>,
+    pub tx_queue_len: Option<i64>,
+    pub raw_json: String,
+}
+
+/// Latest status card fields for Overview / Infrastructure detail.
+#[derive(Debug, Clone)]
+pub struct InfraStatusLatest {
+    pub pubkey: String,
+    pub probed_at: i64,
+    pub battery_mv: i64,
+    pub noise_floor: i64,
+    pub last_rssi: i64,
+    pub snr: f64,
+    pub airtime_ms: i64,
+    pub rx_airtime_ms: i64,
+    pub uptime_s: i64,
+    pub nb_recv: i64,
+    pub nb_sent: i64,
+    pub flood_sent: i64,
+    pub direct_sent: i64,
+    pub tx_power_dbm: Option<i64>,
+    pub tx_queue_len: Option<i64>,
+    pub ver: String,
+    pub radio: String,
+    pub clock: String,
+    pub neighbors: String,
+    /// Full StatusData (+ extras) JSON for forward-compatible UI.
+    #[allow(dead_code)]
+    pub raw_json: String,
 }
 
 #[derive(Debug, Clone)]
@@ -4463,6 +5091,7 @@ CREATE TABLE IF NOT EXISTS paths (
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS paths_message ON paths(message_id);
+CREATE INDEX IF NOT EXISTS paths_node ON paths(node_pubkey);
 CREATE TABLE IF NOT EXISTS positions (
     id INTEGER PRIMARY KEY,
     pubkey TEXT NOT NULL,
@@ -4491,6 +5120,49 @@ CREATE TABLE IF NOT EXISTS claimed_infra (
     notes TEXT NOT NULL DEFAULT '',
     added_at INTEGER NOT NULL,
     verified_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS infra_status_samples (
+    id INTEGER PRIMARY KEY,
+    pubkey TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    battery_mv INTEGER NOT NULL,
+    noise_floor INTEGER NOT NULL,
+    last_rssi INTEGER NOT NULL,
+    snr REAL NOT NULL,
+    airtime_ms INTEGER NOT NULL,
+    rx_airtime_ms INTEGER NOT NULL,
+    uptime_s INTEGER NOT NULL,
+    nb_recv INTEGER NOT NULL,
+    nb_sent INTEGER NOT NULL,
+    flood_sent INTEGER NOT NULL,
+    direct_sent INTEGER NOT NULL,
+    tx_power_dbm INTEGER,
+    tx_queue_len INTEGER,
+    raw_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS infra_status_samples_pubkey_time
+    ON infra_status_samples(pubkey, at);
+CREATE TABLE IF NOT EXISTS infra_status_latest (
+    pubkey TEXT PRIMARY KEY,
+    probed_at INTEGER NOT NULL,
+    battery_mv INTEGER NOT NULL,
+    noise_floor INTEGER NOT NULL,
+    last_rssi INTEGER NOT NULL,
+    snr REAL NOT NULL,
+    airtime_ms INTEGER NOT NULL,
+    rx_airtime_ms INTEGER NOT NULL,
+    uptime_s INTEGER NOT NULL,
+    nb_recv INTEGER NOT NULL,
+    nb_sent INTEGER NOT NULL,
+    flood_sent INTEGER NOT NULL,
+    direct_sent INTEGER NOT NULL,
+    tx_power_dbm INTEGER,
+    tx_queue_len INTEGER,
+    ver TEXT NOT NULL DEFAULT '',
+    radio TEXT NOT NULL DEFAULT '',
+    clock TEXT NOT NULL DEFAULT '',
+    neighbors TEXT NOT NULL DEFAULT '',
+    raw_json TEXT NOT NULL DEFAULT '{}'
 );
 CREATE TABLE IF NOT EXISTS telemetry_samples (
     id INTEGER PRIMARY KEY,
@@ -5284,6 +5956,79 @@ mod tests {
         db.set_channel_appearance("Public", None).unwrap();
         let back = db.resolved_appearance("Public").unwrap();
         assert_eq!(back.bg_opacity, 30);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn infra_status_sample_round_trip_and_unclaim_clears() {
+        let (db, _secrets, dir) = test_db();
+        db.upsert_contact(
+            "aa11bb22cc33dd44ee55ff6677889900aa11bb22cc33dd44ee55ff6677889900",
+            "Rptr",
+            2,
+            0,
+            -1,
+            &[],
+            1,
+            45_000_000,
+            -122_000_000,
+            1,
+            &json!({}),
+            false,
+            None,
+        )
+        .unwrap();
+        let key = "aa11bb22cc33dd44ee55ff6677889900aa11bb22cc33dd44ee55ff6677889900";
+        db.claim_infra_verified(key, Some("repeater"), "Rptr", "")
+            .unwrap();
+        let sample = InfraStatusSample {
+            pubkey: key.to_string(),
+            at: unix_now(),
+            battery_mv: 4100,
+            noise_floor: -106,
+            last_rssi: -76,
+            snr: 10.3,
+            airtime_ms: 1_000_000,
+            rx_airtime_ms: 2_000_000,
+            uptime_s: 3600,
+            nb_recv: 10,
+            nb_sent: 20,
+            flood_sent: 15,
+            direct_sent: 5,
+            tx_power_dbm: Some(20),
+            tx_queue_len: Some(3),
+            raw_json: "{}".into(),
+        };
+        db.insert_infra_status_sample(&sample, Some(("v1", "910.5", "clock", "n1")))
+            .unwrap();
+        let latest = db.get_infra_status_latest(key).unwrap().expect("latest");
+        assert_eq!(latest.battery_mv, 4100);
+        assert_eq!(latest.noise_floor, -106);
+        assert_eq!(latest.tx_power_dbm, Some(20));
+        assert_eq!(latest.tx_queue_len, Some(3));
+        assert_eq!(latest.ver, "v1");
+        let series = db.infra_status_samples_since(key, 0).unwrap();
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].tx_queue_len, Some(3));
+
+        db.set_infra_probe_interval_mins(30).unwrap();
+        assert_eq!(db.infra_probe_interval_mins(), 30);
+        db.set_infra_probe_max_targets(7).unwrap();
+        assert_eq!(db.infra_probe_max_targets(), 7);
+        db.set_infra_status_sample_cap(100).unwrap();
+        assert_eq!(db.infra_status_sample_cap(), 100);
+        db.set_infra_status_keep("7d").unwrap();
+        assert_eq!(db.infra_status_keep().unwrap(), "7d");
+        // Old sample should purge when cutoff is in the future relative to `at`.
+        let deleted = db.purge_infra_status(sample.at + 1).unwrap();
+        assert!(deleted >= 1);
+        assert!(db.infra_status_samples_since(key, 0).unwrap().is_empty());
+        // Latest card remains until unclaim.
+        assert!(db.get_infra_status_latest(key).unwrap().is_some());
+
+        db.unclaim_infra(key).unwrap();
+        assert!(db.get_infra_status_latest(key).unwrap().is_none());
+        assert!(db.infra_status_samples_since(key, 0).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

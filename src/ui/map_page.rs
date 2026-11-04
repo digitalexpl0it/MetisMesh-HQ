@@ -6,7 +6,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::contact_qr::{contact_add_uri, enqueue_contact_qr, qr_public_url};
 use crate::db::unix_now;
-use crate::path::{build_line, MapLine};
+use crate::path::{
+    aggregate_traffic_edges, build_line, traffic_line_width, MapLine,
+};
 use crate::pmtiles_path;
 use crate::radio::SyncPhase;
 
@@ -24,8 +26,7 @@ use super::state;
 use super::widgets::{Button, ButtonKind, PageHeading, SelectInput, SlideDownPanel};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum NodeFilter {
-    All,
+enum NodeFilterKind {
     Tracked,
     Favorites,
     Users,
@@ -36,12 +37,186 @@ enum NodeFilter {
     Heard,
 }
 
+/// Multi-select pin filters. `all` checks every category.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct NodeFilterSet {
+    all: bool,
+    tracked: bool,
+    favorites: bool,
+    users: bool,
+    repeaters: bool,
+    rooms: bool,
+    sensors: bool,
+    enrolled: bool,
+    heard: bool,
+}
+
+impl NodeFilterSet {
+    fn everything() -> Self {
+        Self {
+            all: true,
+            tracked: true,
+            favorites: true,
+            users: true,
+            repeaters: true,
+            rooms: true,
+            sensors: true,
+            enrolled: true,
+            heard: true,
+        }
+    }
+
+    fn sync_all_flag(&mut self) {
+        self.all = self.tracked
+            && self.favorites
+            && self.users
+            && self.repeaters
+            && self.rooms
+            && self.sensors
+            && self.enrolled
+            && self.heard;
+    }
+
+    fn set_all(&mut self, on: bool) {
+        *self = if on {
+            Self::everything()
+        } else {
+            Self {
+                all: false,
+                tracked: false,
+                favorites: false,
+                users: false,
+                repeaters: false,
+                rooms: false,
+                sensors: false,
+                enrolled: false,
+                heard: false,
+            }
+        };
+    }
+
+    fn toggle(&mut self, kind: NodeFilterKind) {
+        match kind {
+            NodeFilterKind::Tracked => self.tracked = !self.tracked,
+            NodeFilterKind::Favorites => self.favorites = !self.favorites,
+            NodeFilterKind::Users => self.users = !self.users,
+            NodeFilterKind::Repeaters => self.repeaters = !self.repeaters,
+            NodeFilterKind::Rooms => self.rooms = !self.rooms,
+            NodeFilterKind::Sensors => self.sensors = !self.sensors,
+            NodeFilterKind::Enrolled => self.enrolled = !self.enrolled,
+            NodeFilterKind::Heard => self.heard = !self.heard,
+        }
+        self.sync_all_flag();
+    }
+
+    fn any_selected(&self) -> bool {
+        self.all
+            || self.tracked
+            || self.favorites
+            || self.users
+            || self.repeaters
+            || self.rooms
+            || self.sensors
+            || self.enrolled
+            || self.heard
+    }
+
+    fn summary(&self) -> String {
+        if self.all {
+            return "All".into();
+        }
+        if !self.any_selected() {
+            return "None".into();
+        }
+        let mut parts = Vec::new();
+        if self.tracked {
+            parts.push("Tracked");
+        }
+        if self.favorites {
+            parts.push("Favorites");
+        }
+        if self.users {
+            parts.push("Users");
+        }
+        if self.repeaters {
+            parts.push("Repeaters");
+        }
+        if self.rooms {
+            parts.push("Rooms");
+        }
+        if self.sensors {
+            parts.push("Sensors");
+        }
+        if self.enrolled {
+            parts.push("Enrolled");
+        }
+        if self.heard {
+            parts.push("Heard");
+        }
+        if parts.is_empty() {
+            "All".into()
+        } else if parts.len() <= 2 {
+            parts.join(" · ")
+        } else {
+            format!("{} filters", parts.len())
+        }
+    }
+
+    fn matches(
+        &self,
+        pubkey: &str,
+        enrollment: &str,
+        contact_type: u8,
+        tracked: &HashSet<String>,
+        favorites: &HashSet<String>,
+    ) -> bool {
+        if self.all {
+            return true;
+        }
+        if !self.any_selected() {
+            return false;
+        }
+        let mut ok = false;
+        if self.tracked && (tracked.contains(pubkey) || enrollment == "hq") {
+            ok = true;
+        }
+        if self.favorites && (favorites.contains(pubkey) || enrollment == "hq") {
+            ok = true;
+        }
+        if self.users && (contact_type == 1 || enrollment == "hq") {
+            ok = true;
+        }
+        if self.repeaters && contact_type == 2 {
+            ok = true;
+        }
+        if self.rooms && contact_type == 3 {
+            ok = true;
+        }
+        if self.sensors && contact_type == 4 {
+            ok = true;
+        }
+        if self.enrolled && (enrollment == "enrolled" || enrollment == "hq") {
+            ok = true;
+        }
+        if self.heard && enrollment == "heard" {
+            ok = true;
+        }
+        ok
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TrafficWindow {
     Last25,
     Hour,
     SixHours,
     Day,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TrafficScope {
+    AllGps,
+    TrackedClaimed,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -98,6 +273,37 @@ fn line_feature(line: &MapLine) -> Value {
         "geometry": {
             "type": "LineString",
             "coordinates": line.coords,
+        }
+    })
+}
+
+fn highlight_feature(line: &MapLine, direction: &str) -> Value {
+    json!({
+        "type": "Feature",
+        "properties": {
+            "direction": direction,
+            "outbound": line.outbound,
+            "hops": line.hops,
+            "color": if direction == "to" { "#38bdf8" } else { "#f472b6" },
+        },
+        "geometry": {
+            "type": "LineString",
+            "coordinates": line.coords,
+        }
+    })
+}
+
+fn traffic_feature(edge: &crate::path::TrafficEdge, width: f64) -> Value {
+    json!({
+        "type": "Feature",
+        "properties": {
+            "count": edge.count,
+            "width": width,
+            "opacity": (0.35 + (width / 8.0) * 0.5).clamp(0.35, 0.85),
+        },
+        "geometry": {
+            "type": "LineString",
+            "coordinates": [edge.a, edge.b],
         }
     })
 }
@@ -390,6 +596,8 @@ struct MapModel {
     noise: Value,
     trails: Value,
     waypoints: Value,
+    highlight: Value,
+    traffic: Value,
     note: String,
     bounds: Option<(f64, f64, f64, f64)>,
     pmtiles_ok: bool,
@@ -419,16 +627,20 @@ fn display_name_for_key(
 }
 
 fn build_model(
-    filter: NodeFilter,
+    filter: NodeFilterSet,
     window: TrafficWindow,
     trail_window: TrailWindow,
     show_solid: bool,
     show_dashed: bool,
     show_snr: bool,
     show_noise: bool,
+    show_traffic: bool,
+    traffic_scope: TrafficScope,
     favorites: &HashSet<String>,
     tracked: &HashSet<String>,
+    claimed: &HashSet<String>,
     trail_selection: &HashSet<String>,
+    trace_pubkey: &str,
     basemap: BasemapKind,
 ) -> MapModel {
     let db = &state().db;
@@ -457,22 +669,13 @@ fn build_model(
             let lat = node.lat?;
             let lon = node.lon?;
             let enrollment = node.enrollment.as_str();
-            let keep = match filter {
-                NodeFilter::All => true,
-                NodeFilter::Tracked => {
-                    tracked.contains(&node.pubkey) || enrollment == "hq"
-                }
-                NodeFilter::Favorites => {
-                    favorites.contains(&node.pubkey) || enrollment == "hq"
-                }
-                NodeFilter::Users => node.contact_type == 1 || enrollment == "hq",
-                NodeFilter::Repeaters => node.contact_type == 2,
-                NodeFilter::Rooms => node.contact_type == 3,
-                NodeFilter::Sensors => node.contact_type == 4,
-                NodeFilter::Enrolled => enrollment == "enrolled" || enrollment == "hq",
-                NodeFilter::Heard => enrollment == "heard",
-            };
-            if !keep {
+            if !filter.matches(
+                &node.pubkey,
+                enrollment,
+                node.contact_type,
+                tracked,
+                favorites,
+            ) {
                 return None;
             }
             let age = node
@@ -645,9 +848,19 @@ fn build_model(
     let mut solid = Vec::new();
     let mut dashed = Vec::new();
     let mut snr_features = Vec::new();
+    let mut traffic_lines: Vec<(MapLine, i64)> = Vec::new();
     let hq_pos = hq.as_ref().map(|(_, lat, lon)| (*lon, *lat));
 
     for message in &messages {
+        let peer_key = message.sender_pubkey.as_deref().unwrap_or("");
+        let in_traffic_scope = match traffic_scope {
+            TrafficScope::AllGps => true,
+            TrafficScope::TrackedClaimed => {
+                peer_key.is_empty()
+                    || tracked.contains(peer_key)
+                    || claimed.contains(peer_key)
+            }
+        };
         let node_pos = message.sender_pubkey.as_ref().and_then(|key| {
             path_nodes
                 .iter()
@@ -669,6 +882,9 @@ fn build_model(
             &path_nodes,
             message.hop_count.unwrap_or(0) as u32,
         ) {
+            if show_traffic && in_traffic_scope {
+                traffic_lines.push((line.clone(), message.received_at));
+            }
             let feature = line_feature(&line);
             if line.dashed {
                 if show_dashed {
@@ -692,6 +908,59 @@ fn build_model(
                         },
                         "geometry": { "type": "Point", "coordinates": [lon, lat] }
                     }));
+                }
+            }
+        }
+    }
+
+    let traffic_features: Vec<Value> = if show_traffic {
+        let edges = aggregate_traffic_edges(&traffic_lines);
+        let max_count = edges.iter().map(|e| e.count).max().unwrap_or(1);
+        edges
+            .iter()
+            .map(|edge| traffic_feature(edge, traffic_line_width(edge.count, max_count)))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // Trace highlight: inbound (advert/operator path) + outbound (contact hop_bytes).
+    let mut highlight_features = Vec::new();
+    if !trace_pubkey.is_empty() {
+        let peer_pos = path_nodes
+            .iter()
+            .find(|node| hex::encode(&node.pubkey) == trace_pubkey)
+            .and_then(|node| Some((node.lon?, node.lat?)));
+        if let Some(stored) = db.latest_path_for_pubkey(trace_pubkey).ok().flatten() {
+            let hops = if stored.hash_size > 0 {
+                (stored.path.len() as u32) / (stored.hash_size as u32)
+            } else {
+                0
+            };
+            if let Some(line) = build_line(
+                false,
+                peer_pos,
+                hq_pos,
+                &stored.path,
+                stored.hash_size.max(1) as usize,
+                &path_nodes,
+                hops,
+            ) {
+                highlight_features.push(highlight_feature(&line, "from"));
+            }
+        }
+        if let Some(node) = rows.iter().find(|n| n.pubkey == trace_pubkey) {
+            if !node.hop_bytes.is_empty() {
+                if let Some(line) = build_line(
+                    true,
+                    hq_pos,
+                    peer_pos,
+                    &node.hop_bytes,
+                    1,
+                    &path_nodes,
+                    node.hop_bytes.len() as u32,
+                ) {
+                    highlight_features.push(highlight_feature(&line, "to"));
                 }
             }
         }
@@ -786,7 +1055,16 @@ fn build_model(
         | (BasemapKind::Terrain, false)
         | (BasemapKind::Topo, false) => " · outline (set PMTiles for street/terrain/topo tiles)",
     };
-    let note = if filter == NodeFilter::Tracked && tracked.is_empty() {
+    let tracked_only = filter.tracked
+        && !filter.all
+        && !filter.favorites
+        && !filter.users
+        && !filter.repeaters
+        && !filter.rooms
+        && !filter.sensors
+        && !filter.enrolled
+        && !filter.heard;
+    let note = if tracked_only && tracked.is_empty() {
         "Tracker list is empty. Add devices under Tracker — they must share location to move.".into()
     } else if node_features.is_empty() {
         "No GPS fixes yet. Positions appear when a node advertises coordinates.".into()
@@ -798,7 +1076,7 @@ fn build_model(
             waypoint_features.len(),
             basemap_note
         )
-    } else if filter == NodeFilter::Tracked {
+    } else if tracked_only {
         format!(
             "{} tracked on map · open Tracker to plot trails{}",
             node_features.len(),
@@ -807,11 +1085,17 @@ fn build_model(
     } else if hq_pos.is_none() {
         "Routes need a headquarters fix. Set the radio location under Device → Identity.".into()
     } else {
+        let traffic_bit = if show_traffic {
+            format!(" · {} traffic edge(s)", traffic_features.len())
+        } else {
+            String::new()
+        };
         format!(
-            "{} GPS nodes · {} solid · {} dashed{}",
+            "{} GPS nodes · {} solid · {} dashed{}{}",
             node_features.len(),
             solid.len(),
             dashed.len(),
+            traffic_bit,
             basemap_note
         )
     };
@@ -824,6 +1108,8 @@ fn build_model(
         noise: collection(noise_features),
         trails: collection(trail_features),
         waypoints: collection(waypoint_features),
+        highlight: collection(highlight_features),
+        traffic: collection(traffic_features),
         note,
         bounds,
         pmtiles_ok,
@@ -848,6 +1134,32 @@ fn dashed_layers() -> Value {
             "line-color": "#fbbf24",
             "line-width": 2,
             "line-dasharray": [2, 2]
+        }
+    }])
+}
+
+fn highlight_layers() -> Value {
+    json!([{
+        "id": "trace-highlight",
+        "type": "line",
+        "source": "trace-routes",
+        "paint": {
+            "line-color": ["coalesce", ["get", "color"], "#38bdf8"],
+            "line-width": 5,
+            "line-opacity": 0.9
+        }
+    }])
+}
+
+fn traffic_layers() -> Value {
+    json!([{
+        "id": "traffic-lines",
+        "type": "line",
+        "source": "traffic-routes",
+        "paint": {
+            "line-color": "#a78bfa",
+            "line-width": ["coalesce", ["get", "width"], 2.5],
+            "line-opacity": ["coalesce", ["get", "opacity"], 0.55]
         }
     }])
 }
@@ -910,14 +1222,6 @@ fn waypoint_layers() -> Value {
     }])
 }
 
-fn filter_chip(active: bool) -> &'static str {
-    if active {
-        "map-chip map-chip-active"
-    } else {
-        "map-chip"
-    }
-}
-
 fn default_camera() -> (MapCamera, bool) {
     // Returns (camera, skip_fit_bounds).
     if let Some(cam) = load_saved_camera() {
@@ -957,7 +1261,9 @@ fn default_camera() -> (MapCamera, bool) {
 
 #[component]
 pub fn MapPage() -> Element {
-    let mut filter = use_signal(|| NodeFilter::All);
+    let mut filter = use_signal(NodeFilterSet::everything);
+    let mut filter_menu_open = use_signal(|| false);
+    let mut settings_menu_open = use_signal(|| false);
     let mut window = use_signal(|| TrafficWindow::Last25);
     let mut trail_window = use_signal(|| TrailWindow::Day);
     // Soft-follow a tracked pubkey (empty = off).
@@ -971,6 +1277,12 @@ pub fn MapPage() -> Element {
     let mut show_dashed = use_signal(|| true);
     let mut show_snr = use_signal(|| false);
     let mut show_noise = use_signal(|| false);
+    let mut show_traffic = use_signal(|| false);
+    let mut traffic_scope = use_signal(|| TrafficScope::AllGps);
+    let mut selected_map_pubkey = use_signal(String::new);
+    let mut trace_focus = use_signal(String::new);
+    let mut trace_busy = use_signal(|| false);
+    let mut trace_note = use_signal(String::new);
     let mut favorites = use_signal(load_favorites);
     let mut tick = use_signal(|| 0u32);
     let mut ready = use_signal(|| false);
@@ -991,6 +1303,10 @@ pub fn MapPage() -> Element {
     let tracked = state()
         .db
         .tracked_pubkey_set()
+        .unwrap_or_default();
+    let claimed = state()
+        .db
+        .claimed_pubkey_set()
         .unwrap_or_default();
     // Drop removed Tracker keys and clear follow if deselected.
     {
@@ -1015,9 +1331,13 @@ pub fn MapPage() -> Element {
         show_dashed(),
         show_snr(),
         show_noise(),
+        show_traffic(),
+        traffic_scope(),
         &favorites(),
         &tracked,
+        &claimed,
         &trail_selection(),
+        &trace_focus(),
         basemap(),
     );
 
@@ -1088,6 +1408,9 @@ pub fn MapPage() -> Element {
             show_dashed(),
             show_snr(),
             show_noise(),
+            show_traffic(),
+            traffic_scope(),
+            trace_focus(),
             cluster(),
             favorites(),
         );
@@ -1097,6 +1420,10 @@ pub fn MapPage() -> Element {
         let tracked_now = state()
             .db
             .tracked_pubkey_set()
+            .unwrap_or_default();
+        let claimed_now = state()
+            .db
+            .claimed_pubkey_set()
             .unwrap_or_default();
         let selection_now = trail_selection();
         // Peek basemap — style swaps own the re-push via tick bump after setStyle.
@@ -1108,9 +1435,13 @@ pub fn MapPage() -> Element {
             show_dashed(),
             show_snr(),
             show_noise(),
+            show_traffic(),
+            traffic_scope(),
             &favorites(),
             &tracked_now,
+            &claimed_now,
             &selection_now,
+            &trace_focus(),
             *basemap.peek(),
         );
         let nodes = snapshot.nodes.clone();
@@ -1120,6 +1451,8 @@ pub fn MapPage() -> Element {
         let noise = snapshot.noise.clone();
         let trails = snapshot.trails.clone();
         let waypoints = snapshot.waypoints.clone();
+        let highlight = snapshot.highlight.clone();
+        let traffic = snapshot.traffic.clone();
         let bounds = snapshot.bounds;
         let do_fit = !fitted() && bounds.is_some();
         let do_cluster = cluster();
@@ -1127,6 +1460,8 @@ pub fn MapPage() -> Element {
             map_set_nodes(&nodes, do_cluster).await;
             map_set_geojson("solid-routes", &solid, &solid_layers()).await;
             map_set_geojson("dashed-routes", &dashed, &dashed_layers()).await;
+            map_set_geojson("traffic-routes", &traffic, &traffic_layers()).await;
+            map_set_geojson("trace-routes", &highlight, &highlight_layers()).await;
             map_set_geojson("snr-points", &snr, &snr_layers()).await;
             map_set_geojson("noise-points", &noise, &noise_layers()).await;
             map_set_geojson("track-trails", &trails, &trail_layers()).await;
@@ -1152,9 +1487,11 @@ pub fn MapPage() -> Element {
         let dashed = show_dashed();
         let snr = show_snr();
         let noise = show_noise();
+        let traffic = show_traffic();
         spawn(async move {
             map_set_visibility("solid-lines", solid).await;
             map_set_visibility("dashed-lines", dashed).await;
+            map_set_visibility("traffic-lines", traffic).await;
             map_set_visibility("snr-dots", snr).await;
             map_set_visibility("noise-dots", noise).await;
         });
@@ -1188,6 +1525,11 @@ pub fn MapPage() -> Element {
                 // (next map refresh picks up qr_url). Never encode on this thread.
                 if let Some(raw) = map_take_selection().await {
                     if let Ok(props) = serde_json::from_str::<Value>(&raw) {
+                        if let Some(key) = props.get("pubkey").and_then(|v| v.as_str()) {
+                            if !key.is_empty() {
+                                selected_map_pubkey.set(key.to_string());
+                            }
+                        }
                         let needs_qr = props
                             .get("qr_url")
                             .and_then(|v| v.as_str())
@@ -1381,6 +1723,32 @@ pub fn MapPage() -> Element {
     } else {
         "Connect a MeshCore companion to capture routes, SNR, and noise"
     };
+    let selected_key = selected_map_pubkey();
+    let can_trace = radio_linked
+        && !selected_key.is_empty()
+        && (tracked.contains(&selected_key) || claimed.contains(&selected_key));
+    let selected_label = if selected_key.is_empty() {
+        String::new()
+    } else {
+        let nodes = state().db.list_nodes().unwrap_or_default();
+        let labels = state()
+            .db
+            .list_tracked_nodes()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| (t.pubkey, t.label))
+            .collect::<HashMap<_, _>>();
+        display_name_for_key(&selected_key, &nodes, &labels)
+    };
+    let trace_title = if !radio_linked {
+        "Connect a MeshCore companion (Ready) to trace a path"
+    } else if selected_key.is_empty() {
+        "Click a tracked or claimed pin (detail popup is OK), then Trace"
+    } else if !(tracked.contains(&selected_key) || claimed.contains(&selected_key)) {
+        "Trace is limited to Tracker whitelist or claimed infrastructure"
+    } else {
+        "Fetch advert path locally (airtime). Does not post to channels or DMs."
+    };
 
     rsx! {
         document::Stylesheet { href: asset!("/assets/maplibre-gl.css") }
@@ -1391,71 +1759,260 @@ pub fn MapPage() -> Element {
             div { class: "map-heading-row",
                 div { class: "map-heading-copy",
                     PageHeading { icon: IconName::Map, title: "Map".to_string(), "{model.note}" }
+                    if !trace_note().is_empty() {
+                        p { class: "mt-1 text-xs text-muted-foreground", "{trace_note}" }
+                    }
                 }
                 div { class: "map-overlay-controls",
-                    label { class: "map-toggle",
-                        input { r#type: "checkbox", checked: cluster(), oninput: move |_| cluster.set(!cluster()) }
-                        "Cluster markers"
+                    span {
+                        title: "Select tracked devices to plot trails and waypoints",
+                        Button {
+                            kind: if tracker_panel_open() || !trail_selection().is_empty() {
+                                ButtonKind::Primary
+                            } else {
+                                ButtonKind::Ghost
+                            },
+                            onclick: move |_| {
+                                tracker_panel_open.set(!tracker_panel_open());
+                            },
+                            Icon { name: IconName::Track, size: 14 }
+                            "Tracker"
+                        }
                     }
-                    label {
-                        class: if radio_linked { "map-toggle" } else { "map-toggle map-toggle-disabled" },
-                        title: "{rf_title}",
-                        input {
-                            r#type: "checkbox",
-                            checked: show_solid(),
-                            disabled: !radio_linked,
-                            oninput: move |_| {
-                                if radio_linked {
-                                    show_solid.set(!show_solid());
+                    span {
+                        title: "{trace_title}",
+                        Button {
+                            kind: if !trace_focus().is_empty() {
+                                ButtonKind::Primary
+                            } else {
+                                ButtonKind::Ghost
+                            },
+                            disabled: !can_trace || trace_busy(),
+                            onclick: {
+                                let selected_label = selected_label.clone();
+                                move |_| {
+                                if !can_trace || trace_busy() {
+                                    return;
+                                }
+                                let key = selected_map_pubkey();
+                                if key.is_empty() {
+                                    return;
+                                }
+                                trace_busy.set(true);
+                                trace_note.set(format!("Tracing {selected_label}…"));
+                                let rx = state().radio.fetch_advert_path(key.clone());
+                                spawn(async move {
+                                    let result = rx
+                                        .await
+                                        .unwrap_or_else(|_| Err("Radio task ended.".into()));
+                                    match result {
+                                        Ok(fetch) => {
+                                            trace_focus.set(key);
+                                            let hops = if fetch.hop_count == 0
+                                                && fetch.source == "direct"
+                                            {
+                                                "direct (0 hops)".into()
+                                            } else {
+                                                format!("{} hop(s)", fetch.hop_count)
+                                            };
+                                            trace_note.set(format!(
+                                                "Path updated · {hops} ({})",
+                                                fetch.source
+                                            ));
+                                            tick.with_mut(|n| *n = n.wrapping_add(1));
+                                        }
+                                        Err(err) => {
+                                            // Still show last-known path if any.
+                                            if state()
+                                                .db
+                                                .latest_path_for_pubkey(&key)
+                                                .ok()
+                                                .flatten()
+                                                .is_some()
+                                            {
+                                                trace_focus.set(key);
+                                            }
+                                            trace_note.set(err);
+                                            tick.with_mut(|n| *n = n.wrapping_add(1));
+                                        }
+                                    }
+                                    trace_busy.set(false);
+                                });
+                            }
+                            },
+                            Icon { name: IconName::Signal, size: 14 }
+                            if trace_busy() { "Tracing…" } else { "Trace" }
+                        }
+                    }
+                    if !selected_label.is_empty() {
+                        span { class: "text-xs text-muted-foreground max-w-[9rem] truncate",
+                            title: "{selected_key}",
+                            "Selected: {selected_label}"
+                        }
+                    }
+                    if !trace_focus().is_empty() {
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| {
+                                trace_focus.set(String::new());
+                                trace_note.set(String::new());
+                                tick.with_mut(|n| *n = n.wrapping_add(1));
+                            },
+                            "Clear trace"
+                        }
+                    }
+                    div { class: "map-menu",
+                        Button {
+                            kind: if settings_menu_open() {
+                                ButtonKind::Primary
+                            } else {
+                                ButtonKind::Ghost
+                            },
+                            onclick: move |_| {
+                                let next = !settings_menu_open();
+                                settings_menu_open.set(next);
+                                if next {
+                                    filter_menu_open.set(false);
                                 }
                             },
+                            Icon { name: IconName::Settings, size: 14 }
+                            "Settings"
                         }
-                        "Solid routes"
-                    }
-                    label {
-                        class: if radio_linked { "map-toggle" } else { "map-toggle map-toggle-disabled" },
-                        title: "{rf_title}",
-                        input {
-                            r#type: "checkbox",
-                            checked: show_dashed(),
-                            disabled: !radio_linked,
-                            oninput: move |_| {
-                                if radio_linked {
-                                    show_dashed.set(!show_dashed());
+                        if settings_menu_open() {
+                            div { class: "map-menu__panel map-menu__panel--end",
+                                p { class: "map-menu__title", "Map overlays" }
+                                label { class: "map-menu__item",
+                                    input {
+                                        r#type: "checkbox",
+                                        checked: cluster(),
+                                        oninput: move |_| cluster.set(!cluster()),
+                                    }
+                                    Icon { name: IconName::Users, size: 14 }
+                                    "Cluster markers"
                                 }
-                            },
-                        }
-                        "Dashed routes"
-                    }
-                    label {
-                        class: if radio_linked { "map-toggle" } else { "map-toggle map-toggle-disabled" },
-                        title: "{rf_title}",
-                        input {
-                            r#type: "checkbox",
-                            checked: show_snr(),
-                            disabled: !radio_linked,
-                            oninput: move |_| {
-                                if radio_linked {
-                                    show_snr.set(!show_snr());
+                                label {
+                                    class: if radio_linked { "map-menu__item" } else { "map-menu__item map-menu__item--disabled" },
+                                    title: "{rf_title}",
+                                    input {
+                                        r#type: "checkbox",
+                                        checked: show_solid(),
+                                        disabled: !radio_linked,
+                                        oninput: move |_| {
+                                            if radio_linked {
+                                                show_solid.set(!show_solid());
+                                            }
+                                        },
+                                    }
+                                    Icon { name: IconName::Track, size: 14 }
+                                    "Solid routes"
                                 }
-                            },
-                        }
-                        "SNR"
-                    }
-                    label {
-                        class: if radio_linked { "map-toggle" } else { "map-toggle map-toggle-disabled" },
-                        title: "{rf_title}",
-                        input {
-                            r#type: "checkbox",
-                            checked: show_noise(),
-                            disabled: !radio_linked,
-                            oninput: move |_| {
-                                if radio_linked {
-                                    show_noise.set(!show_noise());
+                                label {
+                                    class: if radio_linked { "map-menu__item" } else { "map-menu__item map-menu__item--disabled" },
+                                    title: "{rf_title}",
+                                    input {
+                                        r#type: "checkbox",
+                                        checked: show_dashed(),
+                                        disabled: !radio_linked,
+                                        oninput: move |_| {
+                                            if radio_linked {
+                                                show_dashed.set(!show_dashed());
+                                            }
+                                        },
+                                    }
+                                    Icon { name: IconName::Track, size: 14 }
+                                    "Dashed routes"
                                 }
-                            },
+                                label {
+                                    class: "map-menu__item",
+                                    title: "Passive traffic weight from overheard messages",
+                                    input {
+                                        r#type: "checkbox",
+                                        checked: show_traffic(),
+                                        oninput: move |_| show_traffic.set(!show_traffic()),
+                                    }
+                                    Icon { name: IconName::Signal, size: 14 }
+                                    "Traffic"
+                                }
+                                if show_traffic() {
+                                    label {
+                                        class: "map-menu__item",
+                                        title: "Limit traffic edges to Tracker + claimed infra",
+                                        input {
+                                            r#type: "checkbox",
+                                            checked: traffic_scope() == TrafficScope::TrackedClaimed,
+                                            oninput: move |_| {
+                                                traffic_scope.set(
+                                                    if traffic_scope() == TrafficScope::TrackedClaimed {
+                                                        TrafficScope::AllGps
+                                                    } else {
+                                                        TrafficScope::TrackedClaimed
+                                                    },
+                                                );
+                                            },
+                                        }
+                                        Icon { name: IconName::Filter, size: 14 }
+                                        "Tracked/claimed only"
+                                    }
+                                }
+                                label {
+                                    class: if radio_linked { "map-menu__item" } else { "map-menu__item map-menu__item--disabled" },
+                                    title: "{rf_title}",
+                                    input {
+                                        r#type: "checkbox",
+                                        checked: show_snr(),
+                                        disabled: !radio_linked,
+                                        oninput: move |_| {
+                                            if radio_linked {
+                                                show_snr.set(!show_snr());
+                                            }
+                                        },
+                                    }
+                                    Icon { name: IconName::Signal, size: 14 }
+                                    "SNR"
+                                }
+                                label {
+                                    class: if radio_linked { "map-menu__item" } else { "map-menu__item map-menu__item--disabled" },
+                                    title: "{rf_title}",
+                                    input {
+                                        r#type: "checkbox",
+                                        checked: show_noise(),
+                                        disabled: !radio_linked,
+                                        oninput: move |_| {
+                                            if radio_linked {
+                                                show_noise.set(!show_noise());
+                                            }
+                                        },
+                                    }
+                                    Icon { name: IconName::Radio, size: 14 }
+                                    "Noise"
+                                }
+                                div { class: "map-menu__divider" }
+                                p { class: "map-menu__title", "Traffic window" }
+                                div { class: "min-w-[10rem]",
+                                    SelectInput {
+                                        id: "map-traffic-window".to_string(),
+                                        value: match window() {
+                                            TrafficWindow::Last25 => "25".to_string(),
+                                            TrafficWindow::Hour => "1h".to_string(),
+                                            TrafficWindow::SixHours => "6h".to_string(),
+                                            TrafficWindow::Day => "24h".to_string(),
+                                        },
+                                        onchange: move |event: FormEvent| {
+                                            window.set(match event.value().as_str() {
+                                                "1h" => TrafficWindow::Hour,
+                                                "6h" => TrafficWindow::SixHours,
+                                                "24h" => TrafficWindow::Day,
+                                                _ => TrafficWindow::Last25,
+                                            });
+                                        },
+                                        option { value: "25", style: "background-color:#101418;color:#f4f4f5;", "Last 25 messages" }
+                                        option { value: "1h", style: "background-color:#101418;color:#f4f4f5;", "Last 1 hour" }
+                                        option { value: "6h", style: "background-color:#101418;color:#f4f4f5;", "Last 6 hours" }
+                                        option { value: "24h", style: "background-color:#101418;color:#f4f4f5;", "Last 24 hours" }
+                                    }
+                                }
+                            }
                         }
-                        "Noise"
                     }
                     Button {
                         kind: ButtonKind::Ghost,
@@ -1517,112 +2074,142 @@ pub fn MapPage() -> Element {
                 }
             }
             div { class: "map-toolbar",
-                div { class: "flex flex-wrap gap-2",
-                    button {
-                        class: filter_chip(filter() == NodeFilter::All),
+                div { class: "map-menu",
+                    Button {
+                        kind: if filter_menu_open() {
+                            ButtonKind::Primary
+                        } else {
+                            ButtonKind::Ghost
+                        },
                         onclick: move |_| {
-                            filter.set(NodeFilter::All);
-                            follow_pubkey.set(String::new());
+                            let next = !filter_menu_open();
+                            filter_menu_open.set(next);
+                            if next {
+                                settings_menu_open.set(false);
+                            }
                         },
-                        "All"
+                        Icon { name: IconName::Filter, size: 14 }
+                        "Filter"
+                        span { class: "text-xs text-muted-foreground", "· {filter().summary()}" }
                     }
-                    button {
-                        class: filter_chip(filter() == NodeFilter::Tracked),
-                        title: "Show Tracker whitelist + HQ pins",
-                        onclick: move |_| {
-                            filter.set(NodeFilter::Tracked);
-                            fitted.set(false);
-                        },
-                        "Tracked"
-                    }
-                    button {
-                        class: filter_chip(tracker_panel_open() || !trail_selection().is_empty()),
-                        title: "Select tracked devices to plot trails and waypoints",
-                        onclick: move |_| {
-                            tracker_panel_open.set(!tracker_panel_open());
-                        },
-                        Icon { name: IconName::Track, size: 14 }
-                        "Tracker"
-                    }
-                    button {
-                        class: filter_chip(filter() == NodeFilter::Favorites),
-                        onclick: move |_| {
-                            filter.set(NodeFilter::Favorites);
-                            follow_pubkey.set(String::new());
-                        },
-                        "Favorites"
-                    }
-                    button {
-                        class: filter_chip(filter() == NodeFilter::Users),
-                        onclick: move |_| {
-                            filter.set(NodeFilter::Users);
-                            follow_pubkey.set(String::new());
-                        },
-                        "Users"
-                    }
-                    button {
-                        class: filter_chip(filter() == NodeFilter::Repeaters),
-                        onclick: move |_| {
-                            filter.set(NodeFilter::Repeaters);
-                            follow_pubkey.set(String::new());
-                        },
-                        "Repeaters"
-                    }
-                    button {
-                        class: filter_chip(filter() == NodeFilter::Rooms),
-                        onclick: move |_| {
-                            filter.set(NodeFilter::Rooms);
-                            follow_pubkey.set(String::new());
-                        },
-                        "Rooms"
-                    }
-                    button {
-                        class: filter_chip(filter() == NodeFilter::Sensors),
-                        onclick: move |_| {
-                            filter.set(NodeFilter::Sensors);
-                            follow_pubkey.set(String::new());
-                        },
-                        "Sensors"
-                    }
-                    button {
-                        class: filter_chip(filter() == NodeFilter::Enrolled),
-                        onclick: move |_| {
-                            filter.set(NodeFilter::Enrolled);
-                            follow_pubkey.set(String::new());
-                        },
-                        "Enrolled"
-                    }
-                    button {
-                        class: filter_chip(filter() == NodeFilter::Heard),
-                        onclick: move |_| {
-                            filter.set(NodeFilter::Heard);
-                            follow_pubkey.set(String::new());
-                        },
-                        "Heard"
-                    }
-                }
-                div { class: "min-w-[10rem]",
-                    SelectInput {
-                        id: "map-traffic-window".to_string(),
-                        value: match window() {
-                            TrafficWindow::Last25 => "25".to_string(),
-                            TrafficWindow::Hour => "1h".to_string(),
-                            TrafficWindow::SixHours => "6h".to_string(),
-                            TrafficWindow::Day => "24h".to_string(),
-                        },
-                        onchange: move |event: FormEvent| {
-                            window.set(match event.value().as_str() {
-                                "1h" => TrafficWindow::Hour,
-                                "6h" => TrafficWindow::SixHours,
-                                "24h" => TrafficWindow::Day,
-                                _ => TrafficWindow::Last25,
-                            });
-                            fitted.set(false);
-                        },
-                        option { value: "25", style: "background-color:#101418;color:#f4f4f5;", "Last 25 messages" }
-                        option { value: "1h", style: "background-color:#101418;color:#f4f4f5;", "Last 1 hour" }
-                        option { value: "6h", style: "background-color:#101418;color:#f4f4f5;", "Last 6 hours" }
-                        option { value: "24h", style: "background-color:#101418;color:#f4f4f5;", "Last 24 hours" }
+                    if filter_menu_open() {
+                        div { class: "map-menu__panel",
+                            p { class: "map-menu__title", "Show pins" }
+                            label { class: "map-menu__item",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: filter().all,
+                                    oninput: move |_| {
+                                        let turn_on = !filter().all;
+                                        filter.with_mut(|f| f.set_all(turn_on));
+                                        if turn_on {
+                                            follow_pubkey.set(String::new());
+                                        }
+                                    },
+                                }
+                                Icon { name: IconName::Map, size: 14 }
+                                "All"
+                            }
+                            div { class: "map-menu__divider" }
+                            label { class: "map-menu__item",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: filter().tracked || filter().all,
+                                    oninput: move |_| {
+                                        filter.with_mut(|f| f.toggle(NodeFilterKind::Tracked));
+                                    },
+                                }
+                                Icon { name: IconName::Track, size: 14 }
+                                "Tracked"
+                            }
+                            label { class: "map-menu__item",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: filter().favorites || filter().all,
+                                    oninput: move |_| {
+                                        filter.with_mut(|f| f.toggle(NodeFilterKind::Favorites));
+                                        follow_pubkey.set(String::new());
+                                    },
+                                }
+                                Icon { name: IconName::Check, size: 14 }
+                                "Favorites"
+                            }
+                            label { class: "map-menu__item",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: filter().users || filter().all,
+                                    oninput: move |_| {
+                                        filter.with_mut(|f| f.toggle(NodeFilterKind::Users));
+                                        follow_pubkey.set(String::new());
+                                    },
+                                }
+                                Icon { name: IconName::Users, size: 14 }
+                                "Users"
+                            }
+                            label { class: "map-menu__item",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: filter().repeaters || filter().all,
+                                    oninput: move |_| {
+                                        filter.with_mut(|f| f.toggle(NodeFilterKind::Repeaters));
+                                        follow_pubkey.set(String::new());
+                                    },
+                                }
+                                Icon { name: IconName::Radio, size: 14 }
+                                "Repeaters"
+                            }
+                            label { class: "map-menu__item",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: filter().rooms || filter().all,
+                                    oninput: move |_| {
+                                        filter.with_mut(|f| f.toggle(NodeFilterKind::Rooms));
+                                        follow_pubkey.set(String::new());
+                                    },
+                                }
+                                Icon { name: IconName::Messages, size: 14 }
+                                "Rooms"
+                            }
+                            label { class: "map-menu__item",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: filter().sensors || filter().all,
+                                    oninput: move |_| {
+                                        filter.with_mut(|f| f.toggle(NodeFilterKind::Sensors));
+                                        follow_pubkey.set(String::new());
+                                    },
+                                }
+                                Icon { name: IconName::Scan, size: 14 }
+                                "Sensors"
+                            }
+                            label { class: "map-menu__item",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: filter().enrolled || filter().all,
+                                    oninput: move |_| {
+                                        filter.with_mut(|f| f.toggle(NodeFilterKind::Enrolled));
+                                        follow_pubkey.set(String::new());
+                                    },
+                                }
+                                Icon { name: IconName::Key, size: 14 }
+                                "Enrolled"
+                            }
+                            label { class: "map-menu__item",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: filter().heard || filter().all,
+                                    oninput: move |_| {
+                                        filter.with_mut(|f| f.toggle(NodeFilterKind::Heard));
+                                        follow_pubkey.set(String::new());
+                                    },
+                                }
+                                Icon { name: IconName::Signal, size: 14 }
+                                "Heard"
+                            }
+                            p { class: "map-menu__hint",
+                                "All selects every category. Uncheck All to pick a mix — pins matching any checked category stay visible."
+                            }
+                        }
                     }
                 }
                 if !trail_selection().is_empty() {

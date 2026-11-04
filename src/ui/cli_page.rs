@@ -150,8 +150,9 @@ pub fn commands_for(mode: CliMode) -> Vec<(&'static str, &'static str)> {
     }
 }
 
-/// Rate-limited status probe set for claimed infrastructure.
-pub const STATUS_PROBE_COMMANDS: &[&str] = &["ver", "get radio", "neighbors"];
+/// CLI follow-ups after a binary status refresh (fields not in StatusData).
+pub const STATUS_CLI_FOLLOWUP: &[&str] =
+    &["get tx", "ver", "clock", "get radio", "neighbors"];
 
 pub fn is_destructive_cli(command: &str) -> bool {
     let lower = command.trim().to_ascii_lowercase();

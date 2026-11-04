@@ -385,7 +385,7 @@ pub fn HelpPage() -> Element {
                         ul { class: "help-bullets",
                             li {
                                 strong { "Map" }
-                                " — pins from self-reported GPS (ignore 0,0). HQ site pin is separate (Settings)."
+                                " — pins from self-reported GPS (ignore 0,0). HQ site pin is separate (Settings). Trace (tracked or claimed pins) fetches a path via the companion only — no channel/DM posts; uses airtime. Traffic overlay weights overheard edges in the time window (passive)."
                             }
                             li {
                                 strong { "Tracker" }
@@ -393,7 +393,11 @@ pub fn HelpPage() -> Element {
                             }
                             li {
                                 strong { "Infrastructure" }
-                                " — claim repeaters / rooms / sensors; verify admin over LoRa through the primary companion. Claimed nodes are not pool companions."
+                                " — Claimed vs Claim tabs; verify admin over LoRa through the primary companion. Status refresh + Settings mirror the MeshCore app (position, clock, ACL, passwords, regions, TX). Claimed nodes are not pool companions."
+                            }
+                            li {
+                                strong { "Overview → Repeaters" }
+                                " — appears once infrastructure is claimed. Fleet tiles, card grid, and a Details for dropdown for KPIs/charts from LoRa status samples (sparse probes). Refresh all / Refresh node on the page; auto-probe interval, sweep size, sample cap, and status purge under Settings → Preferences → Claimed infrastructure."
                             }
                         }
                     }

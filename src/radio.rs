@@ -17,7 +17,7 @@ use tokio::sync::oneshot;
 use tokio::sync::watch;
 
 use crate::contact_qr;
-use crate::db::{contact_snapshot, unix_now, Db, RadioRole};
+use crate::db::{contact_snapshot, unix_now, Db, InfraStatusSample, RadioRole};
 use crate::path::{hop_count_from_path_len, parse_advert_path};
 use crate::secrets::Secrets;
 use crate::signup::{decide, parse_command};
@@ -35,6 +35,17 @@ pub const DISCOVER_FILTER_SENSORS: u8 = 1 << 4;
 pub struct DiscoverSummary {
     pub returned: usize,
     pub added: usize,
+}
+
+/// Result of an operator / passive advert-path fetch (`CMD_GET_ADVERT_PATH`).
+#[derive(Debug, Clone)]
+pub struct AdvertPathFetch {
+    #[allow(dead_code)] // kept for callers that want raw path bytes
+    pub path: Vec<u8>,
+    #[allow(dead_code)]
+    pub hash_size: usize,
+    pub source: String,
+    pub hop_count: u32,
 }
 
 /// Lets background fetches (weather/quake) enqueue a METIS-INFO channel reply.
@@ -301,6 +312,16 @@ pub enum RadioCmd {
     },
     /// Probe noise floor via status requests for GPS contacts.
     ProbeNoise,
+    /// Operator path fetch (`CMD_GET_ADVERT_PATH` 0x2A). Local only — no channel/DM.
+    FetchAdvertPath {
+        pubkey_hex: String,
+        reply: oneshot::Sender<Result<AdvertPathFetch, String>>,
+    },
+    /// Binary status request for one claimed infra pubkey.
+    ProbeInfraStatus {
+        pubkey_hex: String,
+        reply: oneshot::Sender<Result<meshcore_rs::events::StatusData, String>>,
+    },
     /// Sign bytes with the primary companion (Ed25519). Used by map upload.
     SignBytes {
         data: Vec<u8>,
@@ -339,6 +360,12 @@ fn no_primary_reason(cmd: &RadioCmd) -> &'static str {
         RadioCmd::RunCli { .. } => "Connect a primary companion radio before running CLI commands.",
         RadioCmd::SendLogin { .. } => {
             "Connect a primary companion radio before verifying infrastructure."
+        }
+        RadioCmd::ProbeInfraStatus { .. } => {
+            "Connect a primary companion radio before refreshing infrastructure status."
+        }
+        RadioCmd::FetchAdvertPath { .. } => {
+            "Connect a primary companion radio before tracing a path."
         }
         RadioCmd::SignBytes { .. } | RadioCmd::ExportPrivateKey { .. } => {
             "Connect a primary companion radio before authorizing map uploads."
@@ -383,6 +410,12 @@ fn reject_cmd(cmd: RadioCmd, status: &Mutex<RadioStatus>, reason: &str) {
             let _ = reply.send(Err(reason.into()));
         }
         RadioCmd::SendLogin { reply, .. } => {
+            let _ = reply.send(Err(reason.into()));
+        }
+        RadioCmd::ProbeInfraStatus { reply, .. } => {
+            let _ = reply.send(Err(reason.into()));
+        }
+        RadioCmd::FetchAdvertPath { reply, .. } => {
             let _ = reply.send(Err(reason.into()));
         }
         RadioCmd::SignBytes { reply, .. } => {
@@ -1350,6 +1383,32 @@ impl RadioHandle {
 
     pub fn probe_noise_samples(&self) {
         self.pool.route_to_primary(RadioCmd::ProbeNoise);
+    }
+
+    /// Operator path fetch for Map Trace (local companion only — no channel/DM).
+    pub fn fetch_advert_path(
+        &self,
+        pubkey_hex: String,
+    ) -> oneshot::Receiver<Result<AdvertPathFetch, String>> {
+        let (tx, rx) = oneshot::channel();
+        self.pool.route_to_primary(RadioCmd::FetchAdvertPath {
+            pubkey_hex,
+            reply: tx,
+        });
+        rx
+    }
+
+    /// Binary status request for a claimed repeater / room / sensor (after admin ACL).
+    pub fn probe_infra_status(
+        &self,
+        pubkey_hex: String,
+    ) -> oneshot::Receiver<Result<meshcore_rs::events::StatusData, String>> {
+        let (tx, rx) = oneshot::channel();
+        self.pool.route_to_primary(RadioCmd::ProbeInfraStatus {
+            pubkey_hex,
+            reply: tx,
+        });
+        rx
     }
 
     pub fn cancel_mesh_scan(&self) {
@@ -2580,8 +2639,180 @@ const PROBE_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
 const PROBE_CONTACTS_TIMEOUT: Duration = Duration::from_secs(20);
 const PROBE_MAX_TARGETS: usize = 5;
 
+/// Persist a binary status sample (+ RF map sample) for Overview / Infrastructure.
+pub fn persist_infra_status_probe(
+    db: &Db,
+    pubkey: &str,
+    info: &meshcore_rs::events::StatusData,
+    prior_tx_power_dbm: Option<i64>,
+) {
+    let raw = json!({
+        "battery_mv": info.battery_mv,
+        "tx_queue_len": info.tx_queue_len,
+        "noise_floor": info.noise_floor,
+        "last_rssi": info.last_rssi,
+        "nb_recv": info.nb_recv,
+        "nb_sent": info.nb_sent,
+        "airtime": info.airtime,
+        "uptime": info.uptime,
+        "flood_sent": info.flood_sent,
+        "direct_sent": info.direct_sent,
+        "snr": info.snr,
+        "dup_count": info.dup_count,
+        "rx_airtime": info.rx_airtime,
+    })
+    .to_string();
+    let sample = InfraStatusSample {
+        pubkey: pubkey.to_string(),
+        at: unix_now(),
+        battery_mv: i64::from(info.battery_mv),
+        noise_floor: i64::from(info.noise_floor),
+        last_rssi: i64::from(info.last_rssi),
+        snr: f64::from(info.snr),
+        airtime_ms: i64::from(info.airtime),
+        rx_airtime_ms: i64::from(info.rx_airtime),
+        uptime_s: i64::from(info.uptime),
+        nb_recv: i64::from(info.nb_recv),
+        nb_sent: i64::from(info.nb_sent),
+        flood_sent: i64::from(info.flood_sent),
+        direct_sent: i64::from(info.direct_sent),
+        tx_power_dbm: prior_tx_power_dbm,
+        tx_queue_len: Some(i64::from(info.tx_queue_len)),
+        raw_json: raw,
+    };
+    let _ = db.insert_infra_status_sample(&sample, None);
+    let _ = db.insert_rf_sample(pubkey, info.noise_floor, info.last_rssi, info.snr);
+}
+
+/// Connect-time / off-interval freshness: skip nodes probed within this window.
+const CLAIMED_PROBE_FRESH_DEFAULT_SECS: i64 = 15 * 60;
+
+async fn run_claimed_infra_status_sweep(
+    db: Arc<Db>,
+    meshcore: Arc<MeshCore>,
+    status: Arc<Mutex<RadioStatus>>,
+) {
+    let max_targets = db.infra_probe_max_targets();
+    let interval_mins = db.infra_probe_interval_mins();
+    let fresh_secs = if interval_mins > 0 {
+        interval_mins * 60
+    } else {
+        CLAIMED_PROBE_FRESH_DEFAULT_SECS
+    };
+    let now = unix_now();
+    let mut targets: Vec<String> = db
+        .list_claimed_infra()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|row| row.is_verified())
+        .filter(|row| {
+            match db.get_infra_status_latest(&row.pubkey).ok().flatten() {
+                Some(latest) => now - latest.probed_at >= fresh_secs,
+                None => true,
+            }
+        })
+        .map(|row| row.pubkey)
+        .take(max_targets)
+        .collect();
+    if targets.is_empty() {
+        return;
+    }
+    write_status(
+        &status,
+        "connected",
+        format!(
+            "Auto-probing {} claimed infrastructure node(s)…",
+            targets.len()
+        ),
+    );
+    let mut ok = 0usize;
+    for (i, pubkey) in targets.drain(..).enumerate() {
+        if i > 0 {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+        }
+        let prior_tx = db
+            .get_infra_status_latest(&pubkey)
+            .ok()
+            .flatten()
+            .and_then(|r| r.tx_power_dbm);
+        match run_infra_status_probe(meshcore.clone(), status.clone(), &pubkey).await {
+            Ok(info) => {
+                persist_infra_status_probe(&db, &pubkey, &info, prior_tx);
+                ok += 1;
+            }
+            Err(err) => {
+                hq_log!(
+                    debug,
+                    "claimed status auto-probe {}: {err}",
+                    &pubkey.chars().take(12).collect::<String>()
+                );
+            }
+        }
+    }
+    let name = {
+        let guard = status.lock().unwrap_or_else(|err| err.into_inner());
+        if guard.connected_name.is_empty() {
+            "companion".into()
+        } else {
+            guard.connected_name.clone()
+        }
+    };
+    write_status(
+        &status,
+        "connected",
+        connected_detail(&status, &name),
+    );
+    if ok > 0 {
+        hq_log!(info, "claimed infrastructure auto-probe: {ok} updated");
+    }
+}
+
 /// Status probes are mesh DMs. Acquire the command lock per step and release
 /// between contacts so channel sends / CLI stay responsive.
+async fn run_infra_status_probe(
+    meshcore: Arc<MeshCore>,
+    status: Arc<Mutex<RadioStatus>>,
+    pubkey_hex: &str,
+) -> Result<meshcore_rs::events::StatusData, String> {
+    let key = parse_pubkey_full(pubkey_hex)?;
+    write_status(
+        &status,
+        "connected",
+        format!(
+            "Refreshing infrastructure status ({})…",
+            &pubkey_hex.chars().take(12).collect::<String>()
+        ),
+    );
+    let commands = match tokio::time::timeout(
+        Duration::from_secs(8),
+        meshcore.commands().lock(),
+    )
+    .await
+    {
+        Ok(guard) => guard,
+        Err(_) => {
+            let msg = "Status refresh skipped — radio busy.".to_string();
+            write_status(&status, "connected", msg.clone());
+            return Err(msg);
+        }
+    };
+    let result = commands
+        .request_status_with_timeout(Destination::Bytes(key.to_vec()), PROBE_STATUS_TIMEOUT)
+        .await;
+    drop(commands);
+    match result {
+        Ok(info) => {
+            write_status(&status, "connected", "Infrastructure status refreshed.");
+            Ok(info)
+        }
+        Err(err) => {
+            let msg = format!("Status refresh failed: {err}");
+            write_status(&status, "connected", msg.clone());
+            Err(msg)
+        }
+    }
+}
+
 async fn run_noise_probe(db: Arc<Db>, meshcore: Arc<MeshCore>, status: Arc<Mutex<RadioStatus>>) {
     write_status(
         &status,
@@ -3001,7 +3232,9 @@ async fn apply_remote_cli(
         .send_with_timeout(&data, Some(EventType::MsgSent), Duration::from_secs(10))
         .await
         .map_err(|err| err.to_string())?;
-    Ok("CLI command sent to contact (replies arrive as mesh messages).".into())
+    // Empty: do not push a send-ack onto cli_line. The real answer arrives later as
+    // CLI_DATA (txt_type 1) and must be the next line infra capture sees.
+    Ok(String::new())
 }
 
 const INFRA_LOGIN_TIMEOUT: Duration = Duration::from_secs(25);
@@ -3125,15 +3358,22 @@ async fn primary_channel_setup(
     }
     if let Err(err) = push_channel(db, secrets, commands, max_channels).await {
         hq_log!(warn, "channel setup: {err}");
-        if is_link_error(&err) {
-            return Err(err);
+        // After a long BLE contact dump, meshcore-rs often returns a plain
+        // timeout while logging "BLE TX error: Not connected" on the side.
+        // Do not fall through to Companion ready with a dead GATT link.
+        if is_link_error(&err) || is_channel_query_timeout(&err) {
+            return Err(format!(
+                "Channel push failed — radio link likely dropped: {err}"
+            ));
         }
     }
     // Soft-delete is local; companion still holds the slot until we blank it.
     if let Err(err) = clear_soft_deleted_radio_slots(db, commands).await {
         hq_log!(warn, "clear soft-deleted channels: {err}");
-        if is_link_error(&err) {
-            return Err(err);
+        if is_link_error(&err) || is_channel_query_timeout(&err) {
+            return Err(format!(
+                "Channel cleanup failed — radio link likely dropped: {err}"
+            ));
         }
     }
     Ok(())
@@ -3376,6 +3616,20 @@ async fn run_session(
             }
         }
         write_status(status, "connected", connected_detail(status, name));
+        // Drop the held commands lock before background status DMs compete for it.
+        drop(commands);
+        {
+            let meshcore = meshcore.clone();
+            let db = Arc::clone(db);
+            let status = Arc::clone(status);
+            tokio::spawn(async move {
+                // Let the session loop subscribe / settle before airtime probes.
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                run_claimed_infra_status_sweep(db, meshcore, status).await;
+            });
+        }
+        // Re-acquire for the rest of session setup that expects `commands` in scope…
+        // (session continues with a fresh lock below via the event loop)
     }
 
     let (event_tx, mut event_rx) = unbounded_channel();
@@ -3392,7 +3646,7 @@ async fn run_session(
         EventType::LoginSuccess,
         EventType::LoginFailed,
     ];
-    // LogData carries raw ADVERT packets for map.meshcore.dev (E4). Only when enabled
+    // LogData carries raw ADVERT packets for map.meshcore.io (E4). Only when enabled
     // so we do not flood BLE with every overheard frame by default.
     let mut logdata_subscribed = false;
     if map_upload_on {
@@ -3419,6 +3673,8 @@ async fn run_session(
     let mut pushed_generation = 0i64;
     let mut was_primary = ctx.is_primary();
     let mut last_battery = Instant::now();
+    // Periodic claimed-infra status sweep (Settings interval; 0 = connect-only).
+    let mut last_infra_sweep = Instant::now();
     // Contacts were just synced during connect.
     let mut last_advert_sync = Instant::now();
     let mut contact_retry_at = Instant::now() + Duration::from_secs(15);
@@ -3771,9 +4027,19 @@ async fn run_session(
                         };
                         match result {
                             Ok(reply) => {
-                                // UI already echoes `> cmd`; push reply body only.
-                                push_cli_line(status, reply);
-                                write_status(status, "connected", "CLI command completed.");
+                                // UI already echoes `> cmd`. Remote CLI returns empty here —
+                                // the mesh reply is pushed when ContactMessage (txt_type 1) arrives.
+                                let reply = reply.trim();
+                                if reply.is_empty() {
+                                    write_status(
+                                        status,
+                                        "connected",
+                                        "CLI command sent — waiting for mesh reply.",
+                                    );
+                                } else {
+                                    push_cli_line(status, reply);
+                                    write_status(status, "connected", "CLI command completed.");
+                                }
                             }
                             Err(err) => {
                                 push_cli_line(status, format!("error: {err}"));
@@ -3810,6 +4076,40 @@ async fn run_session(
                         let status = Arc::clone(status);
                         tokio::spawn(async move {
                             run_noise_probe(db, meshcore, status).await;
+                        });
+                    }
+                    Some(RadioCmd::FetchAdvertPath { pubkey_hex, reply }) => {
+                        let meshcore = meshcore.clone();
+                        let db = Arc::clone(db);
+                        let status = Arc::clone(status);
+                        tokio::spawn(async move {
+                            let outcome =
+                                run_operator_path_fetch(db.as_ref(), &meshcore, &pubkey_hex).await;
+                            match &outcome {
+                                Ok(fetch) => {
+                                    write_status(
+                                        status.as_ref(),
+                                        "connected",
+                                        format!(
+                                            "Path trace ok · {} hop(s) ({})",
+                                            fetch.hop_count, fetch.source
+                                        ),
+                                    );
+                                }
+                                Err(err) => {
+                                    write_status(status.as_ref(), "connected", err.clone());
+                                }
+                            }
+                            let _ = reply.send(outcome);
+                        });
+                    }
+                    Some(RadioCmd::ProbeInfraStatus { pubkey_hex, reply }) => {
+                        let meshcore = meshcore.clone();
+                        let status = Arc::clone(status);
+                        tokio::spawn(async move {
+                            let outcome =
+                                run_infra_status_probe(meshcore, status, &pubkey_hex).await;
+                            let _ = reply.send(outcome);
                         });
                     }
                     Some(RadioCmd::SignBytes { data, reply }) => {
@@ -3883,6 +4183,7 @@ async fn run_session(
                         if let EventPayload::ContactMessage(ref msg) = event.payload {
                             if msg.txt_type == 1 && !msg.text.trim().is_empty() {
                                 push_cli_line(status, msg.text.trim());
+                                write_status(status, "connected", "CLI command completed.");
                             }
                         }
                         // Bot replies only on the primary; every radio still ingests history.
@@ -3966,6 +4267,22 @@ async fn run_session(
                             Err(err) => hq_log!(debug, "battery poll: {err}"),
                         }
                         last_battery = Instant::now();
+                    }
+                }
+                // Periodic claimed repeater/room/sensor status (primary only).
+                if ctx.is_primary() {
+                    let interval_mins = db.infra_probe_interval_mins();
+                    if interval_mins > 0 {
+                        let every = Duration::from_secs((interval_mins as u64).saturating_mul(60));
+                        if last_infra_sweep.elapsed() >= every {
+                            last_infra_sweep = Instant::now();
+                            let meshcore = meshcore.clone();
+                            let db = Arc::clone(&ctx.pool.db);
+                            let status = Arc::clone(status);
+                            tokio::spawn(async move {
+                                run_claimed_infra_status_sweep(db, meshcore, status).await;
+                            });
+                        }
                     }
                 }
                 // Never run a multi-minute contact dump on the live loop — that
@@ -4216,7 +4533,7 @@ async fn clear_soft_deleted_radio_slots(
             Err(err) => {
                 let msg = err.to_string();
                 hq_log!(debug, "get_channel({idx}) while clearing soft-deleted: {msg}");
-                if is_link_error(&msg) {
+                if is_link_error(&msg) || is_channel_query_timeout(&msg) {
                     return Err(msg);
                 }
             }
@@ -4297,14 +4614,19 @@ async fn sync_channels(
                 // ("Timeout waiting for Some(ChannelInfo)") while logging
                 // "BLE TX error: Not connected" separately. A timeout before any
                 // channel is read means the link is dead — do not pretend sync OK.
+                // Mid-table timeouts are ambiguous (empty higher slots vs dead
+                // link); keep partial results and let push_channel confirm the
+                // link — a push timeout aborts setup instead of false Ready.
                 if is_channel_query_timeout(&msg) {
                     if completed == 0 {
                         return Err(format!(
                             "Radio link unresponsive during channel sync (slot {idx}): {msg}"
                         ));
                     }
-                    // Timeout on a later slot usually means the table ended or the
-                    // radio stalled — keep what we have instead of hammering BLE.
+                    hq_log!(
+                        warn,
+                        "get_channel({idx}) timed out after {completed} slot(s); keeping partial sync and verifying link on channel push"
+                    );
                     break;
                 }
                 return Err(format!("Channel sync stopped at slot {idx}: {msg}"));
@@ -4953,56 +5275,273 @@ fn handle_bot_channel(
     }
 }
 
-async fn remember_route(db: &Db, meshcore: &MeshCore, pubkey_hex: &str, message_id: i64) {
-    let Ok(bytes) = hex::decode(pubkey_hex) else {
-        return;
-    };
-    if bytes.len() != 32 {
-        return;
+const TRACE_COOLDOWN: Duration = Duration::from_secs(8);
+
+fn trace_rate_allows(pubkey_hex: &str) -> Result<(), String> {
+    static LAST: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    let map = LAST.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    if let Some(prev) = guard.get(pubkey_hex) {
+        let wait = TRACE_COOLDOWN.saturating_sub(now.saturating_duration_since(*prev));
+        if !wait.is_zero() {
+            return Err(format!(
+                "Rate-limited — wait {}s before tracing again.",
+                wait.as_secs().max(1)
+            ));
+        }
     }
-    let mut frame = Vec::with_capacity(34);
-    frame.push(0x2A);
-    frame.push(0x00);
-    frame.extend_from_slice(&bytes);
-    let Some(commands) = lock_commands_brief(meshcore).await else {
-        return;
+    guard.insert(pubkey_hex.to_string(), now);
+    // Bound map size.
+    if guard.len() > 200 {
+        let cutoff = now.checked_sub(Duration::from_secs(600)).unwrap_or(now);
+        guard.retain(|_, t| *t >= cutoff);
+    }
+    Ok(())
+}
+
+fn persist_path_source(persist_source: &str, kind: &str) -> String {
+    if persist_source == "operator" && kind == "advert" {
+        "operator".into()
+    } else {
+        kind.into()
+    }
+}
+
+fn advert_fetch_from_path(
+    path: Vec<u8>,
+    hash_size: usize,
+    source: String,
+) -> AdvertPathFetch {
+    let hop_count = if hash_size == 0 {
+        0
+    } else {
+        (path.len() / hash_size) as u32
     };
-    if let Ok(event) = commands
-        .send_multi(
-            &frame,
-            &[EventType::Unknown, EventType::Error],
-            Duration::from_secs(2),
-        )
-        .await
-    {
-        let raw = match event.payload {
-            EventPayload::Bytes(raw) => raw,
-            _ => Vec::new(),
-        };
-        if let Some((path, hash_size)) = parse_advert_path(&raw) {
-            let _ = db.save_path(
-                Some(message_id),
-                Some(pubkey_hex),
-                "advert",
-                &path,
-                hash_size as i64,
-            );
-            return;
+    AdvertPathFetch {
+        path,
+        hash_size,
+        source,
+        hop_count,
+    }
+}
+
+fn path_fetch_from_event(
+    event: &meshcore_rs::events::MeshCoreEvent,
+    pubkey_prefix: &[u8; 6],
+) -> Option<(Vec<u8>, usize, &'static str)> {
+    match &event.payload {
+        // PUSH 0x81 — path_len < 0 means unknown / cleared (not a usable route).
+        EventPayload::PathUpdate(update) if &update.prefix == pubkey_prefix => {
+            if update.path_len < 0 {
+                return None;
+            }
+            let hash_size = 1usize;
+            let take = (update.path_len as usize).saturating_mul(hash_size);
+            let path = update.path.iter().take(take).copied().collect::<Vec<_>>();
+            let kind = if update.path_len == 0 {
+                "direct"
+            } else {
+                "path_update"
+            };
+            Some((path, hash_size, kind))
+        }
+        // RESP_CODE_ADVERT_PATH (22 / 0x16) arrives as Unknown + Bytes in meshcore-rs.
+        EventPayload::Bytes(raw) => parse_advert_path(raw).map(|(p, hs)| (p, hs, "advert")),
+        _ => None,
+    }
+}
+
+/// DB / contact fallbacks when the live 0x2A round-trip did not yield a path.
+fn path_fetch_fallbacks(
+    db: &Db,
+    pubkey_hex: &str,
+    message_id: Option<i64>,
+    persist_source: &str,
+) -> Result<AdvertPathFetch, String> {
+    if let Ok(Some(stored)) = db.latest_path_for_pubkey(pubkey_hex) {
+        if !stored.path.is_empty() || stored.hash_size > 0 {
+            return Ok(advert_fetch_from_path(
+                stored.path,
+                stored.hash_size.max(1) as usize,
+                persist_path_source(persist_source, &stored.source),
+            ));
         }
     }
     if let Ok(nodes) = db.nodes_by_prefix(&pubkey_hex[..12.min(pubkey_hex.len())]) {
         if let Some(node) = nodes.into_iter().find(|node| node.pubkey == pubkey_hex) {
             if !node.hop_bytes.is_empty() {
+                let source = persist_path_source(persist_source, "out_path");
                 let _ = db.save_path(
-                    Some(message_id),
+                    message_id,
                     Some(pubkey_hex),
-                    "out_path",
+                    &source,
                     &node.hop_bytes,
                     1,
                 );
+                return Ok(advert_fetch_from_path(node.hop_bytes, 1, source));
+            }
+            // Companion contact with path_len 0 = direct (no mid hops). Still drawable.
+            if node.path_len == 0 {
+                let source = persist_path_source(persist_source, "direct");
+                let _ = db.save_path(message_id, Some(pubkey_hex), &source, &[], 1);
+                return Ok(AdvertPathFetch {
+                    path: Vec::new(),
+                    hash_size: 1,
+                    source,
+                    hop_count: 0,
+                });
             }
         }
     }
+    Err(
+        "No path yet — companion has no cached advert route for this node (and no contact out_path). Hear its advert on-air first, or Trace a radio contact that already has a route."
+            .into(),
+    )
+}
+
+/// Fetch advert path via `CMD_GET_ADVERT_PATH` (0x2A).
+///
+/// Success reply is `RESP_CODE_ADVERT_PATH` (22) — meshcore-rs surfaces that as
+/// `EventType::Unknown` + raw bytes. Cache miss is `PACKET_ERROR`. `PathUpdate`
+/// is a separate push when a contact route changes; we still accept a matching
+/// one if it races in.
+async fn fetch_advert_path(
+    db: &Db,
+    meshcore: &MeshCore,
+    pubkey_hex: &str,
+    message_id: Option<i64>,
+    persist_source: &str,
+) -> Result<AdvertPathFetch, String> {
+    let bytes = hex::decode(pubkey_hex).map_err(|_| "Invalid pubkey.".to_string())?;
+    if bytes.len() != 32 {
+        return Err("Pubkey must be 32 bytes.".into());
+    }
+    let mut pubkey_prefix = [0u8; 6];
+    pubkey_prefix.copy_from_slice(&bytes[..6]);
+
+    let mut frame = Vec::with_capacity(34);
+    frame.push(0x2A);
+    frame.push(0x00);
+    frame.extend_from_slice(&bytes);
+
+    let operator = persist_source == "operator";
+    let send_wait = if operator {
+        Duration::from_secs(3)
+    } else {
+        Duration::from_secs(2)
+    };
+    // Only wait for a late Unknown/PathUpdate when the companion did not already
+    // answer with Error (cache miss) or a parseable path frame.
+    let late_wait = if operator {
+        Duration::from_secs(4)
+    } else {
+        Duration::from_secs(1)
+    };
+
+    let mut early_rx = meshcore.dispatcher().receiver();
+    let expected = [
+        EventType::Unknown,
+        EventType::Error,
+        EventType::PathUpdate,
+    ];
+
+    let send_outcome = {
+        let Some(commands) = lock_commands_brief(meshcore).await else {
+            return path_fetch_fallbacks(db, pubkey_hex, message_id, persist_source);
+        };
+        tokio::select! {
+            result = commands.send_multi(&frame, &expected, send_wait) => {
+                result.map_err(|err| err.to_string())
+            }
+            event = async {
+                loop {
+                    match early_rx.recv().await {
+                        Ok(event) if expected.contains(&event.event_type) => return Ok(event),
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(_) => return Err("Companion event stream closed.".to_string()),
+                    }
+                }
+            } => event,
+        }
+    };
+
+    if let Ok(ref event) = send_outcome {
+        if event.event_type == EventType::Error {
+            // ERR_NOT_FOUND (no advert-path cache entry) — skip late wait.
+            hq_log!(
+                debug,
+                "path fetch: companion has no advert-path cache entry for {pubkey_hex}"
+            );
+            return path_fetch_fallbacks(db, pubkey_hex, message_id, persist_source);
+        }
+        if let Some((path, hash_size, kind)) = path_fetch_from_event(event, &pubkey_prefix) {
+            let source = persist_path_source(persist_source, kind);
+            let _ = db.save_path(
+                message_id,
+                Some(pubkey_hex),
+                &source,
+                &path,
+                hash_size as i64,
+            );
+            if kind == "path_update" || kind == "direct" {
+                let _ = db.set_route(pubkey_hex, &path);
+            }
+            return Ok(advert_fetch_from_path(path, hash_size, source));
+        }
+        // Unrelated Unknown/PathUpdate won the race — keep listening briefly.
+    }
+
+    let deadline = Instant::now() + late_wait;
+    while Instant::now() < deadline {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(left, early_rx.recv()).await {
+            Ok(Ok(event)) => {
+                if event.event_type == EventType::Error {
+                    hq_log!(
+                        debug,
+                        "path fetch (late): no advert-path cache for {pubkey_hex}"
+                    );
+                    break;
+                }
+                if let Some((path, hash_size, kind)) =
+                    path_fetch_from_event(&event, &pubkey_prefix)
+                {
+                    let source = persist_path_source(persist_source, kind);
+                    let _ = db.save_path(
+                        message_id,
+                        Some(pubkey_hex),
+                        &source,
+                        &path,
+                        hash_size as i64,
+                    );
+                    if kind == "path_update" || kind == "direct" {
+                        let _ = db.set_route(pubkey_hex, &path);
+                    }
+                    return Ok(advert_fetch_from_path(path, hash_size, source));
+                }
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+            Ok(Err(_)) => break,
+            Err(_) => break,
+        }
+    }
+
+    path_fetch_fallbacks(db, pubkey_hex, message_id, persist_source)
+}
+
+async fn run_operator_path_fetch(
+    db: &Db,
+    meshcore: &MeshCore,
+    pubkey_hex: &str,
+) -> Result<AdvertPathFetch, String> {
+    trace_rate_allows(pubkey_hex)?;
+    fetch_advert_path(db, meshcore, pubkey_hex, None, "operator").await
+}
+
+async fn remember_route(db: &Db, meshcore: &MeshCore, pubkey_hex: &str, message_id: i64) {
+    let _ = fetch_advert_path(db, meshcore, pubkey_hex, Some(message_id), "advert").await;
 }
 
 /// `CMD_SEND_TXT_MSG` (2) to a contact, listening for `MsgSent` before the write.

@@ -4,6 +4,7 @@ mod icons;
 mod infra_page;
 mod map_host;
 mod map_page;
+mod overview_repeaters;
 mod tracker_page;
 mod weather_page;
 mod welcome;
@@ -112,7 +113,7 @@ const NAV_SEARCH_INDEX: &[NavSearchEntry] = &[
             "traffic",
             "battery",
             "signup queue",
-            "infrastructure strip",
+            "repeaters",
         ],
     },
     NavSearchEntry {
@@ -1262,6 +1263,7 @@ fn HeaderRadioControls(radio: RadioStatus) -> Element {
 
 #[component]
 fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element {
+    let mut overview_tab = use_signal(|| "hq".to_string());
     let hq_name = state()
         .db
         .setting("hq_name")
@@ -1577,60 +1579,41 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
                 "Live status for the headquarters radio, roster, and recent mesh traffic."
             }
             {
-                let claimed_rows = state().db.list_claimed_infra().unwrap_or_default();
-                let total_claimed = state().db.count_claimed_infra().unwrap_or(0);
-                let verified_rows: Vec<_> = claimed_rows
-                    .into_iter()
-                    .filter(|r| r.is_verified())
-                    .collect();
-                let claimed_count = verified_rows.len();
-                if claimed_count > 0 {
-                    let claimed_keys: std::collections::HashSet<_> =
-                        verified_rows.iter().map(|r| r.pubkey.clone()).collect();
-                    let nodes = state().db.list_nodes().unwrap_or_default();
-                    let recent_secs = 30 * 60;
-                    let now = unix_now();
-                    let online = nodes
-                        .iter()
-                        .filter(|n| claimed_keys.contains(&n.pubkey))
-                        .filter(|n| {
-                            n.last_heard
-                                .map(|t| now - t <= recent_secs)
-                                .unwrap_or(false)
-                        })
-                        .count();
-                    let stale = claimed_count.saturating_sub(online);
-                    let infra_hint = if stale == 0 {
-                        format!("{online} heard recently")
-                    } else {
-                        format!("{online} recent · {stale} stale")
-                    };
-                    let count_label = if total_claimed as usize > claimed_count {
-                        format!("{claimed_count} verified · {infra_hint}")
-                    } else {
-                        format!("{claimed_count} claimed · {infra_hint}")
-                    };
-                    rsx! {
-                        section { class: "flex flex-wrap items-stretch gap-2",
+                let show_repeaters_tab =
+                    state().db.count_claimed_infra().unwrap_or(0) > 0;
+                let on_repeaters =
+                    show_repeaters_tab && overview_tab() == "repeaters";
+                rsx! {
+                    if show_repeaters_tab {
+                        div { class: "settings-subtabs",
                             button {
-                                class: "inline-flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-signal/30 bg-card px-3 py-2 text-left hover:bg-muted/40 cursor-pointer",
-                                onclick: move |_| on_navigate.call(Page::Infrastructure),
-                                span { class: "flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-accent text-signal",
-                                    Icon { name: IconName::Signal, size: 14 }
-                                }
-                                span { class: "min-w-0",
-                                    span { class: "block text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground", "Infrastructure" }
-                                    span { class: "block truncate text-sm text-foreground",
-                                        "{count_label}"
-                                    }
-                                }
+                                class: if !on_repeaters {
+                                    "settings-subtab settings-subtab-active"
+                                } else {
+                                    "settings-subtab"
+                                },
+                                onclick: move |_| overview_tab.set("hq".into()),
+                                "HQ"
+                            }
+                            button {
+                                class: if on_repeaters {
+                                    "settings-subtab settings-subtab-active"
+                                } else {
+                                    "settings-subtab"
+                                },
+                                onclick: move |_| overview_tab.set("repeaters".into()),
+                                "Repeaters"
                             }
                         }
                     }
-                } else {
-                    rsx! {}
+                    if on_repeaters {
+                        overview_repeaters::OverviewRepeatersTab { on_navigate }
+                    }
                 }
             }
+            if !(state().db.count_claimed_infra().unwrap_or(0) > 0
+                && overview_tab() == "repeaters")
+            {
             div { class: "overview-chip-stack",
                 section { class: "overview-chip-row", aria_label: "System status",
                     button {
@@ -2180,6 +2163,7 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
                     }
                 }
             }
+            } // end overview HQ tab
         }
     }
 }
@@ -6442,6 +6426,23 @@ fn SettingsPage(
     let mut regions_tick = use_signal(|| 0u32);
     let mut confirm_purge = use_signal(|| false);
     let mut purge_note = use_signal(String::new);
+    let mut confirm_infra_purge = use_signal(|| false);
+    let mut infra_purge_note = use_signal(String::new);
+    let mut infra_probe_interval = use_signal(|| {
+        state().db.infra_probe_interval_mins().to_string()
+    });
+    let mut infra_probe_max = use_signal(|| {
+        state().db.infra_probe_max_targets().to_string()
+    });
+    let mut infra_status_cap = use_signal(|| {
+        state().db.infra_status_sample_cap().to_string()
+    });
+    let mut infra_status_keep = use_signal(|| {
+        state()
+            .db
+            .infra_status_keep()
+            .unwrap_or_else(|_| "forever".into())
+    });
     let mut map_upload_enabled = use_signal(|| {
         crate::services::setting_bool(&state().db, "svc_map_upload_enabled", false)
     });
@@ -6465,7 +6466,7 @@ fn SettingsPage(
             .setting("svc_map_upload_api_url")
             .ok()
             .flatten()
-            .unwrap_or_else(|| "https://map.meshcore.dev/api/v1/uploader/node".into())
+            .unwrap_or_else(|| "https://map.meshcore.io/api/v1/uploader/node".into())
     });
     let mut map_upload_note = use_signal(String::new);
     let mut map_upload_tick = use_signal(|| 0u32);
@@ -6948,6 +6949,14 @@ fn SettingsPage(
             .ok()
             .map(|preview| (cutoff, preview))
     });
+    let infra_preview =
+        crate::db::Db::infra_status_keep_cutoff(&infra_status_keep()).and_then(|cutoff| {
+            state()
+                .db
+                .purge_preview(cutoff)
+                .ok()
+                .map(|preview| (cutoff, preview.infra_status))
+        });
 
     rsx! {
         div { class: "mx-auto flex max-w-4xl flex-col gap-4",
@@ -8319,6 +8328,127 @@ fn SettingsPage(
                     p { class: "mt-2 text-sm text-muted-foreground", "{purge_note}" }
                 }
             }
+            Card { title: "Claimed infrastructure".to_string(), icon: Some(IconName::Signal),
+                p { class: "mb-3 text-sm text-muted-foreground",
+                    "LoRa status probes for verified claimed repeaters / rooms / sensors (Overview → Repeaters). Probes use airtime — keep intervals modest. Admin passwords are never stored."
+                }
+                p { class: "mb-2 text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground",
+                    "Auto-probe while companion Ready"
+                }
+                div { class: "mb-3 flex flex-wrap gap-2",
+                    RetentionChoice { label: "Off (connect only)", value: "0", current: infra_probe_interval(), onpick: move |value: String| {
+                        let mins: i64 = value.parse().unwrap_or(0);
+                        let _ = state().db.set_infra_probe_interval_mins(mins);
+                        infra_probe_interval.set(state().db.infra_probe_interval_mins().to_string());
+                    } }
+                    RetentionChoice { label: "15 min", value: "15", current: infra_probe_interval(), onpick: move |value: String| {
+                        let mins: i64 = value.parse().unwrap_or(15);
+                        let _ = state().db.set_infra_probe_interval_mins(mins);
+                        infra_probe_interval.set(state().db.infra_probe_interval_mins().to_string());
+                    } }
+                    RetentionChoice { label: "30 min", value: "30", current: infra_probe_interval(), onpick: move |value: String| {
+                        let mins: i64 = value.parse().unwrap_or(30);
+                        let _ = state().db.set_infra_probe_interval_mins(mins);
+                        infra_probe_interval.set(state().db.infra_probe_interval_mins().to_string());
+                    } }
+                    RetentionChoice { label: "60 min", value: "60", current: infra_probe_interval(), onpick: move |value: String| {
+                        let mins: i64 = value.parse().unwrap_or(60);
+                        let _ = state().db.set_infra_probe_interval_mins(mins);
+                        infra_probe_interval.set(state().db.infra_probe_interval_mins().to_string());
+                    } }
+                }
+                div { class: "mb-3 grid gap-3 sm:grid-cols-2",
+                    div {
+                        label {
+                            class: "mb-1 block text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground",
+                            r#for: "infra-probe-max",
+                            "Max nodes per sweep"
+                        }
+                        SelectInput {
+                            id: "infra-probe-max".to_string(),
+                            value: infra_probe_max(),
+                            onchange: move |evt: FormEvent| {
+                                let n: i64 = evt.value().parse().unwrap_or(5);
+                                let _ = state().db.set_infra_probe_max_targets(n);
+                                infra_probe_max.set(state().db.infra_probe_max_targets().to_string());
+                            },
+                            for n in 1..=10i64 {
+                                option { value: "{n}", "{n}" }
+                            }
+                        }
+                    }
+                    div {
+                        label {
+                            class: "mb-1 block text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground",
+                            r#for: "infra-status-cap",
+                            "Samples kept per node"
+                        }
+                        SelectInput {
+                            id: "infra-status-cap".to_string(),
+                            value: infra_status_cap(),
+                            onchange: move |evt: FormEvent| {
+                                let n: i64 = evt.value().parse().unwrap_or(500);
+                                let _ = state().db.set_infra_status_sample_cap(n);
+                                infra_status_cap.set(state().db.infra_status_sample_cap().to_string());
+                                let _ = state().db.apply_infra_status_keep();
+                            },
+                            option { value: "100", "100" }
+                            option { value: "250", "250" }
+                            option { value: "500", "500" }
+                            option { value: "1000", "1000" }
+                            option { value: "2000", "2000" }
+                        }
+                    }
+                }
+                p { class: "mb-2 text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground",
+                    "Status sample retention"
+                }
+                div { class: "mb-3 flex flex-wrap gap-2",
+                    RetentionChoice { label: "7 days", value: "7d", current: infra_status_keep(), onpick: move |value: String| {
+                        let _ = state().db.set_infra_status_keep(&value);
+                        infra_status_keep.set(value);
+                        let _ = state().db.apply_infra_status_keep();
+                    } }
+                    RetentionChoice { label: "30 days", value: "30d", current: infra_status_keep(), onpick: move |value: String| {
+                        let _ = state().db.set_infra_status_keep(&value);
+                        infra_status_keep.set(value);
+                        let _ = state().db.apply_infra_status_keep();
+                    } }
+                    RetentionChoice { label: "90 days", value: "90d", current: infra_status_keep(), onpick: move |value: String| {
+                        let _ = state().db.set_infra_status_keep(&value);
+                        infra_status_keep.set(value);
+                        let _ = state().db.apply_infra_status_keep();
+                    } }
+                    RetentionChoice { label: "Forever", value: "forever", current: infra_status_keep(), onpick: move |value: String| {
+                        let _ = state().db.set_infra_status_keep(&value);
+                        infra_status_keep.set(value);
+                    } }
+                }
+                div { class: "flex flex-wrap gap-2",
+                    Button {
+                        kind: ButtonKind::Danger,
+                        disabled: infra_status_keep() == "forever",
+                        onclick: move |_| confirm_infra_purge.set(true),
+                        Icon { name: IconName::Trash, size: 14 }
+                        "Purge older status samples"
+                    }
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        onclick: move |_| {
+                            match state().db.apply_infra_status_keep() {
+                                Ok(n) => infra_purge_note.set(format!(
+                                    "Trimmed {n} sample row(s) to current keep/cap."
+                                )),
+                                Err(err) => infra_purge_note.set(err.to_string()),
+                            }
+                        },
+                        "Apply keep / cap now"
+                    }
+                }
+                if !infra_purge_note().is_empty() {
+                    p { class: "mt-2 text-sm text-muted-foreground", "{infra_purge_note}" }
+                }
+            }
             } // end HqTab::Preferences (secret + history)
 
             if hq_tab() == HqTab::Data {
@@ -8332,7 +8462,7 @@ fn SettingsPage(
                 rsx! {
                     Card { title: "Community map upload", icon: Some(IconName::Map),
                         p { class: "mb-3 text-sm text-muted-foreground",
-                            "Optional. When enabled and authorized, HQ posts overheard repeater / room / sensor ADVERTs that include GPS to map.meshcore.dev. Companions, Tracker trails, and HQ site pins stay local. Needs internet. Signing uses the primary companion — the private key is never stored in HQ."
+                            "Optional. When enabled and authorized, HQ posts overheard repeater / room / sensor ADVERTs that include GPS to map.meshcore.io. Companions, Tracker trails, and HQ site pins stay local. Needs internet. Signing uses the primary companion — the private key is never stored in HQ."
                         }
                         ToggleSwitch {
                             checked: map_upload_enabled(),
@@ -8440,16 +8570,23 @@ fn SettingsPage(
                                 label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "API URL" }
                                 TextInput {
                                     value: map_upload_api(),
-                                    placeholder: "https://map.meshcore.dev/api/v1/uploader/node".to_string(),
+                                    placeholder: "https://map.meshcore.io/api/v1/uploader/node".to_string(),
                                     oninput: move |event: FormEvent| {
                                         let value = event.value();
                                         map_upload_api.set(value.clone());
                                         let trimmed = value.trim();
                                         if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+                                            let fixed =
+                                                crate::services::map_upload::normalize_map_api_url(
+                                                    trimmed,
+                                                );
                                             let _ = state().db.set_setting(
                                                 "svc_map_upload_api_url",
-                                                trimmed,
+                                                &fixed,
                                             );
+                                            if fixed != trimmed {
+                                                map_upload_api.set(fixed);
+                                            }
                                         }
                                     },
                                 }
@@ -11374,7 +11511,7 @@ fn SettingsPage(
                 on_close: move |_| confirm_purge.set(false),
                 if let Some((cutoff, preview)) = preview {
                     p { class: "mb-3 text-sm text-muted-foreground",
-                        "This deletes {preview.messages} messages, {preview.paths} routes, {preview.positions} location trails, and {preview.telemetry} telemetry samples older than the retention window. Roster, secrets, and the audit log stay."
+                        "This deletes {preview.messages} messages, {preview.paths} routes, {preview.positions} location trails, {preview.telemetry} telemetry samples, and {preview.infra_status} repeater status samples older than the retention window. Roster, secrets, and the audit log stay."
                     }
                     div { class: "flex gap-2",
                         Button {
@@ -11401,6 +11538,43 @@ fn SettingsPage(
                     }
                 } else {
                     p { class: "text-sm text-muted-foreground", "Set a retention window before purging." }
+                }
+            }
+
+            Dialog {
+                open: confirm_infra_purge(),
+                title: "Purge repeater status".to_string(),
+                on_close: move |_| confirm_infra_purge.set(false),
+                if let Some((cutoff, count)) = infra_preview {
+                    p { class: "mb-3 text-sm text-muted-foreground",
+                        "This deletes {count} repeater status sample(s) older than the infrastructure retention window. Latest snapshot cards, roster, and claims stay."
+                    }
+                    div { class: "flex gap-2",
+                        Button {
+                            kind: ButtonKind::Danger,
+                            onclick: move |_| {
+                                match state().db.purge_infra_status(cutoff) {
+                                    Ok(n) => infra_purge_note.set(format!(
+                                        "Deleted {n} repeater status sample(s)."
+                                    )),
+                                    Err(err) => infra_purge_note.set(err.to_string()),
+                                }
+                                confirm_infra_purge.set(false);
+                            },
+                            Icon { name: IconName::Trash, size: 14 }
+                            "Delete"
+                        }
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| confirm_infra_purge.set(false),
+                            Icon { name: IconName::Close, size: 14 }
+                            "Cancel"
+                        }
+                    }
+                } else {
+                    p { class: "text-sm text-muted-foreground",
+                        "Set infrastructure retention to 7 / 30 / 90 days before purging."
+                    }
                 }
             }
 

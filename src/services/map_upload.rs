@@ -1,8 +1,10 @@
-//! Optional map.meshcore.dev uploader (E4).
+//! Optional map.meshcore.io uploader (E4).
 //!
 //! When enabled + authorized, rebuilds overheard infra ADVERTs (types 2/3/4 with
 //! GPS) from companion LogData and POSTs them signed by the primary companion.
 //! Private keys are never written to SQLite, the keyring, or backups.
+//!
+//! API host moved from map.meshcore.dev → map.meshcore.io (dev still 307s).
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -18,7 +20,9 @@ use crate::db::Db;
 use crate::radio::RadioHandle;
 use crate::services::{setting_bool, setting_i64, set_setting_bool, HTTP_USER_AGENT};
 
-const DEFAULT_API_URL: &str = "https://map.meshcore.dev/api/v1/uploader/node";
+const DEFAULT_API_URL: &str = "https://map.meshcore.io/api/v1/uploader/node";
+/// Legacy host; nginx 307s to `.io`. Rewrite stored settings + follow POST redirects.
+const LEGACY_API_HOST: &str = "map.meshcore.dev";
 const DEFAULT_INTERVAL_SECS: i64 = 3600;
 const MAX_SEEN: usize = 5_000;
 const QUEUE_CAP: usize = 64;
@@ -113,12 +117,26 @@ pub fn revoke_map_upload_auth(db: &Db) {
 }
 
 pub fn api_url(db: &Db) -> String {
-    db.setting("svc_map_upload_api_url")
+    let raw = db
+        .setting("svc_map_upload_api_url")
         .ok()
         .flatten()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_API_URL.into())
+        .unwrap_or_else(|| DEFAULT_API_URL.into());
+    normalize_map_api_url(&raw)
+}
+
+/// Point legacy `.dev` endpoints at `.io` (ureq does not follow 307 on POST bodies).
+pub fn normalize_map_api_url(url: &str) -> String {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return DEFAULT_API_URL.into();
+    }
+    if trimmed.contains(LEGACY_API_HOST) {
+        return trimmed.replace(LEGACY_API_HOST, "map.meshcore.io");
+    }
+    trimmed.to_string()
 }
 
 pub fn reupload_interval_secs(db: &Db) -> i64 {
@@ -376,20 +394,49 @@ async fn process_job(db: &Db, radio: &RadioHandle, job: UploadJob) {
 
 fn post_upload(url: &str, body: &serde_json::Value) -> Result<u16, String> {
     let payload = serde_json::to_string(body).map_err(|e| e.to_string())?;
-    let resp = ureq::post(url)
-        .set("User-Agent", HTTP_USER_AGENT)
-        .set("Content-Type", "application/json")
-        .set("Accept", "application/json")
-        .timeout(Duration::from_secs(15))
-        .send_string(&payload)
-        .map_err(|e| e.to_string())?;
-    let status = resp.status();
-    if !(200..300).contains(&status) {
-        let text = resp.into_string().unwrap_or_default();
-        let brief: String = text.chars().take(120).collect();
-        return Err(format!("HTTP {status}: {brief}"));
+    // ureq does not auto-follow 307/308 when the request has a body — follow manually.
+    let mut next = normalize_map_api_url(url);
+    for _ in 0..5 {
+        let resp = ureq::post(&next)
+            .set("User-Agent", HTTP_USER_AGENT)
+            .set("Content-Type", "application/json")
+            .set("Accept", "application/json")
+            .timeout(Duration::from_secs(15))
+            .send_string(&payload)
+            .map_err(|e| e.to_string())?;
+        let status = resp.status();
+        if matches!(status, 301 | 302 | 303 | 307 | 308) {
+            let location = resp
+                .header("Location")
+                .or_else(|| resp.header("location"))
+                .map(|s| s.to_string())
+                .ok_or_else(|| format!("HTTP {status}: redirect without Location"))?;
+            next = resolve_redirect_url(&next, &location);
+            continue;
+        }
+        if !(200..300).contains(&status) {
+            let text = resp.into_string().unwrap_or_default();
+            let brief: String = text.chars().take(120).collect();
+            return Err(format!("HTTP {status}: {brief}"));
+        }
+        return Ok(status);
     }
-    Ok(status)
+    Err("too many redirects".into())
+}
+
+fn resolve_redirect_url(current: &str, location: &str) -> String {
+    let loc = location.trim();
+    if loc.starts_with("https://") || loc.starts_with("http://") {
+        return normalize_map_api_url(loc);
+    }
+    // Relative Location — rare for this API, but keep POST working.
+    if loc.starts_with('/') {
+        if let Some((scheme, rest)) = current.split_once("://") {
+            let host = rest.split('/').next().unwrap_or("");
+            return normalize_map_api_url(&format!("{scheme}://{host}{loc}"));
+        }
+    }
+    normalize_map_api_url(loc)
 }
 
 async fn sign_upload_hash(radio: &RadioHandle, hash: &[u8; 32]) -> Result<Vec<u8>, String> {
@@ -560,6 +607,25 @@ mod tests {
         assert!(!rate_limit_allows("aa", 1_500, 3600)); // too soon
         assert!(rate_limit_allows("aa", 1_000 + 3600, 3600));
         assert!(rate_limit_allows("bb", 50, 3600)); // other key
+    }
+
+    #[test]
+    fn legacy_dev_host_rewrites_to_io() {
+        assert_eq!(
+            normalize_map_api_url("https://map.meshcore.dev/api/v1/uploader/node"),
+            "https://map.meshcore.io/api/v1/uploader/node"
+        );
+        assert_eq!(
+            normalize_map_api_url("https://map.meshcore.io/api/v1/uploader/node"),
+            "https://map.meshcore.io/api/v1/uploader/node"
+        );
+        assert_eq!(
+            resolve_redirect_url(
+                "https://map.meshcore.dev/api/v1/uploader/node",
+                "https://map.meshcore.io/api/v1/uploader/node"
+            ),
+            "https://map.meshcore.io/api/v1/uploader/node"
+        );
     }
 
     #[test]

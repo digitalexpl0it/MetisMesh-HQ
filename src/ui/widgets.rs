@@ -534,6 +534,9 @@ fn spark_color(tone: &str) -> &'static str {
         "ok" => "#7dd3fc",
         "tx" => "#f87171",
         "rx" => "#c084fc",
+        "air" => "#2dd4bf",
+        "batt" => "#86efac",
+        "warn" => "#fb923c",
         _ => "#9aa3af",
     }
 }
@@ -710,7 +713,7 @@ pub fn BatteryChart(points: Vec<BatterySample>) -> Element {
         };
     }
     let values: Vec<f32> = points.iter().map(|p| p.mv).collect();
-    let color = spark_color("signal");
+    let color = spark_color("batt");
     let paths = spark_paths(&values, W, H, false);
     let n = points.len();
     let step = if n <= 1 { 0.0 } else { W / (n as f32 - 1.0) };
@@ -866,23 +869,27 @@ pub fn LineChart(
     /// One label per data point for hover tips (falls back to axis labels / index).
     #[props(default)]
     point_labels: Vec<String>,
+    /// When true (default), scale from 0 — message/traffic counts.
+    /// When false, auto-scale to min/max so negative RF values (noise/RSSI/SNR) plot correctly.
+    #[props(default = true)]
+    zero_based: bool,
 ) -> Element {
     const W: f32 = 640.0;
     let mut hover = use_signal(|| None::<usize>);
-    let has_data = series
+    let flat: Vec<f32> = series
         .iter()
-        .any(|row| row.values.iter().any(|value| *value > 0.0));
-    if !has_data {
+        .flat_map(|row| row.values.iter().copied())
+        .collect();
+    if flat.is_empty() {
         return rsx! {
             p { class: "py-8 text-center text-sm text-muted-foreground", "No data yet" }
         };
     }
-    let max = series
-        .iter()
-        .flat_map(|row| row.values.iter().copied())
-        .fold(0.0_f32, f32::max)
-        .max(1.0);
+    let (floor, span) = spark_scale(&flat, zero_based);
     let plot_bottom = height - 4.0;
+    let plot_top = 8.0;
+    let plot_h = (plot_bottom - plot_top).max(1.0);
+    let y_of = |value: f32| -> f32 { plot_bottom - ((value - floor) / span) * plot_h };
     let n = series
         .iter()
         .map(|row| row.values.len())
@@ -899,7 +906,7 @@ pub fn LineChart(
         let mut parts = Vec::new();
         for row in series.iter() {
             let v = row.values.get(idx).copied().unwrap_or(0.0);
-            parts.push(format!("{} {:.0}", row.label, v));
+            parts.push(format!("{} {v:.1}", row.label));
         }
         (when, parts.join(" · "))
     });
@@ -937,13 +944,19 @@ pub fn LineChart(
                         let color = spark_color(&row.tone);
                         let mut line = String::new();
                         for (index, value) in row.values.iter().enumerate() {
-                            let x = index as f32 * step;
-                            let y = plot_bottom - (value / max) * (plot_bottom - 8.0) - 4.0;
+                            let x = if n <= 1 { W / 2.0 } else { index as f32 * step };
+                            let y = y_of(*value);
                             if index == 0 {
                                 line.push_str(&format!("M{x:.2} {y:.2}"));
                             } else {
                                 line.push_str(&format!(" L{x:.2} {y:.2}"));
                             }
+                        }
+                        // Single-point series: draw a short horizontal segment so a dot is visible.
+                        if n == 1 {
+                            let x = W / 2.0;
+                            let y = y_of(row.values.first().copied().unwrap_or(0.0));
+                            line = format!("M{:.2} {y:.2} L{:.2} {y:.2}", x - 12.0, x + 12.0);
                         }
                         let fill = format!("{line} L{W:.2} {plot_bottom:.2} L0 {plot_bottom:.2} Z");
                         rsx! {
@@ -970,7 +983,7 @@ pub fn LineChart(
                 }
                 if let Some(idx) = hover() {
                     {
-                        let x = idx as f32 * step;
+                        let x = if n <= 1 { W / 2.0 } else { idx as f32 * step };
                         rsx! {
                             line {
                                 x1: "{x}", y1: "0", x2: "{x}", y2: "{height}",
@@ -981,7 +994,7 @@ pub fn LineChart(
                                 {
                                     let color = spark_color(&row.tone);
                                     let value = row.values.get(idx).copied().unwrap_or(0.0);
-                                    let y = plot_bottom - (value / max) * (plot_bottom - 8.0) - 4.0;
+                                    let y = y_of(value);
                                     rsx! {
                                         circle {
                                             key: "dot-{row.label}",
@@ -997,7 +1010,7 @@ pub fn LineChart(
                 }
                 for idx in 0..n {
                     {
-                        let x = if n <= 1 { 0.0 } else { idx as f32 * step };
+                        let x = if n <= 1 { W / 2.0 } else { idx as f32 * step };
                         let hit_w = if n <= 1 { W } else { (step * 0.9).max(6.0) };
                         let hit_x = (x - hit_w / 2.0).max(0.0);
                         rsx! {
@@ -1186,7 +1199,80 @@ pub fn conversation_avatar_tone(seed: &str) -> usize {
     (hash as usize) % AVATAR_PALETTE_LEN
 }
 
-/// Generated circle avatar: first letter of `label`, color from stable `seed` hash.
+/// True when a Unicode scalar looks like part of an emoji / pictograph.
+fn char_is_emoji_like(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00A9}'
+            | '\u{00AE}'
+            | '\u{203C}'
+            | '\u{2049}'
+            | '\u{2122}'
+            | '\u{2139}'
+            | '\u{2194}'..='\u{2199}'
+            | '\u{21A9}'..='\u{21AA}'
+            | '\u{231A}'..='\u{231B}'
+            | '\u{2328}'
+            | '\u{23CF}'
+            | '\u{23E9}'..='\u{23F3}'
+            | '\u{23F8}'..='\u{23FA}'
+            | '\u{24C2}'
+            | '\u{25AA}'..='\u{25AB}'
+            | '\u{25B6}'
+            | '\u{25C0}'
+            | '\u{25FB}'..='\u{25FE}'
+            | '\u{2600}'..='\u{27BF}'
+            | '\u{2934}'..='\u{2935}'
+            | '\u{2B05}'..='\u{2B07}'
+            | '\u{2B1B}'..='\u{2B1C}'
+            | '\u{2B50}'
+            | '\u{2B55}'
+            | '\u{3030}'
+            | '\u{303D}'
+            | '\u{3297}'
+            | '\u{3299}'
+            | '\u{1F000}'..='\u{1FAFF}'
+    ) || matches!(c, '\u{1F1E6}'..='\u{1F1FF}') // regional indicators (flags)
+}
+
+fn grapheme_is_emoji(g: &str) -> bool {
+    let mut has_pict = false;
+    for c in g.chars() {
+        if matches!(c, '\u{200D}' | '\u{FE0F}' | '\u{20E3}' | '\u{1F3FB}'..='\u{1F3FF}') {
+            continue;
+        }
+        if char_is_emoji_like(c) {
+            has_pict = true;
+        } else if c.is_ascii_alphanumeric() {
+            return false;
+        }
+    }
+    has_pict
+}
+
+/// Up to two emoji graphemes from a MeshCore-style display name (custom avatar).
+///
+/// MeshCore apps treat emoji in the node name as the avatar instead of a
+/// generated letter. We take the first two emoji grapheme clusters in order
+/// (ZWJ sequences count as one).
+pub fn name_avatar_emojis(name: &str) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut out = String::new();
+    let mut count = 0usize;
+    for g in name.graphemes(true) {
+        if grapheme_is_emoji(g) {
+            out.push_str(g);
+            count += 1;
+            if count >= 2 {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Generated circle avatar: emoji(s) from `label` when present (MeshCore custom
+/// avatar), otherwise first letter + color from stable `seed` hash.
 #[component]
 pub fn ConversationAvatar(
     label: String,
@@ -1195,6 +1281,8 @@ pub fn ConversationAvatar(
     #[props(default = false)]
     compact: bool,
 ) -> Element {
+    use unicode_segmentation::UnicodeSegmentation;
+    let emojis = name_avatar_emojis(&label);
     let letter = conversation_avatar_letter(&label);
     let tone = conversation_avatar_tone(&seed);
     let size = if compact {
@@ -1202,6 +1290,22 @@ pub fn ConversationAvatar(
     } else {
         "messages-avatar"
     };
+    if !emojis.is_empty() {
+        let dual = emojis.graphemes(true).count() >= 2;
+        let emoji_class = if dual {
+            format!("{size} messages-avatar-emoji messages-avatar-emoji-dual")
+        } else {
+            format!("{size} messages-avatar-emoji")
+        };
+        return rsx! {
+            span {
+                class: "{emoji_class}",
+                title: "{label}",
+                aria_hidden: "true",
+                "{emojis}"
+            }
+        };
+    }
     rsx! {
         span {
             class: "{size} messages-avatar-{tone}",
@@ -1321,5 +1425,32 @@ pub fn ToastHost(tick: u32) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod avatar_emoji_tests {
+    use super::name_avatar_emojis;
+
+    #[test]
+    fn leading_emoji_becomes_avatar() {
+        assert_eq!(name_avatar_emojis("🔥Rose01"), "🔥");
+        assert_eq!(name_avatar_emojis("🦊🐱 Fox Den"), "🦊🐱");
+    }
+
+    #[test]
+    fn caps_at_two_emojis() {
+        assert_eq!(name_avatar_emojis("😀😃😄 name"), "😀😃");
+    }
+
+    #[test]
+    fn mid_name_emoji_still_used() {
+        assert_eq!(name_avatar_emojis("HQ 🛰️ North"), "🛰️");
+    }
+
+    #[test]
+    fn plain_name_has_no_emoji_avatar() {
+        assert!(name_avatar_emojis("Rose01-rptr").is_empty());
+        assert!(name_avatar_emojis("").is_empty());
     }
 }

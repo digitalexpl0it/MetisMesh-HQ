@@ -35,7 +35,8 @@ Do **not** poll the whole mesh for GPS. Rely on adverts / contact sync. Any late
   - **OK:** contacts + `raw_json` snapshot; lat/lon (ignore 0,0) + `positions` on real move; message hop/SNR/`raw_json`; DM signature; DM path via `CMD_GET_ADVERT_PATH` (0x2A) → out_path → path_update; RF samples (noise/RSSI/SNR); HQ battery `telemetry_samples`
   - **Fixed:** channel RX now binds `sender_pubkey` when the channel name matches exactly one roster node, touches `last_heard`, and runs the same path resolve as DMs (no guessing on name collisions)
   - **Skip:** potato Meshtastic env telemetry warehouse (temp/PM/wind/etc.) — not on MeshCore companion frames
-  - **Later niceties (optional):** message-list flash, activity sparkline, neighbor overlay, operator traceroute UI; auto status-probe for tracked nodes only (rate-limited)
+  - **Later niceties (optional):** message-list flash, activity sparkline, neighbor overlay; auto status-probe for tracked nodes only (rate-limited)
+  - **Done:** operator path Trace on Map (tracked/claimed, local 0x2A) + passive Traffic edge overlay
 
 
 ## Phase D — Info services
@@ -120,6 +121,19 @@ Heard nodes stay on Roster/Map. **Claimed** nodes are HQ-owned mesh infrastructu
 - [x] **K3** Overview chips: system row (Alerts / Radio / Backup / Firmware) + messages row (Unread / Mentions / Channels / Direct); tone colors; sonar on Unread/Mentions/Direct when live; whole-card nav
 - [x] **K4** OverviewStat cards tinted + clickable (Roster / Inbox / Map / Messages)
 
+## Phase L — Repeater fleet Overview polish
+
+Fleet dashboard landed (Claimed|Claim infra, status samples, Overview Repeaters: fleet tiles, card grid, Details-for dropdown + charts). Steal UX patterns from MeshMonitor / meshcore-stats dashboards — **not** their Docker multi-protocol stack. Refs: [meshmonitor.org](https://meshmonitor.org/) (telemetry widgets; ignore site “Analytics” = web visitor tracking).
+
+- [x] **L0** Fleet Overview: summary tiles, compact multi-claim cards, claimed-node dropdown → detail KPIs/charts; `tx_queue_len` persisted
+- [ ] **L1** Time-range presets on Repeater detail charts (15m / 1h / 6h / 24h / 7d) — today hard-coded ~24h
+- [ ] **L2** Optional display modes per KPI (MeshMonitor-style): chart / gauge / numeric — start with battery + queue gauges
+- [x] **L3** Probe honesty UX: Overview notes sparse LoRa probes; shows auto-probe policy, last probe time, sample count
+- [ ] **L4** (optional later) Star/favorite metrics; outlier cleanup on bad sensor spikes
+- [x] **L5** Settings → Preferences → Claimed infrastructure: auto-probe interval (off/15/30/60), max nodes/sweep, sample cap, status retention + purge
+
+Do **not**: embed MeshMonitor, store repeater admin passwords for polling, or expect continuous high-rate RF scrapes over LoRa.
+
 ## Non-goals (for now)
 
 - Potato federation / multi-ingestor dashboard
@@ -127,6 +141,8 @@ Heard nodes stay on Roster/Map. **Claimed** nodes are HQ-owned mesh infrastructu
 - Continuous cellular-style tracking
 - Auto-adding every public advert onto the radio contact table
 - Stamping Open-Meteo/USGS URLs on mesh text (devices are plain text)
+- Adopting MeshMonitor / Prometheus-Grafana as required HQ runtime
+- Third-party website analytics inside the desktop app
 
 ## Suggested order
 
@@ -144,6 +160,7 @@ Heard nodes stay on Roster/Map. **Claimed** nodes are HQ-owned mesh infrastructu
 11. I1 → I5 (claimed infrastructure + verify-on-claim + gated Overview)  
 12. J1 → J6 (nav order, fuzzy jump, zebra, heard-week icon, shell layout, Help page)  
 13. K1 → K4 (appearance, name-block, Overview KPI strip)
+14. L1 → L2 (Repeater Overview time range, gauge mode); L4 optional — L3/L5 done
 
 ## Success checks
 

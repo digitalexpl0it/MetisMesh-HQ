@@ -66,17 +66,15 @@ flowchart LR
 - Extend channel/DM unread aggregation (or parallel counters) with `unread_mentions` = rx rows newer than last-read with `mentions_hq = 1`.
 - Rail + Messages nav badge: keep numeric unread; if any unread mention, use a distinct CSS class (e.g. `.channel-unread-badge-mention`) so the pill reads differently from plain unread.
 
-**Overview:** new [`OverviewStat`](src/ui/mod.rs) “Mentions” = count of unread HQ mentions (or 24h if zero unread — use **unread mentions** as the KPI; hint “Waiting in channels”). Click navigates to Messages.
+**Overview (updated):** Mentions lives on the Overview **messages chip row** (with Unread / Channels / Direct), not as a fifth `OverviewStat`. See [overview_kpi_strip_a785827d.plan.md](overview_kpi_strip_a785827d.plan.md).
 
 ## 3. Block contact feedback
 
 Already wired: [`BlockContactDialog`](src/ui/mod.rs) with Cancel + Danger Confirm for channel + DM.
 
-Keep that Cancel/Confirm pattern. Adjust verbiage only if needed for clarity; channel vs DM can share one dialog body (dropping both channel and DM traffic is accurate).
+**Shipped:** Channel Block matches MeshCore mobile — when no roster pubkey is available, block by **display name** (`name:<alnum>` in `blocked_nodes`). Channel RX drops matching names; hearing the node later promotes the real pubkey (so DMs drop too). Fail dialog only when the frame has **no** sender name.
 
-When resolve fails (“no unique roster match”):
-- Do **not** open Block confirm.
-- Show a short **Dialog** (Cancel-only / OK) explaining the name is missing or ambiguous on Roster — not companion-link related — instead of a fleeting status note alone.
+Keep Cancel/Confirm. Channel vs DM share one dialog body (name-only copy notes channel-first filtering).
 
 ## 4. Roster clear controls (option 3)
 

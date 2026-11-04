@@ -12,7 +12,7 @@ todos:
     content: AppearanceEditor dialog (global + channel reset)
     status: completed
   - id: appear-wire
-    content: Messages root gear, channel header gear, rail gear; apply vars on scroller
+    content: Settings global gear; channel Look + rail gear; Keep nowrap; apply vars on scroller
     status: completed
   - id: appear-verify
     content: Unit tests + cargo check/test clean
@@ -86,11 +86,16 @@ Shared `AppearanceEditor` panel (Dialog or SlideDown):
 - Live mini preview strip
 - Save / Cancel; channel editor also **Reset to global**
 
-**Entry points:**
+**Entry points (shipped):**
 
-1. **Messages root** (Channels tab header): gear → edits **global** appearance.
-2. **Open channel header** (beside Keep): gear → edits **this channel** override.
-3. **Rail:** hover action gear on channel row → same channel editor (no right-click-only path; desktop context menus are flaky).
+1. **Settings → Messages appearance:** Edit appearance → **global** pane theme.
+2. **Open channel header** (beside Keep): **Look** → **this channel** override.
+3. **Rail:** hover gear on channel row → same channel editor.
+
+**Follow-ups done with this feature:**
+
+- Keep + select stay on one line via `.channel-keep-select` in `form.css` (frozen Tailwind lacked `flex-nowrap` / arbitrary widths).
+- Global Appearance strip removed from Messages root (Default keep card points operators to Settings).
 
 ## 4. Files
 

@@ -113,6 +113,13 @@ Heard nodes stay on Roster/Map. **Claimed** nodes are HQ-owned mesh infrastructu
 - [x] **J5** Shell: opaque top banner + `min-h-0` / `overflow-hidden` so page content does not paint under the bar
 - [x] **J6** In-app Help page (nav above Settings): operator desk guide + shareable radio-user signup / channel steps; About → Open Help
 
+## Phase K — Messages / Overview UX (2026-11)
+
+- [x] **K1** Messages appearance: global + per-channel solid/gradient/opacity/text; Settings → Messages appearance; channel **Look** + rail gear; Keep control nowrap
+- [x] **K2** Channel Block by display name when no pubkey (MeshCore mobile parity); promote to pubkey when roster hears them
+- [x] **K3** Overview chips: system row (Alerts / Radio / Backup / Firmware) + messages row (Unread / Mentions / Channels / Direct); tone colors; sonar on Unread/Mentions/Direct when live; whole-card nav
+- [x] **K4** OverviewStat cards tinted + clickable (Roster / Inbox / Map / Messages)
+
 ## Non-goals (for now)
 
 - Potato federation / multi-ingestor dashboard
@@ -135,7 +142,8 @@ Heard nodes stay on Roster/Map. **Claimed** nodes are HQ-owned mesh infrastructu
 9. G1 → G4 (offline firmware locker + selective Manage overlay + USB flasher)  
 10. H1 → H3 (standalone Linux/Windows/macOS + WAL-safe SQLite)  
 11. I1 → I5 (claimed infrastructure + verify-on-claim + gated Overview)  
-12. J1 → J6 (nav order, fuzzy jump, zebra, heard-week icon, shell layout, Help page)
+12. J1 → J6 (nav order, fuzzy jump, zebra, heard-week icon, shell layout, Help page)  
+13. K1 → K4 (appearance, name-block, Overview KPI strip)
 
 ## Success checks
 
@@ -154,4 +162,6 @@ Heard nodes stay on Roster/Map. **Claimed** nodes are HQ-owned mesh infrastructu
 - [x] Claim repeater → Infrastructure page + Overview strip; probe/CLI via linked companion; empty claim list hides Overview infra chrome
 - [x] Claim requires admin login proof; guest/wrong password never inserts; Unclaim then reclaim asks for password again
 - [x] Expanded nav search finds Settings for “device” / tab keywords; Roster zebra rows visible; pages clear the top banner
+- [x] Overview: even 4+4 chips; Unread/Mentions/Direct pulse only when live; stats + chips navigate without extra link chrome
+- [x] Channel Block works from a named frame with no roster pubkey; Settings holds global Messages appearance
 

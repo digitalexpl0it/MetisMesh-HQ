@@ -188,8 +188,10 @@ pub struct ChannelRow {
     pub role: String,
     pub active: bool,
     pub message_count: i64,
-    /// Received (`rx`) messages newer than `channel_last_read_{slot}`; 0 if never opened.
-    /// Outbound HQ/bot posts do not count.
+    /// Unread channel traffic newer than `channel_last_read_{slot}`: inbound `rx`,
+    /// plus HQ `tx` with `origin = 'bot'` (services / bot replies). Operator Compose
+    /// TX (`origin = 'local'`) does not count. Cursors are seeded when channels are
+    /// created so never-opened channels can still badge.
     pub unread_count: i64,
     /// Unread RX messages that @mention the HQ companion.
     pub unread_mentions: i64,
@@ -826,8 +828,27 @@ impl Db {
                 |row| row.get(0),
             )
             .optional()?;
-        if let Some(id) = latest {
-            self.set_channel_last_read(slot, id)?;
+        // Always write a cursor (0 when empty) so unread SQL can count future traffic.
+        self.set_channel_last_read(slot, latest.unwrap_or(0))?;
+        Ok(())
+    }
+
+    /// Ensure every active channel has a `channel_last_read_{slot}` cursor.
+    /// Missing keys are seeded at the current tip (or 0) so badges work without a prior open.
+    pub fn seed_missing_channel_last_reads(&self) -> Result<()> {
+        let slots: Vec<i64> = {
+            let conn = self.lock();
+            let mut stmt =
+                conn.prepare("SELECT slot FROM channels WHERE COALESCE(active, 1) = 1")?;
+            let rows = stmt
+                .query_map([], |row| row.get(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+        for slot in slots {
+            if self.channel_last_read(slot)?.is_none() {
+                self.mark_channel_caught_up(slot)?;
+            }
         }
         Ok(())
     }
@@ -1107,6 +1128,7 @@ impl Db {
                active = 1",
             params![net_name, net_slot, now],
         )?;
+        self.seed_missing_channel_last_reads()?;
         Ok(())
     }
 
@@ -1852,7 +1874,8 @@ impl Db {
                         SELECT COUNT(*) FROM messages m
                         WHERE m.kind = 'channel'
                           AND m.channel_idx = c.slot
-                          AND m.direction = 'rx'
+                          AND (m.direction = 'rx'
+                               OR (m.direction = 'tx' AND COALESCE(m.origin, 'local') = 'bot'))
                           AND m.id > COALESCE(
                             (SELECT CAST(s.value AS INTEGER) FROM settings s
                              WHERE s.key = 'channel_last_read_' || c.slot),
@@ -2014,6 +2037,10 @@ impl Db {
                active = 1",
             params![name, slot, visibility, role, now],
         )?;
+        // Seed last-read so future RX/bot activity can badge without a prior open.
+        if self.channel_last_read(slot)?.is_none() {
+            self.mark_channel_caught_up(slot)?;
+        }
         Ok(())
     }
 
@@ -3011,9 +3038,16 @@ impl Db {
         raw: &Value,
         delivery: &str,
         radio_id: Option<i64>,
+        // `local` = operator Compose / companion RX; `bot` = HQ bot/service TX (badges).
+        origin: &str,
     ) -> Result<Option<i64>> {
         let sender_key = sender_pubkey.unwrap_or(sender_prefix);
         let dedupe = dedupe_key(kind, sender_key, sender_timestamp, text);
+        let origin = if origin.trim().is_empty() {
+            "local"
+        } else {
+            origin.trim()
+        };
         let mentions_hq = if direction == "rx" {
             let hq = self.hq_advert_name().unwrap_or_default();
             if !hq.is_empty()
@@ -3032,7 +3066,7 @@ impl Db {
                 dedupe_key, kind, direction, sender_pubkey, sender_prefix, channel_idx,
                 hop_count, sender_timestamp, text, display_text, snr, signature, raw_json,
                 delivery, received_at, radio_id, origin, mentions_hq
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 'local', ?17)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 dedupe,
                 kind,
@@ -3050,6 +3084,7 @@ impl Db {
                 delivery,
                 unix_now(),
                 radio_id,
+                origin,
                 mentions_hq
             ],
         )?;
@@ -5321,13 +5356,13 @@ mod tests {
         let first = db
             .insert_message(
                 "direct", "rx", Some("aa"), "aa", None, Some(1), 10, "signup", "signup",
-                None, None, &raw, "received", None,
+                None, None, &raw, "received", None, "local",
             )
             .unwrap();
         let second = db
             .insert_message(
                 "direct", "rx", Some("aa"), "aa", None, Some(1), 10, "signup", "signup",
-                None, None, &raw, "received", None,
+                None, None, &raw, "received", None, "local",
             )
             .unwrap();
         assert!(first.is_some());
@@ -5343,7 +5378,7 @@ mod tests {
         db.approve("abcd", &secrets).unwrap();
         db.insert_message(
             "direct", "rx", Some("abcd"), "abcd", None, Some(0), 2, "signup", "signup",
-            None, None, &json!({}), "received", None,
+            None, None, &json!({}), "received", None, "local",
         )
         .unwrap();
         let preview = db.purge(unix_now() + 10).unwrap();
@@ -5523,39 +5558,67 @@ mod tests {
     }
 
     #[test]
-    fn channel_unread_ignores_outbound_tx() {
+    fn channel_unread_ignores_operator_tx_but_counts_bot() {
         let (db, _, dir) = test_db();
         db.ensure_channel_row("Public", 0, "public", "general").unwrap();
         let raw = json!({});
         let rx1 = db
             .insert_message(
                 "channel", "rx", Some("aa11"), "aa11", Some(0), Some(1), 10, "hello", "hello",
-                None, None, &raw, "received", None,
+                None, None, &raw, "received", None, "local",
             )
             .unwrap()
             .unwrap();
-        let _tx = db
+        let _op_tx = db
             .insert_message(
-                "channel", "tx", None, "HQ", Some(0), Some(0), 11, "bot reply", "bot reply",
-                None, None, &raw, "sent", None,
+                "channel", "tx", None, "HQ", Some(0), Some(0), 11, "typed", "typed",
+                None, None, &raw, "sent", None, "local",
+            )
+            .unwrap()
+            .unwrap();
+        let bot_tx = db
+            .insert_message(
+                "channel", "tx", None, "HQ", Some(0), Some(0), 12, "wx line", "wx line",
+                None, None, &raw, "sent", None, "bot",
             )
             .unwrap()
             .unwrap();
         let rx2 = db
             .insert_message(
-                "channel", "rx", Some("bb22"), "bb22", Some(0), Some(1), 12, "again", "again",
-                None, None, &raw, "received", None,
+                "channel", "rx", Some("bb22"), "bb22", Some(0), Some(1), 13, "again", "again",
+                None, None, &raw, "received", None, "local",
             )
             .unwrap()
             .unwrap();
         db.set_channel_last_read(0, rx1).unwrap();
         let channels = db.list_channels().unwrap();
         let public = channels.iter().find(|c| c.slot == 0).unwrap();
-        // Only rx2 is unread — the HQ TX between them must not inflate the badge.
-        assert_eq!(public.unread_count, 1, "tx must not count as unread");
+        // Operator TX ignored; bot TX + rx2 are unread.
+        assert_eq!(public.unread_count, 2, "bot tx + rx count; operator tx does not");
+        assert_eq!(db.total_channel_unread().unwrap(), 2);
+        db.set_channel_last_read(0, bot_tx).unwrap();
         assert_eq!(db.total_channel_unread().unwrap(), 1);
         db.set_channel_last_read(0, rx2).unwrap();
         assert_eq!(db.total_channel_unread().unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn channel_last_read_seeded_so_future_traffic_badges() {
+        let (db, _, dir) = test_db();
+        db.ensure_channel_row("METIS-INFO", 1, "private", "info").unwrap();
+        assert!(db.channel_last_read(1).unwrap().is_some());
+        let raw = json!({});
+        let _ = db
+            .insert_message(
+                "channel", "tx", None, "HQ", Some(1), Some(0), 1, "wx", "wx",
+                None, None, &raw, "sent", None, "bot",
+            )
+            .unwrap()
+            .unwrap();
+        let channels = db.list_channels().unwrap();
+        let info = channels.iter().find(|c| c.slot == 1).unwrap();
+        assert_eq!(info.unread_count, 1, "bot activity badges without a prior open");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5568,14 +5631,14 @@ mod tests {
         let id1 = db
             .insert_message(
                 "direct", "rx", Some("aa11"), "aa11", None, Some(1), 10, "hi", "hi",
-                None, None, &raw, "received", None,
+                None, None, &raw, "received", None, "local",
             )
             .unwrap()
             .unwrap();
         let id2 = db
             .insert_message(
                 "direct", "rx", Some("aa11"), "aa11", None, Some(1), 11, "again", "again",
-                None, None, &raw, "received", None,
+                None, None, &raw, "received", None, "local",
             )
             .unwrap()
             .unwrap();
@@ -5613,17 +5676,17 @@ mod tests {
         assert_eq!(db.count_messages_kind("direct").unwrap(), 0);
         db.insert_message(
             "channel", "rx", None, "Ada", Some(0), Some(0), 1, "hi", "Ada: hi",
-            None, None, &raw, "received", None,
+            None, None, &raw, "received", None, "local",
         )
         .unwrap();
         db.insert_message(
             "channel", "rx", None, "Bob", Some(0), Some(0), 2, "yo", "Bob: yo",
-            None, None, &raw, "received", None,
+            None, None, &raw, "received", None, "local",
         )
         .unwrap();
         db.insert_message(
             "direct", "rx", Some("aa11"), "aa11", None, Some(1), 3, "dm", "dm",
-            None, None, &raw, "received", None,
+            None, None, &raw, "received", None, "local",
         )
         .unwrap();
         assert_eq!(db.count_messages_kind("channel").unwrap(), 2);
@@ -5672,7 +5735,7 @@ mod tests {
         let id1 = db
             .insert_message(
                 "direct", "rx", Some("aa11"), "aa11", None, Some(1), 10, "hi", "hi",
-                None, None, &raw, "received", None,
+                None, None, &raw, "received", None, "local",
             )
             .unwrap()
             .unwrap();
@@ -5801,13 +5864,13 @@ mod tests {
         let first = db
             .insert_message(
                 "direct", "rx", Some("aa"), "aa", None, Some(1), 10, "hi", "hi",
-                None, None, &raw, "received", Some(1),
+                None, None, &raw, "received", Some(1), "local",
             )
             .unwrap();
         let second = db
             .insert_message(
                 "direct", "rx", Some("aa"), "aa", None, Some(1), 10, "hi", "hi",
-                None, None, &raw, "received", Some(2),
+                None, None, &raw, "received", Some(2), "local",
             )
             .unwrap();
         assert!(first.is_some());
@@ -5849,8 +5912,7 @@ mod tests {
                     None,
                     None,
                     &raw,
-                    "received",
-                    None,
+                    "received", None, "local",
                 )
                 .unwrap()
                 .unwrap();
@@ -5890,8 +5952,7 @@ mod tests {
                 None,
                 None,
                 &raw,
-                "received",
-                None,
+                "received", None, "local",
             )
             .unwrap()
             .unwrap();
@@ -5909,8 +5970,7 @@ mod tests {
                 None,
                 None,
                 &raw,
-                "received",
-                None,
+                "received", None, "local",
             )
             .unwrap()
             .unwrap();

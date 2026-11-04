@@ -1749,6 +1749,8 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
                     hint: format!("{heard} heard, {total} known"),
                     tone: "signal".to_string(),
                     series: senders_hourly.clone(),
+                    labels: activity_point_labels.clone(),
+                    value_suffix: "senders".to_string(),
                     delta: last_hour_delta(&senders_hourly),
                     onclick: move |_| on_navigate.call(Page::Roster),
                 }
@@ -1767,6 +1769,8 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
                         "pending".to_string()
                     },
                     series: direct_hourly.clone(),
+                    labels: activity_point_labels.clone(),
+                    value_suffix: "DMs".to_string(),
                     delta: last_hour_delta(&direct_hourly),
                     onclick: move |_| on_navigate.call(Page::Inbox),
                 }
@@ -1777,6 +1781,8 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
                     hint: format!("{with_gps} of {total} nodes with a fix"),
                     tone: "ok".to_string(),
                     series: position_hourly.clone(),
+                    labels: activity_point_labels.clone(),
+                    value_suffix: "fixes".to_string(),
                     delta: last_hour_delta(&position_hourly),
                     onclick: move |_| on_navigate.call(Page::Map),
                 }
@@ -1787,6 +1793,8 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
                     hint: "Messages in the last 24h".to_string(),
                     tone: "muted".to_string(),
                     series: messages_hourly.clone(),
+                    labels: activity_point_labels.clone(),
+                    value_suffix: "msgs".to_string(),
                     delta: last_hour_delta(&messages_hourly),
                     onclick: move |_| on_navigate.call(Page::Messages),
                 }
@@ -2324,6 +2332,11 @@ fn OverviewStat(
     hint: String,
     tone: String,
     #[props(default)] series: Vec<f32>,
+    /// Per-hour tip labels (e.g. `2p`, `now`) — avoids `#13` index fallback.
+    #[props(default)]
+    labels: Vec<String>,
+    #[props(default)]
+    value_suffix: String,
     #[props(default)] delta: Option<i64>,
     onclick: EventHandler<MouseEvent>,
 ) -> Element {
@@ -2354,7 +2367,12 @@ fn OverviewStat(
                 }
             }
             p { class: "mt-0.5 truncate text-[0.7rem] text-muted-foreground", "{hint}" }
-            Sparkline { values: series, tone }
+            Sparkline {
+                values: series,
+                tone,
+                labels,
+                value_suffix,
+            }
         }
     }
 }
@@ -4267,21 +4285,13 @@ fn MessagesPage() -> Element {
             .map(|session| session.slot != slot || session.name != selected_name)
             .unwrap_or(true);
         if needs_session {
-            let anchor = state()
-                .db
-                .channel_last_read(slot)
-                .ok()
-                .flatten()
-                .filter(|id| messages.iter().any(|message| message.id == *id));
-            // Match nav badge: only received traffic counts as unread (not HQ/bot TX).
-            let new_count = match anchor {
-                Some(id) => messages
-                    .iter()
-                    .filter(|message| message.id > id && message.direction == "rx")
-                    .count(),
-                None => 0,
-            };
-            let show_banner = anchor.is_some() && new_count > 0;
+            let stored_read = state().db.channel_last_read(slot).ok().flatten();
+            let anchor = stored_read.filter(|id| {
+                *id == 0 || messages.iter().any(|message| message.id == *id)
+            });
+            // Match nav badge: RX + bot/service TX (origin=bot). Operator Compose TX does not.
+            let new_count = channel.unread_count.max(0) as usize;
+            let show_banner = new_count > 0;
             if !show_banner {
                 if let Some(id) = latest_id {
                     let _ = state().db.set_channel_last_read(slot, id);

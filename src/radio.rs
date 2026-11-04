@@ -57,6 +57,7 @@ fn enqueue_channel_text(slot: u8, text: String) {
         pool.route_to_primary(RadioCmd::SendChannel {
             slot,
             text,
+            bot_activity: true,
             reply: None,
         });
     } else {
@@ -263,9 +264,11 @@ pub enum RadioCmd {
     },
     /// Send channel text. Prefixes the HQ name, waits for companion OK, then
     /// inserts the history row. `reply` tells the UI the outcome.
+    /// `bot_activity` marks the history row as `origin=bot` so channel badges update.
     SendChannel {
         slot: u8,
         text: String,
+        bot_activity: bool,
         reply: Option<oneshot::Sender<Result<(), String>>>,
     },
     RefreshDeviceSettings,
@@ -1276,10 +1279,25 @@ impl RadioHandle {
     }
 
     pub fn send_channel(&self, slot: u8, text: String) -> oneshot::Receiver<Result<(), String>> {
+        self.send_channel_with_origin(slot, text, false)
+    }
+
+    /// Bot / service posts — rail badges treat these as unread until the channel is opened.
+    pub fn send_channel_bot(&self, slot: u8, text: String) -> oneshot::Receiver<Result<(), String>> {
+        self.send_channel_with_origin(slot, text, true)
+    }
+
+    fn send_channel_with_origin(
+        &self,
+        slot: u8,
+        text: String,
+        bot_activity: bool,
+    ) -> oneshot::Receiver<Result<(), String>> {
         let (tx, rx) = oneshot::channel();
         self.pool.route_to_primary(RadioCmd::SendChannel {
             slot,
             text,
+            bot_activity,
             reply: Some(tx),
         });
         rx
@@ -3053,6 +3071,7 @@ async fn transmit_channel_message(
     slot: u8,
     text: &str,
     is_primary: bool,
+    bot_activity: bool,
 ) -> Result<(), String> {
     let text = text.trim();
     if text.is_empty() {
@@ -3069,12 +3088,14 @@ async fn transmit_channel_message(
         return Err(msg.into());
     }
     let timestamp = unix_now() as u32;
+    let origin = if bot_activity { "bot" } else { "local" };
     match send_channel_text(meshcore, slot, &wire, timestamp).await {
         Ok(()) => {
             let raw = json!({
                 "channel": slot,
                 "text": wire,
                 "direction": "tx",
+                "origin": origin,
             });
             match db.insert_message(
                 "channel",
@@ -3091,6 +3112,7 @@ async fn transmit_channel_message(
                 &raw,
                 "sent",
                 Some(radio_id),
+                origin,
             ) {
                 Ok(None) => {
                     // Dedupe hit — still treat as sent so the UI refreshes.
@@ -3754,7 +3776,12 @@ async fn run_session(
                             let _ = reply.send(result);
                         }
                     }
-                    Some(RadioCmd::SendChannel { slot, text, reply }) => {
+                    Some(RadioCmd::SendChannel {
+                        slot,
+                        text,
+                        bot_activity,
+                        reply,
+                    }) => {
                         hq_log!(debug, "channel send: handling slot {slot}");
                         let result = transmit_channel_message(
                             db,
@@ -3765,6 +3792,7 @@ async fn run_session(
                             slot,
                             &text,
                             ctx.is_primary(),
+                            bot_activity,
                         )
                         .await;
                         if let Err(err) = &result {
@@ -4804,8 +4832,7 @@ async fn handle_event(
                     message.snr.map(f64::from),
                     None,
                     &raw,
-                    "received",
-                    Some(radio_id),
+                    "received", Some(radio_id), "local",
                 )
                 .map_err(|err| err.to_string())?;
             if let (Some(message_id), Some(pubkey)) = (inserted, sender_pubkey.as_deref()) {
@@ -4923,8 +4950,7 @@ async fn on_direct(
             message.snr.map(f64::from),
             message.signature.as_ref().map(|bytes| bytes.as_slice()),
             &raw,
-            "received",
-            Some(radio_id),
+            "received", Some(radio_id), "local",
         )
         .map_err(|err| err.to_string())?;
     let Some(message_id) = inserted else {
@@ -5627,8 +5653,7 @@ async fn flush_one_outbound(
                 None,
                 None,
                 &raw,
-                "sent",
-                Some(radio_id),
+                "sent", Some(radio_id), "local",
             );
             if automatic {
                 replies.insert(outbound.pubkey.clone(), Instant::now());
@@ -5945,6 +5970,7 @@ mod tests {
         assert!(RadioCmd::SendChannel {
             slot: 1,
             text: "hi".into(),
+            bot_activity: false,
             reply: None,
         }
         .needs_primary());
@@ -5958,6 +5984,7 @@ mod tests {
             RadioCmd::SendChannel {
                 slot: 1,
                 text: "hello".into(),
+                bot_activity: false,
                 reply: Some(tx),
             },
             &status,
@@ -5975,6 +6002,7 @@ mod tests {
         let send = RadioCmd::SendChannel {
             slot: 0,
             text: String::new(),
+            bot_activity: false,
             reply: None,
         };
         assert!(no_primary_reason(&send).contains("not transmitted"));

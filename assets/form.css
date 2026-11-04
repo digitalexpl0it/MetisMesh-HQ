@@ -1699,6 +1699,42 @@ option {
   margin-top: 0.35rem;
 }
 
+.overview-kpi-gauge {
+  margin-top: 0.35rem;
+}
+
+.overview-kpi-tile-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.25rem 0.5rem;
+}
+
+.overview-kpi-mode-row {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.2rem;
+}
+
+.overview-kpi-mode-row button {
+  padding: 0.1rem 0.4rem;
+  font-size: 0.65rem;
+  line-height: 1.2;
+  min-height: 0;
+}
+
+.gauge-chart {
+  width: 100%;
+  max-width: 7.5rem;
+}
+
+.gauge-chart-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
 .map-toggle {
   display: inline-flex;
   align-items: center;

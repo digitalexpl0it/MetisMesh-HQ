@@ -10,10 +10,11 @@ Churches, neighborhoods, and volunteer groups run this on a regular computer sit
 
 - **Radio pool** — connect MeshCore companions over Bluetooth, USB serial, or TCP (Wi-Fi / Ethernet, default port 5000); multiple radios with a primary that owns bot and enrollment traffic
 - **Enrollment** — approve join requests, hand out private channel secrets, run the local bot on METIS-INFO (`#weather`, `#quake`, `#amber`, and related commands)
-- **Messages** — public and private channels plus direct threads; unread and @mention tracking; optional per-channel look; block senders (including by channel display name)
+- **Messages** — public and private channels plus direct threads; unread and @mention tracking (inbound plus HQ bot/service posts); optional per-channel look; block senders (including by channel display name)
 - **Inbox** — pending signups and held community alerts (weather / Amber / civil) for operator confirm or auto-relay
 - **Roster** — everyone heard on the mesh (enrolled or not); contact QR; clear NEW / prune heard-only
-- **Map** — MapLibre with a local style (optional PMTiles offline packs); live pins, message sonar, and tracked movers
+- **Map** — MapLibre with a local style (optional PMTiles offline packs); live pins, message sonar, tracked movers; operator path **Trace** (tracked/claimed) and passive **Traffic** edges
+- **Overview** — companion status + activity; **Repeaters** tab when infrastructure is claimed (fleet tiles, detail window 15m–7d, Battery/Queue Chart·Gauge·Numeric)
 - **Weather** — Open-Meteo and local stations (MQTT / Ecowitt); operator Weather page plus mesh bot replies
 - **Infrastructure** — claim and admin-verify repeaters, rooms, and sensors; probe and remote CLI through the primary companion
 - **Tracker** — whitelist of devices expected to share GPS; trails and stale styling on the map

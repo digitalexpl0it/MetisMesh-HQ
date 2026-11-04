@@ -9,13 +9,63 @@ use super::infra_page::open_infra_detail;
 use super::icons::{Icon, IconName};
 use super::state;
 use super::widgets::{
-    Badge, BarMix, BarMixRow, BatteryChart, BatterySample, Button, ButtonKind, ChartSeries,
-    LineChart, SelectInput, Sparkline,
+    Badge, BarMix, BarMixRow, Button, ButtonKind, ChartSeries, Gauge, LineChart, SelectInput,
+    Sparkline,
 };
 use super::Page;
 
 const FRESH_PROBE_SECS: i64 = 30 * 60;
 const ONLINE_SECS: i64 = 30 * 60;
+
+const SETTING_CHART_WINDOW: &str = "overview_repeater_chart_window";
+const SETTING_BATTERY_MODE: &str = "overview_repeater_kpi_battery_mode";
+const SETTING_QUEUE_MODE: &str = "overview_repeater_kpi_queue_mode";
+
+/// Normalize a chart window id; unknown → `24h`.
+pub fn normalize_chart_window(id: &str) -> &'static str {
+    match id {
+        "15m" => "15m",
+        "1h" => "1h",
+        "6h" => "6h",
+        "7d" => "7d",
+        _ => "24h",
+    }
+}
+
+/// Seconds for a chart window id (invalid → 24h).
+pub fn chart_window_secs(id: &str) -> i64 {
+    match normalize_chart_window(id) {
+        "15m" => 900,
+        "1h" => 3_600,
+        "6h" => 21_600,
+        "7d" => 604_800,
+        _ => 86_400,
+    }
+}
+
+/// Short label for chart titles (invalid → `24h`).
+pub fn chart_window_label(id: &str) -> &'static str {
+    normalize_chart_window(id)
+}
+
+/// Normalize KPI display mode; unknown → `chart`.
+pub fn normalize_kpi_mode(id: &str) -> &'static str {
+    match id {
+        "gauge" => "gauge",
+        "numeric" => "numeric",
+        _ => "chart",
+    }
+}
+
+fn load_setting_or(key: &str, fallback: &str) -> String {
+    state()
+        .db
+        .setting(key)
+        .ok()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| fallback.to_string())
+}
 
 /// Prefer first verified claim, else first claim.
 pub fn default_repeater_selection(claimed: &[ClaimedInfraRow]) -> Option<String> {
@@ -117,17 +167,62 @@ fn format_time(seconds: Option<i64>) -> String {
 }
 
 #[component]
+fn WindowChoice(
+    label: &'static str,
+    value: &'static str,
+    current: String,
+    onpick: EventHandler<String>,
+) -> Element {
+    let active = current == value;
+    rsx! {
+        Button {
+            kind: if active { ButtonKind::Primary } else { ButtonKind::Ghost },
+            onclick: move |_| onpick.call(value.to_string()),
+            "{label}"
+        }
+    }
+}
+
+#[component]
+fn KpiModeChoice(
+    label: &'static str,
+    value: &'static str,
+    current: String,
+    onpick: EventHandler<String>,
+) -> Element {
+    let active = current == value;
+    rsx! {
+        Button {
+            kind: if active { ButtonKind::Primary } else { ButtonKind::Ghost },
+            onclick: move |_| onpick.call(value.to_string()),
+            "{label}"
+        }
+    }
+}
+
+#[component]
 pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
     let mut tick = use_signal(|| 0u64);
     let mut refresh_busy = use_signal(|| false);
     let mut refresh_one_busy = use_signal(|| false);
     let mut refresh_note = use_signal(String::new);
     let mut selected = use_signal(String::new);
+    let mut chart_window = use_signal(|| {
+        normalize_chart_window(&load_setting_or(SETTING_CHART_WINDOW, "24h")).to_string()
+    });
+    let mut battery_mode = use_signal(|| {
+        normalize_kpi_mode(&load_setting_or(SETTING_BATTERY_MODE, "chart")).to_string()
+    });
+    let mut queue_mode = use_signal(|| {
+        normalize_kpi_mode(&load_setting_or(SETTING_QUEUE_MODE, "chart")).to_string()
+    });
     let _ = tick();
 
     let claimed = state().db.list_claimed_infra().unwrap_or_default();
     let nodes = state().db.list_nodes().unwrap_or_default();
-    let since = unix_now() - 86_400;
+    let window_id = normalize_chart_window(&chart_window());
+    let window_label = chart_window_label(window_id);
+    let since = unix_now() - chart_window_secs(window_id);
     let now = unix_now();
     let latest_by_key: std::collections::HashMap<String, InfraStatusLatest> = state()
         .db
@@ -506,10 +601,17 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
                     let rssi_vals: Vec<f32> =
                         samples.iter().map(|s| s.last_rssi as f32).collect();
                     let snr_vals: Vec<f32> = samples.iter().map(|s| s.snr as f32).collect();
-                    let queue_vals: Vec<f32> = samples
+                    let queue_points: Vec<(String, f32)> = samples
                         .iter()
-                        .filter_map(|s| s.tx_queue_len.map(|v| v as f32))
+                        .filter_map(|s| {
+                            s.tx_queue_len
+                                .map(|v| (format_time(Some(s.at)), v as f32))
+                        })
                         .collect();
+                    let queue_vals: Vec<f32> =
+                        queue_points.iter().map(|(_, v)| *v).collect();
+                    let queue_labels: Vec<String> =
+                        queue_points.iter().map(|(l, _)| l.clone()).collect();
                     let recv_rate = counter_delta_per_hour(
                         samples.iter().map(|s| (s.at, s.nb_recv)).collect(),
                     );
@@ -536,16 +638,6 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
                     };
                     let point_labels: Vec<String> =
                         samples.iter().map(|s| format_time(Some(s.at))).collect();
-                    let battery_chart: Vec<BatterySample> = samples
-                        .iter()
-                        .map(|s| BatterySample {
-                            at: s.at,
-                            pct: battery_pct(s.battery_mv) as f32,
-                            mv: s.battery_mv as f32,
-                            tip_label: format_time(Some(s.at)),
-                            axis_label: format_time(Some(s.at)),
-                        })
-                        .collect();
                     let packet_rows = latest
                         .as_ref()
                         .map(|s| {
@@ -601,50 +693,112 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
                                         }
                                     }
                                 }
-                                div { class: "flex flex-wrap gap-2",
-                                    Button {
-                                        kind: ButtonKind::Ghost,
-                                        disabled: refresh_one_busy() || !linked || !row.is_verified(),
-                                        onclick: move |_| {
-                                            if refresh_one_busy() || !linked {
-                                                return;
-                                            }
-                                            refresh_one_busy.set(true);
-                                            refresh_note.set("Refreshing node…".into());
-                                            let key = key_refresh.clone();
-                                            spawn(async move {
-                                                let prior_tx = state()
-                                                    .db
-                                                    .get_infra_status_latest(&key)
-                                                    .ok()
-                                                    .flatten()
-                                                    .and_then(|r| r.tx_power_dbm);
-                                                let rx = state().radio.probe_infra_status(key.clone());
-                                                match rx.await.unwrap_or_else(|_| Err("cancelled".into())) {
-                                                    Ok(info) => {
-                                                        crate::radio::persist_infra_status_probe(
-                                                            &state().db, &key, &info, prior_tx,
-                                                        );
-                                                        refresh_note.set("Node status updated.".into());
-                                                    }
-                                                    Err(err) => {
-                                                        refresh_note.set(err);
-                                                    }
+                                div { class: "flex flex-col items-stretch gap-2 sm:items-end",
+                                    div { class: "flex flex-wrap gap-2",
+                                        Button {
+                                            kind: ButtonKind::Ghost,
+                                            disabled: refresh_one_busy() || !linked || !row.is_verified(),
+                                            onclick: move |_| {
+                                                if refresh_one_busy() || !linked {
+                                                    return;
                                                 }
-                                                refresh_one_busy.set(false);
-                                                tick.with_mut(|n| *n += 1);
-                                            });
-                                        },
-                                        if refresh_one_busy() { "Refreshing…" } else { "Refresh node" }
+                                                refresh_one_busy.set(true);
+                                                refresh_note.set("Refreshing node…".into());
+                                                let key = key_refresh.clone();
+                                                spawn(async move {
+                                                    let prior_tx = state()
+                                                        .db
+                                                        .get_infra_status_latest(&key)
+                                                        .ok()
+                                                        .flatten()
+                                                        .and_then(|r| r.tx_power_dbm);
+                                                    let rx = state().radio.probe_infra_status(key.clone());
+                                                    match rx.await.unwrap_or_else(|_| Err("cancelled".into())) {
+                                                        Ok(info) => {
+                                                            crate::radio::persist_infra_status_probe(
+                                                                &state().db, &key, &info, prior_tx,
+                                                            );
+                                                            refresh_note.set("Node status updated.".into());
+                                                        }
+                                                        Err(err) => {
+                                                            refresh_note.set(err);
+                                                        }
+                                                    }
+                                                    refresh_one_busy.set(false);
+                                                    tick.with_mut(|n| *n += 1);
+                                                });
+                                            },
+                                            if refresh_one_busy() { "Refreshing…" } else { "Refresh node" }
+                                        }
+                                        Button {
+                                            kind: ButtonKind::Ghost,
+                                            onclick: move |_| {
+                                                open_infra_detail(key_open.clone());
+                                                on_navigate.call(Page::Infrastructure);
+                                            },
+                                            Icon { name: IconName::ChevronRight, size: 14 }
+                                            "Open in Infrastructure"
+                                        }
                                     }
-                                    Button {
-                                        kind: ButtonKind::Ghost,
-                                        onclick: move |_| {
-                                            open_infra_detail(key_open.clone());
-                                            on_navigate.call(Page::Infrastructure);
-                                        },
-                                        Icon { name: IconName::ChevronRight, size: 14 }
-                                        "Open in Infrastructure"
+                                    div { class: "flex flex-wrap items-center gap-1.5",
+                                        span { class: "text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground mr-1",
+                                            "Window"
+                                        }
+                                        WindowChoice {
+                                            label: "15m",
+                                            value: "15m",
+                                            current: chart_window(),
+                                            onpick: move |value: String| {
+                                                let id = normalize_chart_window(&value).to_string();
+                                                let _ = state().db.set_setting(SETTING_CHART_WINDOW, &id);
+                                                chart_window.set(id);
+                                                tick.with_mut(|n| *n += 1);
+                                            },
+                                        }
+                                        WindowChoice {
+                                            label: "1h",
+                                            value: "1h",
+                                            current: chart_window(),
+                                            onpick: move |value: String| {
+                                                let id = normalize_chart_window(&value).to_string();
+                                                let _ = state().db.set_setting(SETTING_CHART_WINDOW, &id);
+                                                chart_window.set(id);
+                                                tick.with_mut(|n| *n += 1);
+                                            },
+                                        }
+                                        WindowChoice {
+                                            label: "6h",
+                                            value: "6h",
+                                            current: chart_window(),
+                                            onpick: move |value: String| {
+                                                let id = normalize_chart_window(&value).to_string();
+                                                let _ = state().db.set_setting(SETTING_CHART_WINDOW, &id);
+                                                chart_window.set(id);
+                                                tick.with_mut(|n| *n += 1);
+                                            },
+                                        }
+                                        WindowChoice {
+                                            label: "24h",
+                                            value: "24h",
+                                            current: chart_window(),
+                                            onpick: move |value: String| {
+                                                let id = normalize_chart_window(&value).to_string();
+                                                let _ = state().db.set_setting(SETTING_CHART_WINDOW, &id);
+                                                chart_window.set(id);
+                                                tick.with_mut(|n| *n += 1);
+                                            },
+                                        }
+                                        WindowChoice {
+                                            label: "7d",
+                                            value: "7d",
+                                            current: chart_window(),
+                                            onpick: move |value: String| {
+                                                let id = normalize_chart_window(&value).to_string();
+                                                let _ = state().db.set_setting(SETTING_CHART_WINDOW, &id);
+                                                chart_window.set(id);
+                                                tick.with_mut(|n| *n += 1);
+                                            },
+                                        }
                                     }
                                 }
                             }
@@ -652,27 +806,76 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
                             if let Some(s) = latest.as_ref() {
                                 {
                                     let pct = battery_pct(s.battery_mv);
+                                    let tx_known = s.tx_power_dbm.is_some();
                                     let tx = s
                                         .tx_power_dbm
                                         .map(|v| format!("{v} dBm"))
                                         .unwrap_or_else(|| "—".into());
+                                    let queue_n = s.tx_queue_len.unwrap_or(0);
                                     let queue = s
                                         .tx_queue_len
                                         .map(|v| v.to_string())
                                         .unwrap_or_else(|| "—".into());
+                                    let queue_gauge_max = (queue_n as f32).max(16.0);
+                                    let batt_mode = normalize_kpi_mode(&battery_mode());
+                                    let q_mode = normalize_kpi_mode(&queue_mode());
                                     rsx! {
                                         div { class: "mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5",
                                             div { class: "overview-fleet-tile overview-fleet-tile--battery",
-                                                p { class: "overview-fleet-tile__label", "Battery" }
+                                                div { class: "overview-kpi-tile-head",
+                                                    p { class: "overview-fleet-tile__label", "Battery" }
+                                                    div { class: "overview-kpi-mode-row",
+                                                        KpiModeChoice {
+                                                            label: "Chart",
+                                                            value: "chart",
+                                                            current: battery_mode(),
+                                                            onpick: move |value: String| {
+                                                                let id = normalize_kpi_mode(&value).to_string();
+                                                                let _ = state().db.set_setting(SETTING_BATTERY_MODE, &id);
+                                                                battery_mode.set(id);
+                                                            },
+                                                        }
+                                                        KpiModeChoice {
+                                                            label: "Gauge",
+                                                            value: "gauge",
+                                                            current: battery_mode(),
+                                                            onpick: move |value: String| {
+                                                                let id = normalize_kpi_mode(&value).to_string();
+                                                                let _ = state().db.set_setting(SETTING_BATTERY_MODE, &id);
+                                                                battery_mode.set(id);
+                                                            },
+                                                        }
+                                                        KpiModeChoice {
+                                                            label: "#",
+                                                            value: "numeric",
+                                                            current: battery_mode(),
+                                                            onpick: move |value: String| {
+                                                                let id = normalize_kpi_mode(&value).to_string();
+                                                                let _ = state().db.set_setting(SETTING_BATTERY_MODE, &id);
+                                                                battery_mode.set(id);
+                                                            },
+                                                        }
+                                                    }
+                                                }
                                                 p { class: "overview-fleet-tile__value overview-fleet-tile__value--sm", "{pct}%" }
                                                 p { class: "text-[0.7rem] text-muted-foreground tabular-nums", "{s.battery_mv} mV" }
-                                                if !battery_vals.is_empty() {
+                                                if batt_mode == "chart" && !battery_vals.is_empty() {
                                                     div { class: "overview-kpi-spark",
                                                         Sparkline {
                                                             values: battery_vals.clone(),
                                                             tone: "batt".to_string(),
                                                             zero_based: false,
+                                                            labels: point_labels.clone(),
                                                             value_suffix: "mV".to_string(),
+                                                        }
+                                                    }
+                                                } else if batt_mode == "gauge" {
+                                                    div { class: "overview-kpi-gauge",
+                                                        Gauge {
+                                                            value: pct as f32,
+                                                            min: 0.0,
+                                                            max: 100.0,
+                                                            tone: "batt".to_string(),
                                                         }
                                                     }
                                                 }
@@ -686,6 +889,7 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
                                                             values: noise_vals.clone(),
                                                             tone: "pending".to_string(),
                                                             zero_based: false,
+                                                            labels: point_labels.clone(),
                                                             value_suffix: "dBm".to_string(),
                                                         }
                                                     }
@@ -700,6 +904,7 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
                                                             values: rssi_vals.clone(),
                                                             tone: "ok".to_string(),
                                                             zero_based: false,
+                                                            labels: point_labels.clone(),
                                                         }
                                                     }
                                                 }
@@ -713,6 +918,7 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
                                                             values: snr_vals.clone(),
                                                             tone: "rx".to_string(),
                                                             zero_based: false,
+                                                            labels: point_labels.clone(),
                                                         }
                                                     }
                                                 }
@@ -720,6 +926,11 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
                                             div { class: "overview-fleet-tile overview-fleet-tile--tx",
                                                 p { class: "overview-fleet-tile__label", "TX power" }
                                                 p { class: "overview-fleet-tile__value overview-fleet-tile__value--sm", "{tx}" }
+                                                if !tx_known {
+                                                    p { class: "text-[0.65rem] text-muted-foreground",
+                                                        "Not in binary status — set via Infra radio CLI"
+                                                    }
+                                                }
                                             }
                                             div { class: "overview-fleet-tile overview-fleet-tile--uptime",
                                                 p { class: "overview-fleet-tile__label", "Uptime" }
@@ -734,14 +945,58 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
                                                 p { class: "overview-fleet-tile__value overview-fleet-tile__value--sm", "{format_infra_airtime(s.rx_airtime_ms)}" }
                                             }
                                             div { class: "overview-fleet-tile overview-fleet-tile--queue",
-                                                p { class: "overview-fleet-tile__label", "Queue" }
+                                                div { class: "overview-kpi-tile-head",
+                                                    p { class: "overview-fleet-tile__label", "Queue" }
+                                                    div { class: "overview-kpi-mode-row",
+                                                        KpiModeChoice {
+                                                            label: "Chart",
+                                                            value: "chart",
+                                                            current: queue_mode(),
+                                                            onpick: move |value: String| {
+                                                                let id = normalize_kpi_mode(&value).to_string();
+                                                                let _ = state().db.set_setting(SETTING_QUEUE_MODE, &id);
+                                                                queue_mode.set(id);
+                                                            },
+                                                        }
+                                                        KpiModeChoice {
+                                                            label: "Gauge",
+                                                            value: "gauge",
+                                                            current: queue_mode(),
+                                                            onpick: move |value: String| {
+                                                                let id = normalize_kpi_mode(&value).to_string();
+                                                                let _ = state().db.set_setting(SETTING_QUEUE_MODE, &id);
+                                                                queue_mode.set(id);
+                                                            },
+                                                        }
+                                                        KpiModeChoice {
+                                                            label: "#",
+                                                            value: "numeric",
+                                                            current: queue_mode(),
+                                                            onpick: move |value: String| {
+                                                                let id = normalize_kpi_mode(&value).to_string();
+                                                                let _ = state().db.set_setting(SETTING_QUEUE_MODE, &id);
+                                                                queue_mode.set(id);
+                                                            },
+                                                        }
+                                                    }
+                                                }
                                                 p { class: "overview-fleet-tile__value overview-fleet-tile__value--sm", "{queue}" }
-                                                if !queue_vals.is_empty() {
+                                                if q_mode == "chart" && !queue_vals.is_empty() {
                                                     div { class: "overview-kpi-spark",
                                                         Sparkline {
                                                             values: queue_vals.clone(),
                                                             tone: "warn".to_string(),
                                                             zero_based: true,
+                                                            labels: queue_labels.clone(),
+                                                        }
+                                                    }
+                                                } else if q_mode == "gauge" {
+                                                    div { class: "overview-kpi-gauge",
+                                                        Gauge {
+                                                            value: queue_n as f32,
+                                                            min: 0.0,
+                                                            max: queue_gauge_max,
+                                                            tone: "warn".to_string(),
                                                         }
                                                     }
                                                 }
@@ -759,18 +1014,12 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
                                 div { class: "mt-4 flex flex-col gap-4",
                                     if samples.len() < 2 {
                                         p { class: "text-xs text-muted-foreground",
-                                            "First sample recorded — refresh again later for multi-point trends."
+                                            "Only one sample in the {window_label} window — refresh again later for multi-point trends."
                                         }
-                                    }
-                                    div { class: "overview-chart-panel overview-chart-panel--battery",
-                                        p { class: "overview-chart-panel__title",
-                                            "Battery · 24h"
-                                        }
-                                        BatteryChart { points: battery_chart }
                                     }
                                     div { class: "overview-chart-panel overview-chart-panel--rf",
                                         p { class: "overview-chart-panel__title",
-                                            "RF · noise / RSSI / SNR"
+                                            "RF · noise / RSSI / SNR · {window_label}"
                                         }
                                         LineChart {
                                             series: vec![
@@ -798,7 +1047,7 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
                                     }
                                     div { class: "overview-chart-panel overview-chart-panel--packets",
                                         p { class: "overview-chart-panel__title",
-                                            "Packet rates · Δ / hour"
+                                            "Packet rates · Δ / hour · {window_label}"
                                         }
                                         LineChart {
                                             series: vec![
@@ -826,7 +1075,7 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
                                     }
                                     div { class: "overview-chart-panel overview-chart-panel--airtime",
                                         p { class: "overview-chart-panel__title",
-                                            "Airtime usage · % of interval"
+                                            "Airtime usage · % of interval · {window_label}"
                                         }
                                         LineChart {
                                             series: vec![
@@ -900,5 +1149,28 @@ mod tests {
         assert_eq!(series.len(), 1);
         // 10_000 ms airtime over 100_000 ms wall → 10%
         assert!((series[0] - 10.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn chart_window_secs_and_label() {
+        assert_eq!(chart_window_secs("15m"), 900);
+        assert_eq!(chart_window_secs("1h"), 3_600);
+        assert_eq!(chart_window_secs("6h"), 21_600);
+        assert_eq!(chart_window_secs("24h"), 86_400);
+        assert_eq!(chart_window_secs("7d"), 604_800);
+        assert_eq!(chart_window_secs("nope"), 86_400);
+        assert_eq!(chart_window_label("7d"), "7d");
+        assert_eq!(chart_window_label("weird"), "24h");
+        assert_eq!(normalize_chart_window("1h"), "1h");
+        assert_eq!(normalize_chart_window(""), "24h");
+    }
+
+    #[test]
+    fn kpi_mode_defaults_to_chart() {
+        assert_eq!(normalize_kpi_mode("gauge"), "gauge");
+        assert_eq!(normalize_kpi_mode("numeric"), "numeric");
+        assert_eq!(normalize_kpi_mode("chart"), "chart");
+        assert_eq!(normalize_kpi_mode(""), "chart");
+        assert_eq!(normalize_kpi_mode("spark"), "chart");
     }
 }

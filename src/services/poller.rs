@@ -111,7 +111,7 @@ fn poll_quakes(db: &Db, radio: &RadioHandle) -> Result<(), String> {
         .to_string();
         let _ = db.insert_service_event("quake", &event.id, &body, &detail, "sent");
         let _ = db.audit("svc_quake", "", &body);
-        let _ = radio.send_channel(slot, body);
+        let _ = radio.send_channel_bot(slot, body);
         // One new event per tick keeps the mesh calm.
         break;
     }
@@ -152,7 +152,7 @@ fn poll_nws(db: &Db, radio: &RadioHandle) -> Result<(), String> {
         if auto {
             let _ = db.insert_service_event("nws", &alert.id, &body, &detail, "sent");
             let _ = db.audit("svc_nws", "", &body);
-            let _ = radio.send_channel(slot, body);
+            let _ = radio.send_channel_bot(slot, body);
         } else {
             let _ = db.insert_service_event("nws", &alert.id, &body, &detail, "pending");
             let _ = db.audit("svc_nws_pending", "", &fit_mesh(&alert.event));
@@ -224,7 +224,7 @@ fn poll_weather_zips(db: &Db, radio: &RadioHandle) -> Result<(), String> {
         .to_string();
         let _ = db.insert_service_event("wx", &event_id, &body, &detail, "sent");
         let _ = db.audit("svc_wx_sched", &zip, &body);
-        let _ = radio.send_channel(slot, body);
+        let _ = radio.send_channel_bot(slot, body);
         // One ZIP per minute tick.
         break;
     }
@@ -270,7 +270,7 @@ fn poll_emergency(
         if auto {
             let _ = db.insert_service_event(kind, &alert.id, &body, &detail, "sent");
             let _ = db.audit(&format!("svc_{kind}"), "", &body);
-            let _ = radio.send_channel(slot, body);
+            let _ = radio.send_channel_bot(slot, body);
         } else {
             let _ = db.insert_service_event(kind, &alert.id, &body, &detail, "pending");
             let _ = db.audit(&format!("svc_{kind}_pending"), "", &fit_mesh(&alert.event));

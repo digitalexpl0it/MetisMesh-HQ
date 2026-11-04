@@ -541,6 +541,73 @@ fn spark_color(tone: &str) -> &'static str {
     }
 }
 
+/// Fraction of a gauge arc in `[0, 1]` after clamping `value` into `[min, max]`.
+pub fn gauge_fraction(value: f32, min: f32, max: f32) -> f32 {
+    if !(max > min) {
+        return 0.0;
+    }
+    ((value - min) / (max - min)).clamp(0.0, 1.0)
+}
+
+fn gauge_arc_path(cx: f32, cy: f32, r: f32, t0: f32, t1: f32) -> String {
+    // Semicircle: t=0 at left (-π), t=1 at right (0). Angles in SVG y-down.
+    let a0 = std::f32::consts::PI * (1.0 - t0);
+    let a1 = std::f32::consts::PI * (1.0 - t1);
+    let x0 = cx + r * a0.cos();
+    let y0 = cy - r * a0.sin();
+    let x1 = cx + r * a1.cos();
+    let y1 = cy - r * a1.sin();
+    let large = if (t1 - t0).abs() > 0.5 { 1 } else { 0 };
+    format!("M{x0:.2} {y0:.2} A{r:.2} {r:.2} 0 {large} 1 {x1:.2} {y1:.2}")
+}
+
+/// Compact semicircle gauge for KPI tiles (battery %, queue depth, etc.).
+#[component]
+pub fn Gauge(
+    value: f32,
+    #[props(default = 0.0)] min: f32,
+    #[props(default = 100.0)] max: f32,
+    #[props(default = "muted".to_string())] tone: String,
+) -> Element {
+    const W: f32 = 120.0;
+    const H: f32 = 64.0;
+    const CX: f32 = 60.0;
+    const CY: f32 = 58.0;
+    const R: f32 = 46.0;
+    let frac = gauge_fraction(value, min, max);
+    let color = spark_color(&tone);
+    let track = gauge_arc_path(CX, CY, R, 0.0, 1.0);
+    let fill = if frac > 0.001 {
+        Some(gauge_arc_path(CX, CY, R, 0.0, frac))
+    } else {
+        None
+    };
+    rsx! {
+        div { class: "gauge-chart",
+            svg {
+                class: "gauge-chart-svg",
+                view_box: "0 0 {W} {H}",
+                path {
+                    d: "{track}",
+                    fill: "none",
+                    stroke: "#ffffff18",
+                    stroke_width: "8",
+                    stroke_linecap: "round",
+                }
+                if let Some(d) = fill {
+                    path {
+                        d: "{d}",
+                        fill: "none",
+                        stroke: "{color}",
+                        stroke_width: "8",
+                        stroke_linecap: "round",
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn spark_paths(
     values: &[f32],
     width: f32,
@@ -1452,5 +1519,18 @@ mod avatar_emoji_tests {
     fn plain_name_has_no_emoji_avatar() {
         assert!(name_avatar_emojis("Rose01-rptr").is_empty());
         assert!(name_avatar_emojis("").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod gauge_tests {
+    use super::gauge_fraction;
+
+    #[test]
+    fn gauge_fraction_clamps_to_unit_interval() {
+        assert!((gauge_fraction(50.0, 0.0, 100.0) - 0.5).abs() < 0.001);
+        assert!((gauge_fraction(-10.0, 0.0, 100.0) - 0.0).abs() < 0.001);
+        assert!((gauge_fraction(200.0, 0.0, 100.0) - 1.0).abs() < 0.001);
+        assert!((gauge_fraction(5.0, 10.0, 10.0) - 0.0).abs() < 0.001);
     }
 }

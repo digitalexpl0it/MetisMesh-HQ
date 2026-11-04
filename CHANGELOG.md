@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Overview · Repeaters
+
+- Fleet dashboard: summary tiles, compact claim cards, **Details for** dropdown with KPIs + charts
+- L1: detail chart window chips **15m / 1h / 6h / 24h / 7d** (persisted `overview_repeater_chart_window`)
+- L2: Battery and Queue KPI modes **Chart / Gauge / Numeric** (persisted); new SVG `Gauge` widget
+- KPI sparklines use probe timestamps on hover (not `#N` sample index); Overview companion stats likewise use hour labels + units
+- Duplicate full Battery chart under repeater KPIs removed (tile Chart mode is the battery trend)
+- TX power shows a hint when missing from binary status (Infra radio CLI / prior value)
+
+### Map · paths
+
+- Operator **Trace** for tracked or claimed pins (`CMD_GET_ADVERT_PATH` 0x2A); local only — no channel/DM
+- Path fetch listens for advert-path / PathUpdate, fails fast on cache miss, falls back to contact `out_path` / direct / last stored path
+- Passive **Traffic** edge overlay from overheard message paths (All GPS vs Tracked/Claimed)
+- Map Filter / Settings menus; Selected label next to Trace
+
+### Messages · badges
+
+- Channel unread: inbound `rx` **and** HQ `origin=bot` TX (services / bot replies) count toward rail badges
+- Operator Compose TX (`origin=local`) still does not badge
+- Last-read cursors seeded when channels are created so never-opened channels (e.g. METIS-INFO) can badge without a prior open
+
+### Infra · TX CLI
+
+- Get TX / remote CLI ack handling ignores empty/noise lines so capture does not clear on send-ack alone
+- Map upload posts to map.meshcore.**io** and follows redirects (fixes 307 from .dev)
+
 ## 0.1.3 — 2026-11-03
 
 ### Ship
@@ -45,7 +72,7 @@
 - Offline firmware locker + selective Manage overlay + USB flasher
 - Firmware sync verifies SHA-256 against GitHub release `digest` when present, stores hashes in `index.json`, re-checks on-disk files, and re-downloads corrupt/incomplete assets (up to 3 attempts)
 - Outage readiness: Flasher ready banner, flash blocked on integrity failure, Check integrity / Export pack / Import pack (`.zip`); full offline runbook in Help (About keeps a short checklist + Open Help); `docs/OFFLINE_RUNBOOK.md` mirrors Help for GitHub
-- Channel/DM unread badges count received traffic only (HQ/bot TX no longer inflate “new”)
+- Channel/DM unread: received `rx` plus HQ bot/service TX (`origin=bot`); operator Compose TX does not inflate badges; last-read cursors seeded for new channels
 - Firmware Manage Save & Close pinned in a sticky slide-down footer so they stay visible on short windows
 
 ### Messages

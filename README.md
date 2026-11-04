@@ -4,6 +4,8 @@ Local emergency headquarters for [MeshCore](https://meshcore.io/) communities.
 
 Churches, neighborhoods, and volunteer groups run this on a regular computer sitting next to a MeshCore companion radio. It keeps working when the internet drops. No cloud account, and it does not call home.
 
+![Overview](Screenshots/overview.png)
+
 ## What it does
 
 - Talks to MeshCore companions over **Bluetooth**, **USB serial**, or **TCP** (Wi-Fi / Ethernet, default port 5000) on one radio pool

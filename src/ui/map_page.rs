@@ -588,6 +588,17 @@ fn commit_named_region(
     });
 }
 
+#[derive(Clone, Copy, Default)]
+struct LegendCounts {
+    hq: usize,
+    chat: usize,
+    repeater: usize,
+    room: usize,
+    sensor: usize,
+    solid: usize,
+    dashed: usize,
+}
+
 struct MapModel {
     nodes: Value,
     solid: Value,
@@ -601,6 +612,7 @@ struct MapModel {
     note: String,
     bounds: Option<(f64, f64, f64, f64)>,
     pmtiles_ok: bool,
+    legend: LegendCounts,
 }
 
 fn display_name_for_key(
@@ -1100,6 +1112,26 @@ fn build_model(
         )
     };
 
+    let mut legend = LegendCounts {
+        solid: solid.len(),
+        dashed: dashed.len(),
+        ..LegendCounts::default()
+    };
+    for feat in &node_features {
+        match feat
+            .pointer("/properties/type_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+        {
+            "hq" => legend.hq += 1,
+            "chat" => legend.chat += 1,
+            "repeater" => legend.repeater += 1,
+            "room" => legend.room += 1,
+            "sensor" => legend.sensor += 1,
+            _ => {}
+        }
+    }
+
     MapModel {
         nodes: collection(node_features),
         solid: collection(solid),
@@ -1113,6 +1145,7 @@ fn build_model(
         note,
         bounds,
         pmtiles_ok,
+        legend,
     }
 }
 
@@ -2831,14 +2864,45 @@ pub fn MapPage() -> Element {
                 }
                 div { class: "map-legend",
                     p { class: "map-legend-title", "Legend" }
-                    div { class: "map-legend-row", span { class: "map-type-swatch map-type-hq" } "HQ" }
-                    div { class: "map-legend-row", span { class: "map-type-swatch map-type-chat" } "Chat" }
-                    div { class: "map-legend-row", span { class: "map-type-swatch map-type-repeater" } "Repeater" }
-                    div { class: "map-legend-row", span { class: "map-type-swatch map-type-room" } "Room" }
-                    div { class: "map-legend-row", span { class: "map-type-swatch map-type-sensor" } "Sensor" }
-                    div { class: "map-legend-row", span { class: "map-cluster-swatch metis-cluster-cool" } "Cluster (5+)" }
-                    div { class: "map-legend-row", span { class: "map-line", style: "background:#34d399;" } "Resolved hops" }
-                    div { class: "map-legend-row", span { class: "map-line map-line-dashed", style: "background:#fbbf24;" } "Endpoints only" }
+                    div { class: "map-legend-row",
+                        span { class: "map-type-swatch map-type-hq" }
+                        span { class: "map-legend-label", "HQ" }
+                        span { class: "map-legend-count", "{model.legend.hq}" }
+                    }
+                    div { class: "map-legend-row",
+                        span { class: "map-type-swatch map-type-chat" }
+                        span { class: "map-legend-label", "Chat" }
+                        span { class: "map-legend-count", "{model.legend.chat}" }
+                    }
+                    div { class: "map-legend-row",
+                        span { class: "map-type-swatch map-type-repeater" }
+                        span { class: "map-legend-label", "Repeater" }
+                        span { class: "map-legend-count", "{model.legend.repeater}" }
+                    }
+                    div { class: "map-legend-row",
+                        span { class: "map-type-swatch map-type-room" }
+                        span { class: "map-legend-label", "Room" }
+                        span { class: "map-legend-count", "{model.legend.room}" }
+                    }
+                    div { class: "map-legend-row",
+                        span { class: "map-type-swatch map-type-sensor" }
+                        span { class: "map-legend-label", "Sensor" }
+                        span { class: "map-legend-count", "{model.legend.sensor}" }
+                    }
+                    div { class: "map-legend-row",
+                        span { class: "map-cluster-swatch metis-cluster-cool" }
+                        span { class: "map-legend-label", "Cluster (5+)" }
+                    }
+                    div { class: "map-legend-row",
+                        span { class: "map-line", style: "background:#34d399;" }
+                        span { class: "map-legend-label", "Resolved hops" }
+                        span { class: "map-legend-count", "{model.legend.solid}" }
+                    }
+                    div { class: "map-legend-row",
+                        span { class: "map-line map-line-dashed", style: "background:#fbbf24;" }
+                        span { class: "map-legend-label", "Endpoints only" }
+                        span { class: "map-legend-count", "{model.legend.dashed}" }
+                    }
                 }
                 div { class: "map-basemap-switcher", title: "Basemap",
                     button {

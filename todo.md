@@ -129,7 +129,7 @@ Fleet dashboard landed (Claimed|Claim infra, status samples, Overview Repeaters:
 - [x] **L1** Time-range presets on Repeater detail charts (15m / 1h / 6h / 24h / 7d); persisted window; titles carry the label
 - [x] **L2** Optional display modes per KPI (MeshMonitor-style): chart / gauge / numeric — Battery + Queue; `Gauge` widget; no duplicate Battery panel under KPIs
 - [x] **L3** Probe honesty UX: Overview notes sparse LoRa probes; shows auto-probe policy, last probe time, sample count
-- [ ] **L4** (optional later) Star/favorite metrics; outlier cleanup on bad sensor spikes
+- [x] **L4** Star/favorite detail KPI tiles (persisted order); display-only hard-gate + Hampel outlier cleanup on spark/RF/rate series
 - [x] **L5** Settings → Preferences → Claimed infrastructure: auto-probe interval (off/15/30/60), max nodes/sweep, sample cap, status retention + purge
 - [x] **L6** Sparkline hover labels: repeater KPI probe times + Overview companion hour ticks/units (no `#N` index tips)
 - [x] **L7** Channel badges: bot/service TX (`origin=bot`) + seeded last-read so METIS-INFO / never-opened channels can badge
@@ -162,7 +162,7 @@ Do **not**: embed MeshMonitor, store repeater admin passwords for polling, or ex
 11. I1 → I5 (claimed infrastructure + verify-on-claim + gated Overview)  
 12. J1 → J6 (nav order, fuzzy jump, zebra, heard-week icon, shell layout, Help page)  
 13. K1 → K4 (appearance, name-block, Overview KPI strip)
-14. L1 → L2 / L6–L7 done (Repeater Overview time range, gauge mode, hover labels, channel badges); L4 optional — L3/L5 done
+14. L1 → L7 done (Repeater Overview time range, gauge, favorites, outlier cleanup, hover labels, channel badges; L3/L5 probe honesty + settings)
 
 ## Success checks
 

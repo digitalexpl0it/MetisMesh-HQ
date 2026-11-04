@@ -397,7 +397,7 @@ pub fn HelpPage() -> Element {
                             }
                             li {
                                 strong { "Overview → Repeaters" }
-                                " — appears once infrastructure is claimed. Fleet tiles, card grid, and a Details for dropdown for KPIs/charts from LoRa status samples (sparse probes). Detail charts use a 15m–7d window; Battery and Queue tiles can switch Chart / Gauge / Numeric. Refresh all / Refresh node on the page; auto-probe interval, sweep size, sample cap, and status purge under Settings → Preferences → Claimed infrastructure."
+                                " — appears once infrastructure is claimed. Fleet tiles, card grid, and a Details for dropdown for KPIs/charts from LoRa status samples (sparse probes). Detail charts use a 15m–7d window; Battery and Queue tiles can switch Chart / Gauge / Numeric. Star KPI tiles to pin them first (saved preference). Charts hide hard-gate / Hampel outliers for scale; latest tile values stay raw. Refresh all / Refresh node on the page; auto-probe interval, sweep size, sample cap, and status purge under Settings → Preferences → Claimed infrastructure."
                             }
                         }
                     }

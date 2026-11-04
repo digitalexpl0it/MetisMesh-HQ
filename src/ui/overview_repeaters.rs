@@ -20,6 +20,13 @@ const ONLINE_SECS: i64 = 30 * 60;
 const SETTING_CHART_WINDOW: &str = "overview_repeater_chart_window";
 const SETTING_BATTERY_MODE: &str = "overview_repeater_kpi_battery_mode";
 const SETTING_QUEUE_MODE: &str = "overview_repeater_kpi_queue_mode";
+const SETTING_KPI_FAVORITES: &str = "overview_repeater_kpi_favorites";
+
+const DEFAULT_KPI_FAVORITES: &str = "battery,noise,rssi,snr,queue";
+const STARABLE_KPIS: &[&str] = &["battery", "noise", "rssi", "snr", "queue"];
+const ALL_KPI_ORDER: &[&str] = &[
+    "battery", "noise", "rssi", "snr", "tx", "uptime", "air_tx", "air_rx", "queue",
+];
 
 /// Normalize a chart window id; unknown → `24h`.
 pub fn normalize_chart_window(id: &str) -> &'static str {
@@ -57,6 +64,71 @@ pub fn normalize_kpi_mode(id: &str) -> &'static str {
     }
 }
 
+fn is_starable_kpi(id: &str) -> bool {
+    STARABLE_KPIS.iter().any(|s| *s == id)
+}
+
+/// Parse favorite KPI ids from a CSV setting. Empty/invalid → default spark set.
+pub fn parse_kpi_favorites(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for part in raw.split(',') {
+        let id = part.trim();
+        if is_starable_kpi(id) && !out.iter().any(|x| x == id) {
+            out.push(id.to_string());
+        }
+    }
+    if out.is_empty() {
+        STARABLE_KPIS.iter().map(|s| (*s).to_string()).collect()
+    } else {
+        out
+    }
+}
+
+/// Toggle a starable KPI in the favorites list. Non-starable ids are ignored.
+pub fn toggle_kpi_favorite(current: &[String], id: &str) -> Vec<String> {
+    if !is_starable_kpi(id) {
+        return current.to_vec();
+    }
+    let mut out: Vec<String> = current
+        .iter()
+        .filter(|x| is_starable_kpi(x))
+        .cloned()
+        .collect();
+    if let Some(pos) = out.iter().position(|x| x == id) {
+        out.remove(pos);
+    } else {
+        out.push(id.to_string());
+    }
+    out
+}
+
+pub fn serialize_kpi_favorites(favs: &[String]) -> String {
+    favs.iter()
+        .filter(|x| is_starable_kpi(x))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Starred KPIs first (favorite order), then remaining tiles in fixed order.
+pub fn ordered_kpi_ids(favorites: &[String]) -> Vec<&'static str> {
+    let mut out = Vec::with_capacity(ALL_KPI_ORDER.len());
+    let mut seen = std::collections::HashSet::new();
+    for fav in favorites {
+        if let Some(&id) = STARABLE_KPIS.iter().find(|&&s| s == fav.as_str()) {
+            if seen.insert(id) {
+                out.push(id);
+            }
+        }
+    }
+    for &id in ALL_KPI_ORDER {
+        if seen.insert(id) {
+            out.push(id);
+        }
+    }
+    out
+}
+
 fn load_setting_or(key: &str, fallback: &str) -> String {
     state()
         .db
@@ -65,6 +137,119 @@ fn load_setting_or(key: &str, fallback: &str) -> String {
         .flatten()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| fallback.to_string())
+}
+
+fn median_f32(vals: &mut [f32]) -> f32 {
+    if vals.is_empty() {
+        return 0.0;
+    }
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = vals.len();
+    if n % 2 == 1 {
+        vals[n / 2]
+    } else {
+        (vals[n / 2 - 1] + vals[n / 2]) / 2.0
+    }
+}
+
+/// Hampel keep-mask: window ±`half_window`; flag if |x−med| > `n_sigmas`×1.4826×MAD.
+pub fn hampel_keep_mask(values: &[f32], half_window: usize, n_sigmas: f32) -> Vec<bool> {
+    let n = values.len();
+    let mut keep = vec![true; n];
+    if n == 0 {
+        return keep;
+    }
+    for i in 0..n {
+        let lo = i.saturating_sub(half_window);
+        let hi = (i + half_window + 1).min(n);
+        let mut window: Vec<f32> = values[lo..hi].to_vec();
+        let med = median_f32(&mut window);
+        let mut abs_dev: Vec<f32> = values[lo..hi].iter().map(|x| (x - med).abs()).collect();
+        let mad = median_f32(&mut abs_dev);
+        // MAD≈0 (flat window): any deviation from the median is an outlier.
+        let thresh = if mad <= 1e-6 {
+            1e-6
+        } else {
+            n_sigmas * 1.4826 * mad
+        };
+        if (values[i] - med).abs() > thresh {
+            keep[i] = false;
+        }
+    }
+    keep
+}
+
+pub fn hard_gate_battery(v: f32) -> bool {
+    (2500.0..=4500.0).contains(&v)
+}
+
+pub fn hard_gate_rf_dbm(v: f32) -> bool {
+    v != 0.0 && (-150.0..=-1.0).contains(&v)
+}
+
+pub fn hard_gate_snr(v: f32) -> bool {
+    (-30.0..=30.0).contains(&v)
+}
+
+pub fn hard_gate_queue(v: f32) -> bool {
+    (0.0..=256.0).contains(&v)
+}
+
+pub fn hard_gate_rate(v: f32) -> bool {
+    v.is_finite() && v >= 0.0
+}
+
+/// Display-only outlier filter: hard gate, then Hampel when n≥5.
+pub fn filter_outliers(values: &[f32], gate: fn(f32) -> bool) -> (Vec<f32>, usize) {
+    let gated: Vec<f32> = values.iter().copied().filter(|&v| gate(v)).collect();
+    let dropped_gate = values.len().saturating_sub(gated.len());
+    if gated.len() < 5 {
+        return (gated, dropped_gate);
+    }
+    let keep = hampel_keep_mask(&gated, 2, 3.0);
+    let out: Vec<f32> = gated
+        .iter()
+        .zip(keep.iter())
+        .filter_map(|(v, k)| k.then_some(*v))
+        .collect();
+    let dropped = dropped_gate + gated.len().saturating_sub(out.len());
+    (out, dropped)
+}
+
+/// Same as [`filter_outliers`] but keeps labels aligned with surviving values.
+pub fn filter_outliers_labeled(
+    values: &[f32],
+    labels: &[String],
+    gate: fn(f32) -> bool,
+) -> (Vec<f32>, Vec<String>, usize) {
+    let mut gated_vals = Vec::new();
+    let mut gated_labels = Vec::new();
+    for (i, &v) in values.iter().enumerate() {
+        if gate(v) {
+            gated_vals.push(v);
+            gated_labels.push(
+                labels
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| format!("#{}", i + 1)),
+            );
+        }
+    }
+    let dropped_gate = values.len().saturating_sub(gated_vals.len());
+    if gated_vals.len() < 5 {
+        return (gated_vals, gated_labels, dropped_gate);
+    }
+    let keep = hampel_keep_mask(&gated_vals, 2, 3.0);
+    let mut out_vals = Vec::new();
+    let mut out_labels = Vec::new();
+    for (i, k) in keep.iter().enumerate() {
+        if *k {
+            out_vals.push(gated_vals[i]);
+            out_labels.push(gated_labels[i].clone());
+        }
+    }
+    let dropped = dropped_gate + gated_vals.len().saturating_sub(out_vals.len());
+    (out_vals, out_labels, dropped)
 }
 
 /// Prefer first verified claim, else first claim.
@@ -201,6 +386,32 @@ fn KpiModeChoice(
 }
 
 #[component]
+fn KpiStarButton(id: &'static str, favorites: Vec<String>, ontoggle: EventHandler<String>) -> Element {
+    let starred = favorites.iter().any(|f| f == id);
+    let title = if starred {
+        "Remove from favorites"
+    } else {
+        "Add to favorites"
+    };
+    rsx! {
+        button {
+            r#type: "button",
+            class: if starred {
+                "overview-kpi-star overview-kpi-star--on"
+            } else {
+                "overview-kpi-star"
+            },
+            title: "{title}",
+            onclick: move |evt: MouseEvent| {
+                evt.stop_propagation();
+                ontoggle.call(id.to_string());
+            },
+            if starred { "★" } else { "☆" }
+        }
+    }
+}
+
+#[component]
 pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
     let mut tick = use_signal(|| 0u64);
     let mut refresh_busy = use_signal(|| false);
@@ -215,6 +426,9 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
     });
     let mut queue_mode = use_signal(|| {
         normalize_kpi_mode(&load_setting_or(SETTING_QUEUE_MODE, "chart")).to_string()
+    });
+    let mut kpi_favorites = use_signal(|| {
+        parse_kpi_favorites(&load_setting_or(SETTING_KPI_FAVORITES, DEFAULT_KPI_FAVORITES))
     });
     let _ = tick();
 
@@ -594,13 +808,15 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
                     let key = row.pubkey.clone();
                     let key_refresh = key.clone();
                     let key_open = key.clone();
-                    let battery_vals: Vec<f32> =
+                    let point_labels_raw: Vec<String> =
+                        samples.iter().map(|s| format_time(Some(s.at))).collect();
+                    let battery_raw: Vec<f32> =
                         samples.iter().map(|s| s.battery_mv as f32).collect();
-                    let noise_vals: Vec<f32> =
+                    let noise_raw: Vec<f32> =
                         samples.iter().map(|s| s.noise_floor as f32).collect();
-                    let rssi_vals: Vec<f32> =
+                    let rssi_raw: Vec<f32> =
                         samples.iter().map(|s| s.last_rssi as f32).collect();
-                    let snr_vals: Vec<f32> = samples.iter().map(|s| s.snr as f32).collect();
+                    let snr_raw: Vec<f32> = samples.iter().map(|s| s.snr as f32).collect();
                     let queue_points: Vec<(String, f32)> = samples
                         .iter()
                         .filter_map(|s| {
@@ -608,36 +824,113 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
                                 .map(|v| (format_time(Some(s.at)), v as f32))
                         })
                         .collect();
-                    let queue_vals: Vec<f32> =
+                    let queue_raw: Vec<f32> =
                         queue_points.iter().map(|(_, v)| *v).collect();
-                    let queue_labels: Vec<String> =
+                    let queue_labels_raw: Vec<String> =
                         queue_points.iter().map(|(l, _)| l.clone()).collect();
-                    let recv_rate = counter_delta_per_hour(
-                        samples.iter().map(|s| (s.at, s.nb_recv)).collect(),
+
+                    let (battery_vals, battery_labels, d_batt) = filter_outliers_labeled(
+                        &battery_raw,
+                        &point_labels_raw,
+                        hard_gate_battery,
                     );
-                    let flood_rate = counter_delta_per_hour(
-                        samples.iter().map(|s| (s.at, s.flood_sent)).collect(),
+                    let (noise_vals, noise_labels, d_noise) =
+                        filter_outliers_labeled(&noise_raw, &point_labels_raw, hard_gate_rf_dbm);
+                    let (rssi_vals, rssi_labels, d_rssi) =
+                        filter_outliers_labeled(&rssi_raw, &point_labels_raw, hard_gate_rf_dbm);
+                    let (snr_vals, snr_labels, d_snr) =
+                        filter_outliers_labeled(&snr_raw, &point_labels_raw, hard_gate_snr);
+                    let (queue_vals, queue_labels, d_queue) =
+                        filter_outliers_labeled(&queue_raw, &queue_labels_raw, hard_gate_queue);
+
+                    let (recv_rate, d_recv) = filter_outliers(
+                        &counter_delta_per_hour(
+                            samples.iter().map(|s| (s.at, s.nb_recv)).collect(),
+                        ),
+                        hard_gate_rate,
                     );
-                    let direct_rate = counter_delta_per_hour(
-                        samples.iter().map(|s| (s.at, s.direct_sent)).collect(),
+                    let (flood_rate, d_flood) = filter_outliers(
+                        &counter_delta_per_hour(
+                            samples.iter().map(|s| (s.at, s.flood_sent)).collect(),
+                        ),
+                        hard_gate_rate,
                     );
-                    let air_pct = airtime_pct_series(
-                        &samples
-                            .iter()
-                            .map(|s| (s.at, s.airtime_ms, s.rx_airtime_ms))
-                            .collect::<Vec<_>>(),
+                    let (direct_rate, d_direct) = filter_outliers(
+                        &counter_delta_per_hour(
+                            samples.iter().map(|s| (s.at, s.direct_sent)).collect(),
+                        ),
+                        hard_gate_rate,
                     );
-                    let chart_labels: Vec<String> = {
-                        let n = samples.len();
-                        samples
+                    let (air_pct, d_air) = filter_outliers(
+                        &airtime_pct_series(
+                            &samples
+                                .iter()
+                                .map(|s| (s.at, s.airtime_ms, s.rx_airtime_ms))
+                                .collect::<Vec<_>>(),
+                        ),
+                        hard_gate_rate,
+                    );
+                    let outliers_hidden = d_batt
+                        + d_noise
+                        + d_rssi
+                        + d_snr
+                        + d_queue
+                        + d_recv
+                        + d_flood
+                        + d_direct
+                        + d_air;
+
+                    // Time-aligned RF chart: keep sample indices that pass all RF hard gates,
+                    // then Hampel each series and drop an index if any metric flags it.
+                    let mut rf_noise = Vec::new();
+                    let mut rf_rssi = Vec::new();
+                    let mut rf_snr = Vec::new();
+                    let mut rf_labels_gated = Vec::new();
+                    for (i, s) in samples.iter().enumerate() {
+                        let n = s.noise_floor as f32;
+                        let r = s.last_rssi as f32;
+                        let sn = s.snr as f32;
+                        if hard_gate_rf_dbm(n) && hard_gate_rf_dbm(r) && hard_gate_snr(sn) {
+                            rf_noise.push(n);
+                            rf_rssi.push(r);
+                            rf_snr.push(sn);
+                            rf_labels_gated.push(
+                                point_labels_raw
+                                    .get(i)
+                                    .cloned()
+                                    .unwrap_or_else(|| format!("#{}", i + 1)),
+                            );
+                        }
+                    }
+                    let (noise_chart, rssi_chart, snr_chart, rf_labels) = if rf_noise.len() < 5 {
+                        (rf_noise, rf_rssi, rf_snr, rf_labels_gated)
+                    } else {
+                        let kn = hampel_keep_mask(&rf_noise, 2, 3.0);
+                        let kr = hampel_keep_mask(&rf_rssi, 2, 3.0);
+                        let ks = hampel_keep_mask(&rf_snr, 2, 3.0);
+                        let mut n_out = Vec::new();
+                        let mut r_out = Vec::new();
+                        let mut s_out = Vec::new();
+                        let mut l_out = Vec::new();
+                        for i in 0..rf_noise.len() {
+                            if kn[i] && kr[i] && ks[i] {
+                                n_out.push(rf_noise[i]);
+                                r_out.push(rf_rssi[i]);
+                                s_out.push(rf_snr[i]);
+                                l_out.push(rf_labels_gated[i].clone());
+                            }
+                        }
+                        (n_out, r_out, s_out, l_out)
+                    };
+                    let rf_chart_labels: Vec<String> = {
+                        let n = rf_labels.len();
+                        rf_labels
                             .iter()
                             .enumerate()
                             .filter(|(i, _)| n <= 4 || *i == 0 || *i == n / 2 || *i + 1 == n)
-                            .map(|(_, s)| format_time(Some(s.at)))
+                            .map(|(_, s)| s.clone())
                             .collect()
                     };
-                    let point_labels: Vec<String> =
-                        samples.iter().map(|s| format_time(Some(s.at))).collect();
                     let packet_rows = latest
                         .as_ref()
                         .map(|s| {
@@ -664,6 +957,8 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
                         .iter()
                         .map(|r| (r.pubkey.clone(), claim_title(r, &nodes)))
                         .collect();
+                    let kpi_order = ordered_kpi_ids(&kpi_favorites());
+                    let favs_now = kpi_favorites();
 
                     rsx! {
                         section { class: "overview-repeater-detail",
@@ -819,187 +1114,256 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
                                     let queue_gauge_max = (queue_n as f32).max(16.0);
                                     let batt_mode = normalize_kpi_mode(&battery_mode());
                                     let q_mode = normalize_kpi_mode(&queue_mode());
+                                    let on_star = move |id: String| {
+                                        let next = toggle_kpi_favorite(&kpi_favorites(), &id);
+                                        let _ = state()
+                                            .db
+                                            .set_setting(SETTING_KPI_FAVORITES, &serialize_kpi_favorites(&next));
+                                        kpi_favorites.set(next);
+                                    };
                                     rsx! {
                                         div { class: "mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5",
-                                            div { class: "overview-fleet-tile overview-fleet-tile--battery",
-                                                div { class: "overview-kpi-tile-head",
-                                                    p { class: "overview-fleet-tile__label", "Battery" }
-                                                    div { class: "overview-kpi-mode-row",
-                                                        KpiModeChoice {
-                                                            label: "Chart",
-                                                            value: "chart",
-                                                            current: battery_mode(),
-                                                            onpick: move |value: String| {
-                                                                let id = normalize_kpi_mode(&value).to_string();
-                                                                let _ = state().db.set_setting(SETTING_BATTERY_MODE, &id);
-                                                                battery_mode.set(id);
-                                                            },
-                                                        }
-                                                        KpiModeChoice {
-                                                            label: "Gauge",
-                                                            value: "gauge",
-                                                            current: battery_mode(),
-                                                            onpick: move |value: String| {
-                                                                let id = normalize_kpi_mode(&value).to_string();
-                                                                let _ = state().db.set_setting(SETTING_BATTERY_MODE, &id);
-                                                                battery_mode.set(id);
-                                                            },
-                                                        }
-                                                        KpiModeChoice {
-                                                            label: "#",
-                                                            value: "numeric",
-                                                            current: battery_mode(),
-                                                            onpick: move |value: String| {
-                                                                let id = normalize_kpi_mode(&value).to_string();
-                                                                let _ = state().db.set_setting(SETTING_BATTERY_MODE, &id);
-                                                                battery_mode.set(id);
-                                                            },
-                                                        }
-                                                    }
-                                                }
-                                                p { class: "overview-fleet-tile__value overview-fleet-tile__value--sm", "{pct}%" }
-                                                p { class: "text-[0.7rem] text-muted-foreground tabular-nums", "{s.battery_mv} mV" }
-                                                if batt_mode == "chart" && !battery_vals.is_empty() {
-                                                    div { class: "overview-kpi-spark",
-                                                        Sparkline {
-                                                            values: battery_vals.clone(),
-                                                            tone: "batt".to_string(),
-                                                            zero_based: false,
-                                                            labels: point_labels.clone(),
-                                                            value_suffix: "mV".to_string(),
-                                                        }
-                                                    }
-                                                } else if batt_mode == "gauge" {
-                                                    div { class: "overview-kpi-gauge",
-                                                        Gauge {
-                                                            value: pct as f32,
-                                                            min: 0.0,
-                                                            max: 100.0,
-                                                            tone: "batt".to_string(),
-                                                        }
+                                            for kpi_id in kpi_order.iter().copied() {
+                                                {
+                                                    let favs = favs_now.clone();
+                                                    match kpi_id {
+                                                        "battery" => rsx! {
+                                                            div { class: "overview-fleet-tile overview-fleet-tile--battery",
+                                                                div { class: "overview-kpi-tile-head",
+                                                                    p { class: "overview-fleet-tile__label", "Battery" }
+                                                                    div { class: "overview-kpi-mode-row",
+                                                                        KpiStarButton {
+                                                                            id: "battery",
+                                                                            favorites: favs.clone(),
+                                                                            ontoggle: on_star,
+                                                                        }
+                                                                        KpiModeChoice {
+                                                                            label: "Chart",
+                                                                            value: "chart",
+                                                                            current: battery_mode(),
+                                                                            onpick: move |value: String| {
+                                                                                let id = normalize_kpi_mode(&value).to_string();
+                                                                                let _ = state().db.set_setting(SETTING_BATTERY_MODE, &id);
+                                                                                battery_mode.set(id);
+                                                                            },
+                                                                        }
+                                                                        KpiModeChoice {
+                                                                            label: "Gauge",
+                                                                            value: "gauge",
+                                                                            current: battery_mode(),
+                                                                            onpick: move |value: String| {
+                                                                                let id = normalize_kpi_mode(&value).to_string();
+                                                                                let _ = state().db.set_setting(SETTING_BATTERY_MODE, &id);
+                                                                                battery_mode.set(id);
+                                                                            },
+                                                                        }
+                                                                        KpiModeChoice {
+                                                                            label: "#",
+                                                                            value: "numeric",
+                                                                            current: battery_mode(),
+                                                                            onpick: move |value: String| {
+                                                                                let id = normalize_kpi_mode(&value).to_string();
+                                                                                let _ = state().db.set_setting(SETTING_BATTERY_MODE, &id);
+                                                                                battery_mode.set(id);
+                                                                            },
+                                                                        }
+                                                                    }
+                                                                }
+                                                                p { class: "overview-fleet-tile__value overview-fleet-tile__value--sm", "{pct}%" }
+                                                                p { class: "text-[0.7rem] text-muted-foreground tabular-nums", "{s.battery_mv} mV" }
+                                                                if batt_mode == "chart" && !battery_vals.is_empty() {
+                                                                    div { class: "overview-kpi-spark",
+                                                                        Sparkline {
+                                                                            values: battery_vals.clone(),
+                                                                            tone: "batt".to_string(),
+                                                                            zero_based: false,
+                                                                            labels: battery_labels.clone(),
+                                                                            value_suffix: "mV".to_string(),
+                                                                        }
+                                                                    }
+                                                                } else if batt_mode == "gauge" {
+                                                                    div { class: "overview-kpi-gauge",
+                                                                        Gauge {
+                                                                            value: pct as f32,
+                                                                            min: 0.0,
+                                                                            max: 100.0,
+                                                                            tone: "batt".to_string(),
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        },
+                                                        "noise" => rsx! {
+                                                            div { class: "overview-fleet-tile overview-fleet-tile--noise",
+                                                                div { class: "overview-kpi-tile-head",
+                                                                    p { class: "overview-fleet-tile__label", "Noise" }
+                                                                    KpiStarButton {
+                                                                        id: "noise",
+                                                                        favorites: favs.clone(),
+                                                                        ontoggle: on_star,
+                                                                    }
+                                                                }
+                                                                p { class: "overview-fleet-tile__value overview-fleet-tile__value--sm", "{s.noise_floor} dBm" }
+                                                                if !noise_vals.is_empty() {
+                                                                    div { class: "overview-kpi-spark",
+                                                                        Sparkline {
+                                                                            values: noise_vals.clone(),
+                                                                            tone: "pending".to_string(),
+                                                                            zero_based: false,
+                                                                            labels: noise_labels.clone(),
+                                                                            value_suffix: "dBm".to_string(),
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        },
+                                                        "rssi" => rsx! {
+                                                            div { class: "overview-fleet-tile overview-fleet-tile--rssi",
+                                                                div { class: "overview-kpi-tile-head",
+                                                                    p { class: "overview-fleet-tile__label", "RSSI" }
+                                                                    KpiStarButton {
+                                                                        id: "rssi",
+                                                                        favorites: favs.clone(),
+                                                                        ontoggle: on_star,
+                                                                    }
+                                                                }
+                                                                p { class: "overview-fleet-tile__value overview-fleet-tile__value--sm", "{s.last_rssi}" }
+                                                                if !rssi_vals.is_empty() {
+                                                                    div { class: "overview-kpi-spark",
+                                                                        Sparkline {
+                                                                            values: rssi_vals.clone(),
+                                                                            tone: "ok".to_string(),
+                                                                            zero_based: false,
+                                                                            labels: rssi_labels.clone(),
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        },
+                                                        "snr" => rsx! {
+                                                            div { class: "overview-fleet-tile overview-fleet-tile--snr",
+                                                                div { class: "overview-kpi-tile-head",
+                                                                    p { class: "overview-fleet-tile__label", "SNR" }
+                                                                    KpiStarButton {
+                                                                        id: "snr",
+                                                                        favorites: favs.clone(),
+                                                                        ontoggle: on_star,
+                                                                    }
+                                                                }
+                                                                p { class: "overview-fleet-tile__value overview-fleet-tile__value--sm", "{s.snr:.1}" }
+                                                                if !snr_vals.is_empty() {
+                                                                    div { class: "overview-kpi-spark",
+                                                                        Sparkline {
+                                                                            values: snr_vals.clone(),
+                                                                            tone: "rx".to_string(),
+                                                                            zero_based: false,
+                                                                            labels: snr_labels.clone(),
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        },
+                                                        "tx" => rsx! {
+                                                            div { class: "overview-fleet-tile overview-fleet-tile--tx",
+                                                                p { class: "overview-fleet-tile__label", "TX power" }
+                                                                p { class: "overview-fleet-tile__value overview-fleet-tile__value--sm", "{tx}" }
+                                                                if !tx_known {
+                                                                    p { class: "text-[0.65rem] text-muted-foreground",
+                                                                        "Not in binary status — set via Infra radio CLI"
+                                                                    }
+                                                                }
+                                                            }
+                                                        },
+                                                        "uptime" => rsx! {
+                                                            div { class: "overview-fleet-tile overview-fleet-tile--uptime",
+                                                                p { class: "overview-fleet-tile__label", "Uptime" }
+                                                                p { class: "overview-fleet-tile__value overview-fleet-tile__value--sm", "{format_infra_uptime(s.uptime_s)}" }
+                                                            }
+                                                        },
+                                                        "air_tx" => rsx! {
+                                                            div { class: "overview-fleet-tile overview-fleet-tile--air-tx",
+                                                                p { class: "overview-fleet-tile__label", "Airtime TX" }
+                                                                p { class: "overview-fleet-tile__value overview-fleet-tile__value--sm", "{format_infra_airtime(s.airtime_ms)}" }
+                                                            }
+                                                        },
+                                                        "air_rx" => rsx! {
+                                                            div { class: "overview-fleet-tile overview-fleet-tile--air-rx",
+                                                                p { class: "overview-fleet-tile__label", "Airtime RX" }
+                                                                p { class: "overview-fleet-tile__value overview-fleet-tile__value--sm", "{format_infra_airtime(s.rx_airtime_ms)}" }
+                                                            }
+                                                        },
+                                                        "queue" => rsx! {
+                                                            div { class: "overview-fleet-tile overview-fleet-tile--queue",
+                                                                div { class: "overview-kpi-tile-head",
+                                                                    p { class: "overview-fleet-tile__label", "Queue" }
+                                                                    div { class: "overview-kpi-mode-row",
+                                                                        KpiStarButton {
+                                                                            id: "queue",
+                                                                            favorites: favs.clone(),
+                                                                            ontoggle: on_star,
+                                                                        }
+                                                                        KpiModeChoice {
+                                                                            label: "Chart",
+                                                                            value: "chart",
+                                                                            current: queue_mode(),
+                                                                            onpick: move |value: String| {
+                                                                                let id = normalize_kpi_mode(&value).to_string();
+                                                                                let _ = state().db.set_setting(SETTING_QUEUE_MODE, &id);
+                                                                                queue_mode.set(id);
+                                                                            },
+                                                                        }
+                                                                        KpiModeChoice {
+                                                                            label: "Gauge",
+                                                                            value: "gauge",
+                                                                            current: queue_mode(),
+                                                                            onpick: move |value: String| {
+                                                                                let id = normalize_kpi_mode(&value).to_string();
+                                                                                let _ = state().db.set_setting(SETTING_QUEUE_MODE, &id);
+                                                                                queue_mode.set(id);
+                                                                            },
+                                                                        }
+                                                                        KpiModeChoice {
+                                                                            label: "#",
+                                                                            value: "numeric",
+                                                                            current: queue_mode(),
+                                                                            onpick: move |value: String| {
+                                                                                let id = normalize_kpi_mode(&value).to_string();
+                                                                                let _ = state().db.set_setting(SETTING_QUEUE_MODE, &id);
+                                                                                queue_mode.set(id);
+                                                                            },
+                                                                        }
+                                                                    }
+                                                                }
+                                                                p { class: "overview-fleet-tile__value overview-fleet-tile__value--sm", "{queue}" }
+                                                                if q_mode == "chart" && !queue_vals.is_empty() {
+                                                                    div { class: "overview-kpi-spark",
+                                                                        Sparkline {
+                                                                            values: queue_vals.clone(),
+                                                                            tone: "warn".to_string(),
+                                                                            zero_based: true,
+                                                                            labels: queue_labels.clone(),
+                                                                        }
+                                                                    }
+                                                                } else if q_mode == "gauge" {
+                                                                    div { class: "overview-kpi-gauge",
+                                                                        Gauge {
+                                                                            value: queue_n as f32,
+                                                                            min: 0.0,
+                                                                            max: queue_gauge_max,
+                                                                            tone: "warn".to_string(),
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        },
+                                                        _ => rsx! {},
                                                     }
                                                 }
                                             }
-                                            div { class: "overview-fleet-tile overview-fleet-tile--noise",
-                                                p { class: "overview-fleet-tile__label", "Noise" }
-                                                p { class: "overview-fleet-tile__value overview-fleet-tile__value--sm", "{s.noise_floor} dBm" }
-                                                if !noise_vals.is_empty() {
-                                                    div { class: "overview-kpi-spark",
-                                                        Sparkline {
-                                                            values: noise_vals.clone(),
-                                                            tone: "pending".to_string(),
-                                                            zero_based: false,
-                                                            labels: point_labels.clone(),
-                                                            value_suffix: "dBm".to_string(),
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            div { class: "overview-fleet-tile overview-fleet-tile--rssi",
-                                                p { class: "overview-fleet-tile__label", "RSSI" }
-                                                p { class: "overview-fleet-tile__value overview-fleet-tile__value--sm", "{s.last_rssi}" }
-                                                if !rssi_vals.is_empty() {
-                                                    div { class: "overview-kpi-spark",
-                                                        Sparkline {
-                                                            values: rssi_vals.clone(),
-                                                            tone: "ok".to_string(),
-                                                            zero_based: false,
-                                                            labels: point_labels.clone(),
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            div { class: "overview-fleet-tile overview-fleet-tile--snr",
-                                                p { class: "overview-fleet-tile__label", "SNR" }
-                                                p { class: "overview-fleet-tile__value overview-fleet-tile__value--sm", "{s.snr:.1}" }
-                                                if !snr_vals.is_empty() {
-                                                    div { class: "overview-kpi-spark",
-                                                        Sparkline {
-                                                            values: snr_vals.clone(),
-                                                            tone: "rx".to_string(),
-                                                            zero_based: false,
-                                                            labels: point_labels.clone(),
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            div { class: "overview-fleet-tile overview-fleet-tile--tx",
-                                                p { class: "overview-fleet-tile__label", "TX power" }
-                                                p { class: "overview-fleet-tile__value overview-fleet-tile__value--sm", "{tx}" }
-                                                if !tx_known {
-                                                    p { class: "text-[0.65rem] text-muted-foreground",
-                                                        "Not in binary status — set via Infra radio CLI"
-                                                    }
-                                                }
-                                            }
-                                            div { class: "overview-fleet-tile overview-fleet-tile--uptime",
-                                                p { class: "overview-fleet-tile__label", "Uptime" }
-                                                p { class: "overview-fleet-tile__value overview-fleet-tile__value--sm", "{format_infra_uptime(s.uptime_s)}" }
-                                            }
-                                            div { class: "overview-fleet-tile overview-fleet-tile--air-tx",
-                                                p { class: "overview-fleet-tile__label", "Airtime TX" }
-                                                p { class: "overview-fleet-tile__value overview-fleet-tile__value--sm", "{format_infra_airtime(s.airtime_ms)}" }
-                                            }
-                                            div { class: "overview-fleet-tile overview-fleet-tile--air-rx",
-                                                p { class: "overview-fleet-tile__label", "Airtime RX" }
-                                                p { class: "overview-fleet-tile__value overview-fleet-tile__value--sm", "{format_infra_airtime(s.rx_airtime_ms)}" }
-                                            }
-                                            div { class: "overview-fleet-tile overview-fleet-tile--queue",
-                                                div { class: "overview-kpi-tile-head",
-                                                    p { class: "overview-fleet-tile__label", "Queue" }
-                                                    div { class: "overview-kpi-mode-row",
-                                                        KpiModeChoice {
-                                                            label: "Chart",
-                                                            value: "chart",
-                                                            current: queue_mode(),
-                                                            onpick: move |value: String| {
-                                                                let id = normalize_kpi_mode(&value).to_string();
-                                                                let _ = state().db.set_setting(SETTING_QUEUE_MODE, &id);
-                                                                queue_mode.set(id);
-                                                            },
-                                                        }
-                                                        KpiModeChoice {
-                                                            label: "Gauge",
-                                                            value: "gauge",
-                                                            current: queue_mode(),
-                                                            onpick: move |value: String| {
-                                                                let id = normalize_kpi_mode(&value).to_string();
-                                                                let _ = state().db.set_setting(SETTING_QUEUE_MODE, &id);
-                                                                queue_mode.set(id);
-                                                            },
-                                                        }
-                                                        KpiModeChoice {
-                                                            label: "#",
-                                                            value: "numeric",
-                                                            current: queue_mode(),
-                                                            onpick: move |value: String| {
-                                                                let id = normalize_kpi_mode(&value).to_string();
-                                                                let _ = state().db.set_setting(SETTING_QUEUE_MODE, &id);
-                                                                queue_mode.set(id);
-                                                            },
-                                                        }
-                                                    }
-                                                }
-                                                p { class: "overview-fleet-tile__value overview-fleet-tile__value--sm", "{queue}" }
-                                                if q_mode == "chart" && !queue_vals.is_empty() {
-                                                    div { class: "overview-kpi-spark",
-                                                        Sparkline {
-                                                            values: queue_vals.clone(),
-                                                            tone: "warn".to_string(),
-                                                            zero_based: true,
-                                                            labels: queue_labels.clone(),
-                                                        }
-                                                    }
-                                                } else if q_mode == "gauge" {
-                                                    div { class: "overview-kpi-gauge",
-                                                        Gauge {
-                                                            value: queue_n as f32,
-                                                            min: 0.0,
-                                                            max: queue_gauge_max,
-                                                            tone: "warn".to_string(),
-                                                        }
-                                                    }
-                                                }
+                                        }
+                                        if outliers_hidden > 0 {
+                                            p { class: "mt-2 text-[0.7rem] text-muted-foreground",
+                                                "Hidden {outliers_hidden} outlier sample(s) from charts"
                                             }
                                         }
                                     }
@@ -1026,22 +1390,22 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
                                                 ChartSeries {
                                                     label: "Noise".to_string(),
                                                     tone: "pending".to_string(),
-                                                    values: noise_vals.clone(),
+                                                    values: noise_chart.clone(),
                                                 },
                                                 ChartSeries {
                                                     label: "RSSI".to_string(),
                                                     tone: "ok".to_string(),
-                                                    values: rssi_vals.clone(),
+                                                    values: rssi_chart.clone(),
                                                 },
                                                 ChartSeries {
                                                     label: "SNR".to_string(),
                                                     tone: "rx".to_string(),
-                                                    values: snr_vals.clone(),
+                                                    values: snr_chart.clone(),
                                                 },
                                             ],
                                             height: 140.0,
-                                            labels: chart_labels.clone(),
-                                            point_labels: point_labels.clone(),
+                                            labels: rf_chart_labels.clone(),
+                                            point_labels: rf_labels.clone(),
                                             zero_based: false,
                                         }
                                     }
@@ -1054,22 +1418,22 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
                                                 ChartSeries {
                                                     label: "Recv".to_string(),
                                                     tone: "rx".to_string(),
-                                                    values: recv_rate,
+                                                    values: recv_rate.clone(),
                                                 },
                                                 ChartSeries {
                                                     label: "Flood TX".to_string(),
                                                     tone: "tx".to_string(),
-                                                    values: flood_rate,
+                                                    values: flood_rate.clone(),
                                                 },
                                                 ChartSeries {
                                                     label: "Direct TX".to_string(),
                                                     tone: "signal".to_string(),
-                                                    values: direct_rate,
+                                                    values: direct_rate.clone(),
                                                 },
                                             ],
                                             height: 140.0,
-                                            labels: chart_labels.clone(),
-                                            point_labels: point_labels.clone(),
+                                            labels: Vec::new(),
+                                            point_labels: Vec::new(),
                                             zero_based: true,
                                         }
                                     }
@@ -1082,12 +1446,12 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
                                                 ChartSeries {
                                                     label: "Airtime %".to_string(),
                                                     tone: "air".to_string(),
-                                                    values: air_pct,
+                                                    values: air_pct.clone(),
                                                 },
                                             ],
                                             height: 120.0,
-                                            labels: chart_labels.clone(),
-                                            point_labels: point_labels.clone(),
+                                            labels: Vec::new(),
+                                            point_labels: Vec::new(),
                                             zero_based: true,
                                         }
                                     }
@@ -1172,5 +1536,67 @@ mod tests {
         assert_eq!(normalize_kpi_mode("chart"), "chart");
         assert_eq!(normalize_kpi_mode(""), "chart");
         assert_eq!(normalize_kpi_mode("spark"), "chart");
+    }
+
+    #[test]
+    fn kpi_favorites_parse_toggle_order() {
+        let favs = parse_kpi_favorites("snr,battery,nope,snr");
+        assert_eq!(favs, vec!["snr".to_string(), "battery".to_string()]);
+        let toggled = toggle_kpi_favorite(&favs, "noise");
+        assert_eq!(
+            toggled,
+            vec![
+                "snr".to_string(),
+                "battery".to_string(),
+                "noise".to_string()
+            ]
+        );
+        let removed = toggle_kpi_favorite(&toggled, "snr");
+        assert_eq!(
+            removed,
+            vec!["battery".to_string(), "noise".to_string()]
+        );
+        assert_eq!(parse_kpi_favorites(""), parse_kpi_favorites(DEFAULT_KPI_FAVORITES));
+        let order = ordered_kpi_ids(&["queue".into(), "battery".into()]);
+        assert_eq!(order.first().copied(), Some("queue"));
+        assert_eq!(order.get(1).copied(), Some("battery"));
+        assert!(order.contains(&"tx"));
+        assert_eq!(
+            serialize_kpi_favorites(&["battery".into(), "bogus".into(), "snr".into()]),
+            "battery,snr"
+        );
+    }
+
+    #[test]
+    fn hard_gates_reject_bad_values() {
+        assert!(!hard_gate_battery(0.0));
+        assert!(!hard_gate_battery(9000.0));
+        assert!(hard_gate_battery(3800.0));
+        assert!(!hard_gate_rf_dbm(0.0));
+        assert!(!hard_gate_rf_dbm(10.0));
+        assert!(hard_gate_rf_dbm(-100.0));
+        assert!(!hard_gate_snr(100.0));
+        assert!(hard_gate_snr(2.2));
+        assert!(!hard_gate_queue(999.0));
+        assert!(hard_gate_queue(0.0));
+    }
+
+    #[test]
+    fn hampel_drops_single_spike_in_flat_series() {
+        let values = vec![10.0, 10.0, 10.0, 10.0, 10.0, 500.0, 10.0, 10.0, 10.0, 10.0];
+        let keep = hampel_keep_mask(&values, 2, 3.0);
+        assert!(!keep[5], "spike at index 5 should be flagged");
+        assert!(keep.iter().filter(|k| **k).count() >= 8);
+    }
+
+    #[test]
+    fn filter_outliers_skips_hampel_when_few_points() {
+        let values = vec![10.0, 500.0, 10.0];
+        let (out, dropped) = filter_outliers(&values, hard_gate_rate);
+        assert_eq!(out, values);
+        assert_eq!(dropped, 0);
+        let (gated, d) = filter_outliers(&[0.0, -100.0, -95.0], hard_gate_rf_dbm);
+        assert_eq!(gated, vec![-100.0, -95.0]);
+        assert_eq!(d, 1);
     }
 }

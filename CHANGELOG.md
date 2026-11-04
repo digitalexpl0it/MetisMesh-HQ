@@ -7,6 +7,8 @@
 - Fleet dashboard: summary tiles, compact claim cards, **Details for** dropdown with KPIs + charts
 - L1: detail chart window chips **15m / 1h / 6h / 24h / 7d** (persisted `overview_repeater_chart_window`)
 - L2: Battery and Queue KPI modes **Chart / Gauge / Numeric** (persisted); new SVG `Gauge` widget
+- L4: star detail KPI tiles (Battery/Noise/RSSI/SNR/Queue); starred order persists as `overview_repeater_kpi_favorites`
+- L4: display-only hard gates + Hampel MAD filter on spark/RF/rate series; note when outliers are hidden; latest KPI values stay raw
 - KPI sparklines use probe timestamps on hover (not `#N` sample index); Overview companion stats likewise use hour labels + units
 - Duplicate full Battery chart under repeater KPIs removed (tile Chart mode is the battery trend)
 - TX power shows a hint when missing from binary status (Infra radio CLI / prior value)
@@ -17,6 +19,7 @@
 - Path fetch listens for advert-path / PathUpdate, fails fast on cache miss, falls back to contact `out_path` / direct / last stored path
 - Passive **Traffic** edge overlay from overheard message paths (All GPS vs Tracked/Claimed)
 - Map Filter / Settings menus; Selected label next to Trace
+- Legend badge counts for HQ / Chat / Repeater / Room / Sensor pins and solid / dashed path lines (respects current filters)
 
 ### Messages · badges
 

@@ -8,17 +8,20 @@ Churches, neighborhoods, and volunteer groups run this on a regular computer sit
 
 ## What it does
 
-- Talks to MeshCore companions over **Bluetooth**, **USB serial**, or **TCP** (Wi-Fi / Ethernet, default port 5000) on one radio pool
-- Enrolls devices, hands out private channel secrets, and runs a local bot
-- Overview status chips (alerts, radio pool, backup/firmware, unread/mentions/channel/DM totals) with live pulse when something needs attention
-- Keeps a roster of everyone heard on the mesh, whether they enrolled or not
-- Claims and admin-verifies infrastructure (repeaters / rooms / sensors) over LoRa through the primary companion
-- Maps nodes with MapLibre + a local style (and optional PMTiles offline packs)
-- Tracks an operator whitelist of devices expected to share GPS (Tracker)
-- Offline firmware locker + USB flasher (checksums, Ready-for-outage status, export/import `.zip` pack); encrypted HQ backup/restore
-- In-app **Help** page (operators + shareable radio-user signup steps); volunteer offline runbook (`docs/OFFLINE_RUNBOOK.md` and Settings → About)
-- Stores messages and contacts in SQLite under the per-user data folder
-- Puts channel secrets in the OS keyring when it can; otherwise a locked-down file
+- **Radio pool** — connect MeshCore companions over Bluetooth, USB serial, or TCP (Wi-Fi / Ethernet, default port 5000); multiple radios with a primary that owns bot and enrollment traffic
+- **Enrollment** — approve join requests, hand out private channel secrets, run the local bot on METIS-INFO (`#weather`, `#quake`, `#amber`, and related commands)
+- **Messages** — public and private channels plus direct threads; unread and @mention tracking; optional per-channel look; block senders (including by channel display name)
+- **Inbox** — pending signups and held community alerts (weather / Amber / civil) for operator confirm or auto-relay
+- **Roster** — everyone heard on the mesh (enrolled or not); contact QR; clear NEW / prune heard-only
+- **Map** — MapLibre with a local style (optional PMTiles offline packs); live pins, message sonar, and tracked movers
+- **Weather** — Open-Meteo and local stations (MQTT / Ecowitt); operator Weather page plus mesh bot replies
+- **Infrastructure** — claim and admin-verify repeaters, rooms, and sensors; probe and remote CLI through the primary companion
+- **Tracker** — whitelist of devices expected to share GPS; trails and stale styling on the map
+- **CLI** — companion and remote device console for operators
+- **Firmware locker** — mirror community firmware while online; flash over USB when the internet is gone (Ready-for-outage, checksums, export/import pack)
+- **Backup** — passphrase-encrypted HQ archive (SQLite + channel secrets); restore with confirm
+- **Local-first storage** — SQLite under the per-user data folder; channel secrets in the OS keyring when possible (otherwise a locked-down file)
+- **Help** — in-app operator guide and shareable radio-user signup steps; offline runbook in `docs/OFFLINE_RUNBOOK.md` and Settings → About
 
 Communities stay separate until both headquarters agree to link. That bridge is not in this MVP yet — the data model leaves room for it.
 
@@ -124,6 +127,7 @@ Binary lands at `target/release/metis-mesh-hq` (`.exe` on Windows). MapLibre and
 | --- | --- |
 | `src/` | App, radio task, SQLite, map tiles, UI |
 | `assets/` | MapLibre, CSS, presets, offline map bits |
+| `Screenshots/` | README product shots |
 | profile data dir | Local DB + QR SVGs (`~/.MetisMeshHQ` on Linux; not in git) |
 | `.github/workflows/` | Cross-platform builds |
 

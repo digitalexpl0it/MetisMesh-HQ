@@ -1,11 +1,14 @@
 # Changelog
 
-## Unreleased — 2026-11-02
+## Unreleased
+
+## 0.1.3 — 2026-11-03
 
 ### Ship
 
 - Standalone Linux / Windows / macOS release binaries via CI (`cargo build --release`); tag `v*` publishes a GitHub Release
 - CI fixes: `libudev-dev` on Linux, Windows-safe USB by-id test, unique SQLite snapshot temp paths
+- Backup restore tests use a file-backed DB; WAL pragma allows in-memory only for unit-test connections
 - Data folder moved to the user profile: Linux `~/.MetisMeshHQ`, macOS `…/MetisMeshHQ`, Windows `%APPDATA%\MetisMeshHQ` (`METIS_DATA_DIR` still overrides)
 - SQLite WAL durability (H3): open/restore assert `journal_mode=wal`, `busy_timeout=5s`, `synchronous=NORMAL`; docs note `metis.db-wal` / `metis.db-shm` beside the main file
 - Default EmergHQ header logo embedded in the binary (release packages no longer show a broken image)
@@ -14,6 +17,7 @@
 - Windows WebView2 bootstrapper install uses PowerShell (`Invoke-WebRequest`) instead of the Rust HTTP client
 - Scan / Refresh USB buttons show a throbber while working (welcome + Settings)
 - Linux baseline is Ubuntu 26.04+ (CI job/artifact `ubuntu-26.04`); critical probe uses `libgtk-3-0t64`
+- `.cursor/` ignored for git (local plans/rules stay on disk)
 
 ### Radio pool
 
@@ -44,6 +48,14 @@
 - Channel/DM unread badges count received traffic only (HQ/bot TX no longer inflate “new”)
 - Firmware Manage Save & Close pinned in a sticky slide-down footer so they stay visible on short windows
 
+### Messages
+
+- Sliding newest-N message window with older-page load
+- HQ `@mention` badges on Messages / Overview
+- Channel Block by display name when no roster pubkey (MeshCore mobile parity); promote to pubkey when heard
+- Messages appearance: global + per-channel solid/gradient/opacity/text (Settings → Messages appearance; channel Look / rail gear)
+- Sender avatars and soft bubble tints; Keep control stays on one line with Look
+
 ### UX
 
 - In-app Help page (nav above Settings): operator guide + shareable radio-user signup/channel steps; Settings → About → Open Help
@@ -52,6 +64,17 @@
 - Zebra rows on Roster / Infrastructure / Tracker (`.row-zebra` in `form.css`)
 - GPS locate icon green within a week of last heard, red when older
 - Shell layout: opaque top bar + flex overflow so pages do not paint under the banner
+- Overview chips: system row (Alerts / Radio / Backup / Firmware) + messages row (Unread / Mentions / Channels / Direct); tone colors; sonar when Unread / Mentions / Direct are live; whole-card navigation
+- OverviewStat cards tinted and clickable (Roster / Inbox / Map / Messages)
+- README capability list + Overview screenshot (`Screenshots/overview.png`)
+
+## 0.1.2 — 2026-11-02
+
+- Map fixes and polish
+
+## 0.1.1 — 2026-11-02
+
+- Patch release (same tree as 0.1.0 tagging); see `v0.1.1`
 
 ## 0.1.0 — 2026-10-31
 

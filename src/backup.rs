@@ -490,7 +490,6 @@ pub fn apply_restore(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::Connection;
 
     fn test_pair() -> (Db, Secrets, PathBuf) {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -503,7 +502,9 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let db = Db::from_conn(Connection::open_in_memory().unwrap()).unwrap();
+        // File-backed like production: restore re-applies WAL pragmas, which
+        // in-memory SQLite cannot honor (journal_mode stays "memory").
+        let db = Db::open(&dir.join("metis.db")).unwrap();
         db.ensure_defaults().unwrap();
         let secrets = Secrets::file_only(&dir);
         (db, secrets, dir)

@@ -70,11 +70,19 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// WAL + durability pragmas for file-backed HQ databases.
 ///
 /// Call after `Db::open` / restore. Fails closed if the filesystem cannot run WAL
-/// (some network mounts reject it).
+/// (some network mounts reject it). In-memory connections stay `journal_mode=memory`
+/// (SQLite cannot WAL them) — used only by unit tests via `Db::from_conn`.
 fn apply_runtime_pragmas(conn: &Connection) -> Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     let mode: String = conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
-    if !mode.eq_ignore_ascii_case("wal") {
+    let mode_l = mode.to_ascii_lowercase();
+    if mode_l == "memory" {
+        // In-memory DB — WAL is impossible; keep busy timeout + sync for tests.
+        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        return Ok(());
+    }
+    if mode_l != "wal" {
         return Err(Error::Msg(format!(
             "SQLite journal_mode is '{mode}', expected WAL. Use a local disk for the HQ data folder."
         )));

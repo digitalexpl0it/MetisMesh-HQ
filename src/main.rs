@@ -132,6 +132,8 @@ html, body, #main {
             // so the desktop keeps a single title bar.
             #[cfg(target_os = "linux")]
             quiet_linux_titlebar(&window);
+            #[cfg(not(target_os = "linux"))]
+            let _ = window;
         })
 }
 

@@ -1587,6 +1587,7 @@ pub fn open_firmware_folder() -> Result<(), String> {
 }
 
 /// `file://` URI with spaces / non-ASCII percent-encoded (D-Bus needs this).
+#[cfg(all(unix, not(target_os = "macos")))]
 fn path_as_file_uri(path: &Path) -> String {
     let abs = path.to_string_lossy();
     let mut out = String::from("file://");

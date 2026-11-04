@@ -338,24 +338,20 @@ fn can_install_flasher_cli(kind: SoftDepKind) -> bool {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn python_cli_installer_available() -> bool {
     tool_on_path(&["pipx"])
         || std::path::Path::new("/usr/bin/pipx").is_file()
         || python_pip_module_ok()
 }
 
+#[cfg(not(target_os = "windows"))]
 fn python_commands() -> &'static [&'static str] {
-    // Windows often has the `py` launcher; macOS/Linux prefer python3.
-    #[cfg(windows)]
-    {
-        &["python", "py", "python3"]
-    }
-    #[cfg(not(windows))]
-    {
-        &["python3", "python"]
-    }
+    // macOS/Linux prefer python3; keep `python` as a fallback.
+    &["python3", "python"]
 }
 
+#[cfg(not(target_os = "windows"))]
 fn python_pip_module_ok() -> bool {
     python_commands().iter().any(|py| {
         Command::new(py)
@@ -366,6 +362,7 @@ fn python_pip_module_ok() -> bool {
     })
 }
 
+#[cfg(not(target_os = "windows"))]
 fn run_pip_user_install(pip_name: &str) -> Result<(bool, String), String> {
     let mut last_err = String::new();
     for py in python_commands() {
@@ -433,6 +430,7 @@ fn install_nrfutil() -> Result<String, String> {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn install_python_cli(pip_name: &str, binaries: &[&str]) -> Result<String, String> {
     // Prefer pipx on Ubuntu 26.04+ (avoids PEP 668 externally-managed env).
     if ensure_pipx().is_ok() {
@@ -474,6 +472,7 @@ fn install_python_cli(pip_name: &str, binaries: &[&str]) -> Result<String, Strin
     Err(format!("pip install {pip_name} failed.\n{}", err.trim()))
 }
 
+#[cfg(not(target_os = "windows"))]
 fn pipx_bin() -> &'static str {
     if std::path::Path::new("/usr/bin/pipx").is_file() {
         "/usr/bin/pipx"
@@ -482,6 +481,7 @@ fn pipx_bin() -> &'static str {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn ensure_pipx() -> Result<(), String> {
     if tool_on_path(&["pipx"]) || std::path::Path::new("/usr/bin/pipx").is_file() {
         return Ok(());

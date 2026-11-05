@@ -4,6 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use base64::Engine;
+
 use crate::db::{unix_now, Db};
 
 static BRAND_DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -29,9 +31,32 @@ fn brand_dir() -> PathBuf {
         .unwrap_or_else(|| crate::data_dir().join("brand"))
 }
 
-/// URL for the bundled default logo (works in cargo-built desktop releases).
+/// Cross-platform URL for a `metis` custom-protocol asset.
+///
+/// WebView2 on Windows does not load `metis://…` in `<img src>` — wry remaps the
+/// handler to `http://metis.localhost/…`. Linux/macOS keep the custom scheme.
+fn metis_asset_url(path_and_query: &str) -> String {
+    let path = path_and_query.trim_start_matches('/');
+    #[cfg(target_os = "windows")]
+    {
+        format!("http://metis.localhost/{path}")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        format!("metis://localhost/{path}")
+    }
+}
+
+/// URL for the bundled default logo (data URL — works offline on every WebView).
 pub fn default_logo_url() -> &'static str {
-    "metis://localhost/brand/__default.png"
+    static URL: OnceLock<String> = OnceLock::new();
+    URL.get_or_init(|| {
+        format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(DEFAULT_LOGO_PNG)
+        )
+    })
+    .as_str()
 }
 
 fn sanitize_filename(name: &str) -> Option<String> {
@@ -100,7 +125,7 @@ pub fn custom_logo_url(db: &Db) -> Option<String> {
         .ok()
         .flatten()
         .unwrap_or_else(|| "0".into());
-    Some(format!("metis://localhost/brand/{name}?v={rev}"))
+    Some(metis_asset_url(&format!("brand/{name}?v={rev}")))
 }
 
 /// True when a custom upload is active (Clear restores the bundled default).

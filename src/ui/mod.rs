@@ -41,11 +41,12 @@ use tracker_page::TrackerPage;
 use weather_page::WeatherPage;
 use welcome::{reopen_welcome, welcome_is_done, WelcomeFinishAction, WelcomeWizard};
 use widgets::{
-    append_emoji, clamp_mesh_text, conversation_avatar_tone, heard_icon_class, heard_within_week,
-    Badge, BarMix, BarMixRow, BatteryChart, BatteryPill, BatterySample, Button, ButtonKind, Card,
-    ChartSeries, ConversationAvatar, Dialog, EmojiPickerButton, LineChart, MeshTextCount,
-    PageHeading, PinSlideDown, SelectInput, SlideDownPanel, Sparkline, TextInput, Throbber,
-    ToastHost, ToggleSwitch, MESH_TEXT_MAX_BYTES,
+    append_emoji, clamp_mesh_text, conversation_avatar_tone, format_channel_share,
+    format_position_share, heard_icon_class, heard_within_week, insert_mesh_snippet, Badge, BarMix,
+    BarMixRow, BatteryChart, BatteryPill, BatterySample, Button, ButtonKind, Card, ChartSeries,
+    ComposePlusAction, ComposePlusButton, ConversationAvatar, Dialog, EmojiPickerButton, LineChart,
+    MeshTextCount, PageHeading, PinSlideDown, SelectInput, SlideDownPanel, Sparkline, TextInput,
+    Throbber, ToastHost, ToggleSwitch, MESH_TEXT_MAX_BYTES,
 };
 
 /// Show a transient toast (and log it). Prefer this over inline amber labels.
@@ -448,6 +449,11 @@ pub fn App() -> Element {
     });
     if !started() {
         started.set(true);
+        // Undo sticky WebView page-zoom from trackpad pinch (map gestures).
+        #[cfg(feature = "desktop")]
+        {
+            dioxus::desktop::window().set_zoom_level(1.0);
+        }
         spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -740,6 +746,8 @@ pub fn App() -> Element {
                     div {
                         class: if page() == Page::Map {
                             "hq-main hq-main-map"
+                        } else if page() == Page::Messages {
+                            "hq-main hq-main-fill"
                         } else {
                             "hq-main"
                         },
@@ -3280,7 +3288,7 @@ fn InboxPage() -> Element {
                     .unwrap_or_else(|_| crate::secrets::NET_CHANNEL_NAME.into());
                 rsx! {
                     PageHeading { icon: IconName::Inbox, title: "Inbox".to_string(),
-                        "Operator queue for join requests and held community alerts. A node DMs signup to ask to join; approval sends the {info_name} and {net_name} secrets. Weather and Amber wait here when auto-relay is off. Ordinary chats are under Messages → Direct."
+                        "Operator queue for join requests and held community alerts. A node DMs #signup to ask to join; approval sends the {info_name} and {net_name} secrets. Weather and Amber wait here when auto-relay is off. Ordinary chats are under Messages → Direct."
                     }
                 }
             }
@@ -3374,6 +3382,517 @@ fn InboxPage() -> Element {
 enum MessagesRailConfirm {
     DeleteChannel(String),
     ClearDm { pubkey: String, name: String },
+}
+
+/// Picker dialogs opened from the compose + menu.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ComposePlusDialog {
+    ShareChannel,
+    ShareContact,
+    ShareMapLocation,
+    QuickDm,
+}
+
+/// Create / join channel slide-down steps.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChannelDeskMode {
+    Pick,
+    Create,
+    JoinPrivate,
+    JoinPublic,
+    JoinHash,
+}
+
+fn apply_compose_plus_action(
+    action: ComposePlusAction,
+    mut draft: Signal<String>,
+    mut note: Signal<String>,
+    mut plus_dialog: Signal<Option<ComposePlusDialog>>,
+    mut plus_pick_query: Signal<String>,
+    mut plus_pick_value: Signal<String>,
+    mut plus_quick_body: Signal<String>,
+    current_channel: Option<String>,
+) {
+    match action {
+        ComposePlusAction::MyContact => match hq_contact_share_text() {
+            Some(text) => {
+                draft.set(insert_mesh_snippet(&draft(), &text));
+                note.set(String::new());
+            }
+            None => note.set("Connect a companion so HQ contact info is available.".into()),
+        },
+        ComposePlusAction::MyPosition => match hq_position_share_text() {
+            Some(text) => {
+                draft.set(insert_mesh_snippet(&draft(), &text));
+                note.set(String::new());
+            }
+            None => note.set(
+                "No HQ position set. Set GPS under Settings → Device, or save a site pin."
+                    .into(),
+            ),
+        },
+        ComposePlusAction::ShareChannel => {
+            plus_pick_query.set(String::new());
+            plus_pick_value.set(current_channel.unwrap_or_default());
+            plus_quick_body.set(String::new());
+            plus_dialog.set(Some(ComposePlusDialog::ShareChannel));
+        }
+        ComposePlusAction::ShareContact => {
+            plus_pick_query.set(String::new());
+            plus_pick_value.set(String::new());
+            plus_quick_body.set(String::new());
+            plus_dialog.set(Some(ComposePlusDialog::ShareContact));
+        }
+        ComposePlusAction::ShareMapLocation => {
+            plus_pick_query.set(String::new());
+            plus_pick_value.set(String::new());
+            plus_quick_body.set(String::new());
+            plus_dialog.set(Some(ComposePlusDialog::ShareMapLocation));
+        }
+        ComposePlusAction::QuickDm => {
+            plus_pick_query.set(String::new());
+            plus_pick_value.set(String::new());
+            plus_quick_body.set(String::new());
+            plus_dialog.set(Some(ComposePlusDialog::QuickDm));
+        }
+    }
+}
+
+fn hq_contact_share_text() -> Option<String> {
+    let radio = state().radio.snapshot();
+    let key = radio.public_key.trim();
+    if key.is_empty() {
+        return None;
+    }
+    let name = state()
+        .db
+        .hq_advert_name()
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "Metis HQ".into());
+    Some(contact_add_uri(&name, key, 1))
+}
+
+fn hq_position_share_text() -> Option<String> {
+    let radio = state().radio.snapshot();
+    let label = state()
+        .db
+        .hq_advert_name()
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "HQ".into());
+    if let (Some(lat), Some(lon)) = (radio.hq_lat, radio.hq_lon) {
+        if let Some(text) = format_position_share(&label, lat, lon) {
+            return Some(text);
+        }
+    }
+    let lat = state()
+        .db
+        .setting("hq_site_lat")
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<f64>().ok());
+    let lon = state()
+        .db
+        .setting("hq_site_lon")
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<f64>().ok());
+    match (lat, lon) {
+        (Some(lat), Some(lon)) => format_position_share(&format!("{label} site"), lat, lon),
+        _ => None,
+    }
+}
+
+#[component]
+fn ComposePlusDialogs(
+    dialog: Signal<Option<ComposePlusDialog>>,
+    pick_query: Signal<String>,
+    pick_value: Signal<String>,
+    quick_body: Signal<String>,
+    draft: Signal<String>,
+    note: Signal<String>,
+    mut refresh: Signal<u64>,
+    mut selected_channel: Signal<Option<String>>,
+    mut selected_dm: Signal<Option<String>>,
+) -> Element {
+    let mut dialog = dialog;
+    let mut pick_query = pick_query;
+    let mut pick_value = pick_value;
+    let mut quick_body = quick_body;
+    let mut draft = draft;
+    let mut note = note;
+    let open = dialog();
+    let title = match open {
+        Some(ComposePlusDialog::ShareChannel) => "Share channel",
+        Some(ComposePlusDialog::ShareContact) => "Share contact",
+        Some(ComposePlusDialog::ShareMapLocation) => "Share location from map",
+        Some(ComposePlusDialog::QuickDm) => "Quick message (DM)",
+        None => "",
+    };
+    let channels = state().db.list_channels().unwrap_or_default();
+    let nodes = state().db.list_nodes().unwrap_or_default();
+    let contact_choices: Vec<(String, String, u8)> = nodes
+        .iter()
+        .filter(|n| !n.pubkey.trim().is_empty())
+        .filter(|n| n.enrollment != Enrollment::Hq)
+        .map(|n| {
+            let label = if n.name.trim().is_empty() {
+                n.prefix.clone()
+            } else {
+                n.name.clone()
+            };
+            (n.pubkey.clone(), label, n.contact_type)
+        })
+        .collect();
+    let map_locations: Vec<(String, String, f64, f64)> = {
+        let mut rows = Vec::new();
+        if let Some(text) = hq_position_share_text() {
+            // Synthetic key for HQ current/site position.
+            let _ = text;
+            let radio = state().radio.snapshot();
+            if let (Some(lat), Some(lon)) = (radio.hq_lat, radio.hq_lon) {
+                if format_position_share("HQ", lat, lon).is_some() {
+                    rows.push(("__hq__".into(), "HQ (companion)".into(), lat, lon));
+                }
+            } else if let (Some(lat), Some(lon)) = (
+                state()
+                    .db
+                    .setting("hq_site_lat")
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.parse().ok()),
+                state()
+                    .db
+                    .setting("hq_site_lon")
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.parse().ok()),
+            ) {
+                if format_position_share("HQ site", lat, lon).is_some() {
+                    rows.push(("__hq_site__".into(), "HQ site pin".into(), lat, lon));
+                }
+            }
+        }
+        for n in nodes.iter() {
+            let (Some(lat), Some(lon)) = (n.lat, n.lon) else {
+                continue;
+            };
+            if format_position_share("x", lat, lon).is_none() {
+                continue;
+            }
+            let label = if n.name.trim().is_empty() {
+                n.prefix.clone()
+            } else {
+                n.name.clone()
+            };
+            rows.push((n.pubkey.clone(), label, lat, lon));
+        }
+        rows
+    };
+    rsx! {
+        Dialog {
+            open: open.is_some(),
+            title: title.to_string(),
+            on_close: move |_| {
+                dialog.set(None);
+                pick_query.set(String::new());
+                pick_value.set(String::new());
+                quick_body.set(String::new());
+            },
+            div { class: "flex flex-col gap-3",
+                match open {
+                    Some(ComposePlusDialog::ShareChannel) => rsx! {
+                        p { class: "text-sm text-muted-foreground",
+                            "Inserts the channel name into your message. Secrets are never shared in chat — use Roster → Invite for private-channel secrets."
+                        }
+                        SelectInput {
+                            id: "compose-plus-channel".to_string(),
+                            value: pick_value(),
+                            onchange: move |event: FormEvent| pick_value.set(event.value()),
+                            option { value: "", "Select a channel…" }
+                            for ch in channels.iter() {
+                                option { value: "{ch.name}", "{ch.name}" }
+                            }
+                        }
+                        div { class: "flex justify-end gap-2",
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| dialog.set(None),
+                                "Cancel"
+                            }
+                            Button {
+                                disabled: pick_value().trim().is_empty(),
+                                onclick: move |_| {
+                                    let name = pick_value();
+                                    let text = format_channel_share(&name);
+                                    if text.is_empty() {
+                                        return;
+                                    }
+                                    draft.set(insert_mesh_snippet(&draft(), &text));
+                                    dialog.set(None);
+                                    note.set(String::new());
+                                },
+                                "Insert"
+                            }
+                        }
+                    },
+                    Some(ComposePlusDialog::ShareContact) => rsx! {
+                        p { class: "text-sm text-muted-foreground",
+                            "Inserts a meshcore:// contact link for the selected node."
+                        }
+                        TextInput {
+                            value: pick_query(),
+                            placeholder: "Search roster…",
+                            oninput: move |event: FormEvent| pick_query.set(event.value()),
+                        }
+                        div { class: "dm-contact-results",
+                            {
+                                let needle = pick_query();
+                                let mut ranked: Vec<(i32, String, String, u8)> = contact_choices
+                                    .iter()
+                                    .filter_map(|(pubkey, label, ty)| {
+                                        let short = pubkey.chars().take(12).collect::<String>();
+                                        let score = fuzzy_score(
+                                            &needle,
+                                            &[label.as_str(), pubkey.as_str(), short.as_str()],
+                                        )?;
+                                        Some((score, pubkey.clone(), label.clone(), *ty))
+                                    })
+                                    .collect();
+                                ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
+                                ranked.truncate(40);
+                                rsx! {
+                                    if ranked.is_empty() {
+                                        p { class: "px-3 py-2 text-sm text-muted-foreground", "No contacts match." }
+                                    }
+                                    for (_score, pubkey, label, ty) in ranked {
+                                        {
+                                            let active = pick_value() == pubkey;
+                                            let key = pubkey.clone();
+                                            rsx! {
+                                                button {
+                                                    r#type: "button",
+                                                    class: if active {
+                                                        "dm-contact-option dm-contact-option-active"
+                                                    } else {
+                                                        "dm-contact-option"
+                                                    },
+                                                    onclick: move |_| pick_value.set(key.clone()),
+                                                    span { class: "font-medium", "{label}" }
+                                                    span { class: "font-mono text-[0.7rem] text-muted-foreground",
+                                                        "{pubkey.chars().take(12).collect::<String>()}… · type {ty}"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        div { class: "flex justify-end gap-2",
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| dialog.set(None),
+                                "Cancel"
+                            }
+                            Button {
+                                disabled: pick_value().trim().is_empty(),
+                                onclick: move |_| {
+                                    let key = pick_value();
+                                    let Some((_, label, ty)) =
+                                        contact_choices.iter().find(|(p, _, _)| p == &key)
+                                    else {
+                                        return;
+                                    };
+                                    let uri = contact_add_uri(label, &key, *ty);
+                                    draft.set(insert_mesh_snippet(&draft(), &uri));
+                                    dialog.set(None);
+                                    note.set(String::new());
+                                },
+                                "Insert"
+                            }
+                        }
+                    },
+                    Some(ComposePlusDialog::ShareMapLocation) => rsx! {
+                        p { class: "text-sm text-muted-foreground",
+                            "Pick a map pin with coordinates (self-reported GPS or HQ site). Ignores 0,0."
+                        }
+                        TextInput {
+                            value: pick_query(),
+                            placeholder: "Search pins…",
+                            oninput: move |event: FormEvent| pick_query.set(event.value()),
+                        }
+                        div { class: "dm-contact-results",
+                            {
+                                let needle = pick_query();
+                                let mut ranked: Vec<(i32, String, String, f64, f64)> = map_locations
+                                    .iter()
+                                    .filter_map(|(id, label, lat, lon)| {
+                                        let score = fuzzy_score(
+                                            &needle,
+                                            &[label.as_str(), id.as_str()],
+                                        )?;
+                                        Some((score, id.clone(), label.clone(), *lat, *lon))
+                                    })
+                                    .collect();
+                                ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
+                                ranked.truncate(40);
+                                rsx! {
+                                    if ranked.is_empty() {
+                                        p { class: "px-3 py-2 text-sm text-muted-foreground",
+                                            "No pins with GPS yet."
+                                        }
+                                    }
+                                    for (_score, id, label, lat, lon) in ranked {
+                                        {
+                                            let active = pick_value() == id;
+                                            let key = id.clone();
+                                            rsx! {
+                                                button {
+                                                    r#type: "button",
+                                                    class: if active {
+                                                        "dm-contact-option dm-contact-option-active"
+                                                    } else {
+                                                        "dm-contact-option"
+                                                    },
+                                                    onclick: move |_| pick_value.set(key.clone()),
+                                                    span { class: "font-medium", "{label}" }
+                                                    span { class: "font-mono text-[0.7rem] text-muted-foreground",
+                                                        "{lat:.5}, {lon:.5}"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        div { class: "flex justify-end gap-2",
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| dialog.set(None),
+                                "Cancel"
+                            }
+                            Button {
+                                disabled: pick_value().trim().is_empty(),
+                                onclick: move |_| {
+                                    let key = pick_value();
+                                    let Some((_, label, lat, lon)) =
+                                        map_locations.iter().find(|(id, _, _, _)| id == &key)
+                                    else {
+                                        return;
+                                    };
+                                    if let Some(text) = format_position_share(label, *lat, *lon) {
+                                        draft.set(insert_mesh_snippet(&draft(), &text));
+                                        dialog.set(None);
+                                        note.set(String::new());
+                                    }
+                                },
+                                "Insert"
+                            }
+                        }
+                    },
+                    Some(ComposePlusDialog::QuickDm) => rsx! {
+                        p { class: "text-sm text-muted-foreground",
+                            "Queue a direct message without leaving this channel. Opens the DM thread after send."
+                        }
+                        TextInput {
+                            value: pick_query(),
+                            placeholder: "Search roster…",
+                            oninput: move |event: FormEvent| pick_query.set(event.value()),
+                        }
+                        div { class: "dm-contact-results",
+                            {
+                                let needle = pick_query();
+                                let mut ranked: Vec<(i32, String, String)> = contact_choices
+                                    .iter()
+                                    .filter_map(|(pubkey, label, _)| {
+                                        let short = pubkey.chars().take(12).collect::<String>();
+                                        let score = fuzzy_score(
+                                            &needle,
+                                            &[label.as_str(), pubkey.as_str(), short.as_str()],
+                                        )?;
+                                        Some((score, pubkey.clone(), label.clone()))
+                                    })
+                                    .collect();
+                                ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
+                                ranked.truncate(40);
+                                rsx! {
+                                    if ranked.is_empty() {
+                                        p { class: "px-3 py-2 text-sm text-muted-foreground", "No contacts match." }
+                                    }
+                                    for (_score, pubkey, label) in ranked {
+                                        {
+                                            let active = pick_value() == pubkey;
+                                            let key = pubkey.clone();
+                                            rsx! {
+                                                button {
+                                                    r#type: "button",
+                                                    class: if active {
+                                                        "dm-contact-option dm-contact-option-active"
+                                                    } else {
+                                                        "dm-contact-option"
+                                                    },
+                                                    onclick: move |_| pick_value.set(key.clone()),
+                                                    span { class: "font-medium", "{label}" }
+                                                    span { class: "font-mono text-[0.7rem] text-muted-foreground",
+                                                        "{pubkey.chars().take(12).collect::<String>()}…"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        TextInput {
+                            value: quick_body(),
+                            placeholder: "Direct message…",
+                            oninput: move |event: FormEvent| {
+                                quick_body.set(clamp_mesh_text(event.value()));
+                            },
+                        }
+                        MeshTextCount { text: quick_body() }
+                        div { class: "flex justify-end gap-2",
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| dialog.set(None),
+                                "Cancel"
+                            }
+                            Button {
+                                disabled: pick_value().trim().is_empty()
+                                    || quick_body().trim().is_empty(),
+                                onclick: move |_| {
+                                    let peer = pick_value();
+                                    let body = quick_body().trim().to_string();
+                                    if peer.is_empty() || body.is_empty() {
+                                        return;
+                                    }
+                                    match state().db.queue_text(&peer, &body, &body) {
+                                        Ok(_) => {
+                                            dialog.set(None);
+                                            pick_query.set(String::new());
+                                            pick_value.set(String::new());
+                                            quick_body.set(String::new());
+                                            selected_channel.set(None);
+                                            selected_dm.set(Some(peer));
+                                            refresh.set(refresh() + 1);
+                                            status_note("Direct message queued for the companion.");
+                                        }
+                                        Err(err) => note.set(err.to_string()),
+                                    }
+                                },
+                                Icon { name: IconName::Messages, size: 14 }
+                                "Send DM"
+                            }
+                        }
+                    },
+                    None => rsx! {},
+                }
+            }
+        }
+    }
 }
 
 const MSG_WINDOW_INITIAL: i64 = 20;
@@ -3797,8 +4316,15 @@ fn MessagesPage() -> Element {
     let mut selected_channel = use_signal(|| None::<String>);
     let mut selected_dm = use_signal(|| None::<String>);
     let mut draft = use_signal(String::new);
+    let mut channel_desk_open = use_signal(|| false);
+    let mut channel_desk_mode = use_signal(|| ChannelDeskMode::Pick);
     let mut create_name = use_signal(String::new);
     let mut create_visibility = use_signal(|| "private".to_string());
+    let mut create_advanced = use_signal(|| false);
+    let mut create_region = use_signal(String::new);
+    let mut join_private_name = use_signal(String::new);
+    let mut join_private_secret = use_signal(String::new);
+    let mut join_hash_name = use_signal(String::new);
     let mut note = use_signal(String::new);
     let sending = use_signal(|| false);
     let mut reply_target = use_signal(|| None::<MessageReplyTarget>);
@@ -3812,6 +4338,10 @@ fn MessagesPage() -> Element {
     let mut new_dm_body = use_signal(String::new);
     let mut block_confirm = use_signal(|| None::<(String, String)>);
     let mut block_resolve_fail = use_signal(|| None::<String>);
+    let plus_dialog = use_signal(|| None::<ComposePlusDialog>);
+    let plus_pick_query = use_signal(String::new);
+    let plus_pick_value = use_signal(String::new);
+    let plus_quick_body = use_signal(String::new);
     let mut appearance_edit = use_signal(|| None::<AppearanceEditTarget>);
     let mut msg_window = use_signal(|| None::<MsgWindowState>);
     let mut loading_older = use_signal(|| false);
@@ -4045,6 +4575,17 @@ fn MessagesPage() -> Element {
                     on_blocked: move |_| refresh.set(refresh() + 1),
                 }
                 BlockResolveFailDialog { target: block_resolve_fail }
+                ComposePlusDialogs {
+                    dialog: plus_dialog,
+                    pick_query: plus_pick_query,
+                    pick_value: plus_pick_value,
+                    quick_body: plus_quick_body,
+                    draft,
+                    note,
+                    refresh,
+                    selected_channel,
+                    selected_dm,
+                }
                 div { class: "flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border bg-card",
                     div {
                         id: "dm-scroller",
@@ -4134,32 +4675,58 @@ fn MessagesPage() -> Element {
                                             } else {
                                                 "mr-auto flex max-w-[85%] flex-col items-start gap-1"
                                             },
+                                            p { class: "message-meta-time",
+                                                "{format_time(Some(message.received_at))}"
+                                            }
                                             div {
                                                 class: if outgoing {
-                                                    "message-bubble min-w-[12rem] rounded-2xl rounded-br-md border border-sky-500/30 bg-[#16324f] px-3 py-2.5 text-sm text-sky-50"
+                                                    "message-bubble min-w-[12rem] rounded-2xl rounded-br-md border border-sky-500/30 bg-[#16324f] text-sm text-sky-50"
                                                 } else {
-                                                    "message-bubble min-w-[12rem] rounded-2xl rounded-bl-md message-bubble-tone-{peer_tone} px-3 py-2.5 text-sm"
+                                                    "message-bubble min-w-[12rem] rounded-2xl rounded-bl-md message-bubble-tone-{peer_tone} text-sm"
                                                 },
-                                                if !outgoing {
-                                                    div { class: "mb-1.5 flex items-center gap-1.5",
+                                                div { class: "message-meta-head",
+                                                    if !outgoing {
                                                         ConversationAvatar {
-                                                            label: peer_label,
-                                                            seed: peer_seed,
-                                                            compact: true,
+                                                            label: peer_label.clone(),
+                                                            seed: peer_seed.clone(),
+                                                            large: true,
                                                         }
-                                                        span { class: "text-[0.65rem] text-muted-foreground",
-                                                            "{format_time(Some(message.received_at))}"
-                                                        }
+                                                    }
+                                                    span { class: "message-meta-name", title: "{peer_label}",
+                                                        if outgoing { "You" } else { "{peer_label}" }
                                                     }
                                                 }
                                                 MessageBody {
                                                     text: message.text.clone(),
                                                     outgoing,
                                                 }
+                                            }
+                                            div { class: "message-meta-foot",
                                                 if outgoing {
-                                                    p { class: "mt-1 text-[0.65rem] text-muted-foreground",
-                                                        "{format_time(Some(message.received_at))}"
+                                                    {
+                                                        let (label, icon, pill) = match message.delivery.as_str() {
+                                                            "queued" => ("Queued", IconName::Clock, "message-meta-pill message-meta-pill-ok"),
+                                                            "sending" => ("Sending…", IconName::Clock, "message-meta-pill message-meta-pill-ok"),
+                                                            "failed" => ("Not sent", IconName::Ban, "message-meta-pill message-meta-pill-bad"),
+                                                            _ => ("Sent", IconName::Check, "message-meta-pill message-meta-pill-ok"),
+                                                        };
+                                                        rsx! {
+                                                            span { class: "{pill}",
+                                                                Icon { name: icon, size: 11 }
+                                                                "{label}"
+                                                            }
+                                                        }
                                                     }
+                                                } else {
+                                                    span { class: "message-meta-pill",
+                                                        Icon { name: IconName::Signal, size: 11 }
+                                                        if let Some(hops) = message.hop_count {
+                                                            "{hops} hops"
+                                                        } else {
+                                                            "hops —"
+                                                        }
+                                                    }
+                                                    span { class: "message-meta-pill", "Received" }
                                                 }
                                             }
                                         }
@@ -4175,6 +4742,22 @@ fn MessagesPage() -> Element {
                     }
                     div { class: "border-t border-border p-3",
                         div { class: "flex gap-2",
+                            ComposePlusButton {
+                                disabled: !linked,
+                                show_quick_dm: false,
+                                on_action: move |action| {
+                                    apply_compose_plus_action(
+                                        action,
+                                        draft,
+                                        note,
+                                        plus_dialog,
+                                        plus_pick_query,
+                                        plus_pick_value,
+                                        plus_quick_body,
+                                        None,
+                                    );
+                                },
+                            }
                             input {
                                 class: "h-10 min-w-0 flex-1 rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none",
                                 value: draft(),
@@ -4629,79 +5212,32 @@ fn MessagesPage() -> Element {
                                             } else {
                                                 "mr-auto flex max-w-[85%] flex-col items-start gap-1"
                                             },
+                                            p { class: "message-meta-time",
+                                                "{format_time(Some(message.received_at))}"
+                                            }
                                             div {
                                                 class: if outgoing {
-                                                    "message-bubble min-w-[14rem] rounded-2xl rounded-br-md border border-sky-500/30 bg-[#16324f] px-3 py-2.5 text-sm text-sky-50"
+                                                    "message-bubble min-w-[14rem] rounded-2xl rounded-br-md border border-sky-500/30 bg-[#16324f] text-sm text-sky-50"
                                                 } else if emergency {
-                                                    "message-bubble min-w-[14rem] rounded-2xl rounded-bl-md border border-signal/30 bg-background/80 px-3 py-2.5 text-sm"
+                                                    "message-bubble min-w-[14rem] rounded-2xl rounded-bl-md border border-signal/30 bg-background/80 text-sm"
                                                 } else {
-                                                    "message-bubble min-w-[14rem] rounded-2xl rounded-bl-md message-bubble-tone-{sender_tone} px-3 py-2.5 text-sm"
+                                                    "message-bubble min-w-[14rem] rounded-2xl rounded-bl-md message-bubble-tone-{sender_tone} text-sm"
                                                 },
-                                            div { class: "mb-2 flex items-start justify-between gap-2",
-                                                div { class: "flex min-w-0 max-w-[70%] items-center gap-1.5",
-                                                    if !outgoing {
-                                                        ConversationAvatar {
-                                                            label: device_name.clone(),
-                                                            seed: avatar_seed.clone(),
-                                                            compact: true,
-                                                        }
-                                                    }
-                                                    span {
-                                                        class: if outgoing {
-                                                            "inline-flex min-w-0 items-center gap-1 rounded-full bg-sky-400/15 px-2 py-0.5 text-[0.7rem] font-medium text-sky-100"
-                                                        } else {
-                                                            "inline-flex min-w-0 items-center gap-1 rounded-full bg-background/70 px-2 py-0.5 text-[0.7rem] font-medium text-foreground"
-                                                        },
-                                                        span { class: "truncate", "{device_name}" }
+                                            div { class: "message-meta-head",
+                                                if !outgoing {
+                                                    ConversationAvatar {
+                                                        label: device_name.clone(),
+                                                        seed: avatar_seed.clone(),
+                                                        large: true,
                                                     }
                                                 }
-                                                span {
-                                                    class: if outgoing {
-                                                        "inline-flex shrink-0 items-center gap-1 rounded-full bg-sky-400/10 px-2 py-0.5 text-[0.65rem] text-sky-200/90"
-                                                    } else {
-                                                        "inline-flex shrink-0 items-center gap-1 rounded-full bg-background/50 px-2 py-0.5 text-[0.65rem] text-muted-foreground"
-                                                    },
-                                                    Icon { name: IconName::Clock, size: 11 }
-                                                    "{format_time(Some(message.received_at))}"
+                                                span { class: "message-meta-name", title: "{device_name}",
+                                                    "{device_name}"
                                                 }
                                             }
                                             MessageBody {
                                                 text: bubble_text.clone(),
                                                 outgoing,
-                                            }
-                                            div { class: "mt-2 flex justify-start",
-                                                if outgoing {
-                                                    {
-                                                        let (label, icon, tone) = match message.delivery.as_str() {
-                                                            "queued" => ("Queued", IconName::Clock, "bg-sky-400/15 text-sky-100"),
-                                                            "sending" => ("Sending…", IconName::Clock, "bg-sky-400/15 text-sky-100"),
-                                                            "failed" => ("Not sent", IconName::Ban, "bg-red-500/20 text-red-200"),
-                                                            _ => ("Sent", IconName::Check, "bg-sky-400/15 text-sky-100"),
-                                                        };
-                                                        rsx! {
-                                                            span {
-                                                                class: "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[0.65rem] {tone}",
-                                                                title: if message.delivery == "failed" {
-                                                                    "The companion did not accept this message. Check the status bar, then send it again."
-                                                                } else {
-                                                                    ""
-                                                                },
-                                                                Icon { name: icon, size: 11 }
-                                                                "{label}"
-                                                            }
-                                                        }
-                                                    }
-                                                } else {
-                                                    span {
-                                                        class: "inline-flex items-center gap-1 rounded-full bg-background/60 px-2 py-0.5 text-[0.65rem] text-muted-foreground",
-                                                        Icon { name: IconName::Signal, size: 11 }
-                                                        if let Some(hops) = message.hop_count {
-                                                            "{hops} hops"
-                                                        } else {
-                                                            "hops —"
-                                                        }
-                                                    }
-                                                }
                                             }
                                             div {
                                                 class: if outgoing {
@@ -4805,6 +5341,40 @@ fn MessagesPage() -> Element {
                                                 }
                                             }
                                             }
+                                            div { class: "message-meta-foot",
+                                                if outgoing {
+                                                    {
+                                                        let (label, icon, pill) = match message.delivery.as_str() {
+                                                            "queued" => ("Queued", IconName::Clock, "message-meta-pill message-meta-pill-ok"),
+                                                            "sending" => ("Sending…", IconName::Clock, "message-meta-pill message-meta-pill-ok"),
+                                                            "failed" => ("Not sent", IconName::Ban, "message-meta-pill message-meta-pill-bad"),
+                                                            _ => ("Sent", IconName::Check, "message-meta-pill message-meta-pill-ok"),
+                                                        };
+                                                        rsx! {
+                                                            span {
+                                                                class: "{pill}",
+                                                                title: if message.delivery == "failed" {
+                                                                    "The companion did not accept this message. Check the status bar, then send it again."
+                                                                } else {
+                                                                    ""
+                                                                },
+                                                                Icon { name: icon, size: 11 }
+                                                                "{label}"
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    span { class: "message-meta-pill",
+                                                        Icon { name: IconName::Signal, size: 11 }
+                                                        if let Some(hops) = message.hop_count {
+                                                            "{hops} hops"
+                                                        } else {
+                                                            "hops —"
+                                                        }
+                                                    }
+                                                    span { class: "message-meta-pill", "Received" }
+                                                }
+                                            }
                                         }
                                     }
                                     if show_new_banner {
@@ -4865,6 +5435,25 @@ fn MessagesPage() -> Element {
                         }
                         div {
                             class: "flex gap-2",
+                            ComposePlusButton {
+                                disabled: !linked || sending(),
+                                show_quick_dm: true,
+                                on_action: {
+                                    let channel_name = selected_name.clone();
+                                    move |action| {
+                                        apply_compose_plus_action(
+                                            action,
+                                            draft,
+                                            note,
+                                            plus_dialog,
+                                            plus_pick_query,
+                                            plus_pick_value,
+                                            plus_quick_body,
+                                            Some(channel_name.clone()),
+                                        );
+                                    }
+                                },
+                            }
                             input {
                                 class: "h-10 min-w-0 flex-1 rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none",
                                 value: draft(),
@@ -4941,6 +5530,17 @@ fn MessagesPage() -> Element {
                     on_blocked: move |_| refresh.set(refresh() + 1),
                 }
                 BlockResolveFailDialog { target: block_resolve_fail }
+                ComposePlusDialogs {
+                    dialog: plus_dialog,
+                    pick_query: plus_pick_query,
+                    pick_value: plus_pick_value,
+                    quick_body: plus_quick_body,
+                    draft,
+                    note,
+                    refresh,
+                    selected_channel,
+                    selected_dm,
+                }
             }
         };
     }
@@ -4951,8 +5551,30 @@ fn MessagesPage() -> Element {
     let on_blocked_tab = messages_tab_now == "blocked";
     let blocked_nodes = state().db.list_blocked_nodes().unwrap_or_default();
     let blocked_count = blocked_nodes.len();
+    let desk_title = match channel_desk_mode() {
+        ChannelDeskMode::Pick => "Create / join channel",
+        ChannelDeskMode::Create => "Create channel",
+        ChannelDeskMode::JoinPrivate => "Join private channel",
+        ChannelDeskMode::JoinPublic => "Restore Public",
+        ChannelDeskMode::JoinHash => "Join hash channel",
+    };
+    let desk_subtitle = match channel_desk_mode() {
+        ChannelDeskMode::Pick => "Choose what you want to do.".to_string(),
+        ChannelDeskMode::Create => "Name a new channel on this headquarters.".to_string(),
+        ChannelDeskMode::JoinPrivate => {
+            "Add a channel you already have the 16-byte secret for.".to_string()
+        }
+        ChannelDeskMode::JoinPublic => {
+            "Put the default Public channel back on slot 0.".to_string()
+        }
+        ChannelDeskMode::JoinHash => {
+            "Secret is derived from the name (leading # optional). Not a bot command.".to_string()
+        }
+    };
     rsx! {
-        div { class: "mx-auto flex max-w-6xl flex-col gap-4",
+        // hq-main-fill is overflow:hidden for thread fill — this list must scroll.
+        div { class: "min-h-0 flex-1 overflow-y-auto",
+        div { class: "mx-auto flex max-w-6xl flex-col gap-4 pb-8",
             PageHeading { icon: IconName::Messages, title: "Messages".to_string(),
                 "Channels on the headquarters companion, plus direct message threads. Channel secrets are never shown here."
             }
@@ -5046,51 +5668,283 @@ fn MessagesPage() -> Element {
                     } }
                 }
             }
-            Card { title: "Create channel".to_string(), icon: Some(IconName::Messages),
-                div { class: "flex flex-col gap-3 sm:flex-row sm:items-end",
-                    div { class: "min-w-0 flex-1",
-                        label {
-                            class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground",
-                            "Name"
-                        }
-                        TextInput {
-                            value: create_name(),
-                            placeholder: "Ops-Night".to_string(),
-                            kind: "text".to_string(),
-                            oninput: move |event: FormEvent| create_name.set(event.value()),
-                        }
-                    }
-                    div { class: "w-full sm:w-40",
-                        label {
-                            class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground",
-                            r#for: "channel-visibility",
-                            "Visibility"
-                        }
-                        SelectInput {
-                            id: "channel-visibility".to_string(),
-                            value: create_visibility(),
-                            onchange: move |event: FormEvent| create_visibility.set(event.value()),
-                            option { value: "private", style: "background-color: #151a20; color: #f4f4f5;", "Private" }
-                            option { value: "public", style: "background-color: #151a20; color: #f4f4f5;", "Public" }
+            div { class: "flex flex-wrap items-center gap-2",
+                Button {
+                    onclick: move |_| {
+                        channel_desk_mode.set(ChannelDeskMode::Pick);
+                        channel_desk_open.set(true);
+                    },
+                    Icon { name: IconName::Messages, size: 14 }
+                    "Create / join channel"
+                }
+            }
+            SlideDownPanel {
+                open: channel_desk_open(),
+                title: desk_title.to_string(),
+                subtitle: desk_subtitle,
+                icon: Some(IconName::Messages),
+                on_close: move |_| {
+                    channel_desk_open.set(false);
+                    channel_desk_mode.set(ChannelDeskMode::Pick);
+                    create_advanced.set(false);
+                },
+                footer: rsx! {
+                    if channel_desk_mode() != ChannelDeskMode::Pick {
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| channel_desk_mode.set(ChannelDeskMode::Pick),
+                            "Back"
                         }
                     }
                     Button {
+                        kind: ButtonKind::Ghost,
                         onclick: move |_| {
-                            match state().db.create_channel(&create_name(), &create_visibility(), &state().secrets) {
-                                Ok(row) => {
-                                    create_name.set(String::new());
-                                    let msg = format!("Created {}.", row.name);
-                                    if linked {
-                                        state().radio.push_channel(row.slot as u8, row.name.clone());
-                                    }
-                                    status_note(msg);
-                                }
-                                Err(err) => status_note(err.to_string()),
-                            }
+                            channel_desk_open.set(false);
+                            channel_desk_mode.set(ChannelDeskMode::Pick);
+                            create_advanced.set(false);
                         },
-                        Icon { name: IconName::Check, size: 14 }
-                        "Create"
+                        "Close"
                     }
+                },
+                match channel_desk_mode() {
+                    ChannelDeskMode::Pick => rsx! {
+                        div { class: "flex flex-col gap-2",
+                            button {
+                                r#type: "button",
+                                class: "dm-contact-option",
+                                onclick: move |_| channel_desk_mode.set(ChannelDeskMode::Create),
+                                span { class: "font-medium", "Create channel" }
+                                span { class: "text-[0.7rem] text-muted-foreground",
+                                    "New private or public channel on this HQ"
+                                }
+                            }
+                            button {
+                                r#type: "button",
+                                class: "dm-contact-option",
+                                onclick: move |_| channel_desk_mode.set(ChannelDeskMode::JoinPrivate),
+                                span { class: "font-medium", "Join private channel" }
+                                span { class: "text-[0.7rem] text-muted-foreground",
+                                    "Name + 32-character hex secret"
+                                }
+                            }
+                            button {
+                                r#type: "button",
+                                class: "dm-contact-option",
+                                onclick: move |_| channel_desk_mode.set(ChannelDeskMode::JoinPublic),
+                                span { class: "font-medium", "Restore Public" }
+                                span { class: "text-[0.7rem] text-muted-foreground",
+                                    "Put Public back on companion slot 0"
+                                }
+                            }
+                            button {
+                                r#type: "button",
+                                class: "dm-contact-option",
+                                onclick: move |_| channel_desk_mode.set(ChannelDeskMode::JoinHash),
+                                span { class: "font-medium", "Join hash / hashtag channel" }
+                                span { class: "text-[0.7rem] text-muted-foreground",
+                                    "Secret derived from the channel name"
+                                }
+                            }
+                        }
+                    },
+                    ChannelDeskMode::Create => rsx! {
+                        div { class: "flex flex-col gap-3",
+                            div { class: "min-w-0",
+                                label {
+                                    class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground",
+                                    "Name"
+                                }
+                                TextInput {
+                                    value: create_name(),
+                                    placeholder: "Ops-Night".to_string(),
+                                    kind: "text".to_string(),
+                                    oninput: move |event: FormEvent| create_name.set(event.value()),
+                                }
+                            }
+                            div { class: "min-w-0",
+                                label {
+                                    class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground",
+                                    r#for: "channel-visibility",
+                                    "Visibility"
+                                }
+                                SelectInput {
+                                    id: "channel-visibility".to_string(),
+                                    value: create_visibility(),
+                                    onchange: move |event: FormEvent| create_visibility.set(event.value()),
+                                    option { value: "private", style: "background-color: #151a20; color: #f4f4f5;", "Private" }
+                                    option { value: "public", style: "background-color: #151a20; color: #f4f4f5;", "Public" }
+                                }
+                            }
+                            button {
+                                r#type: "button",
+                                class: "self-start text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline cursor-pointer",
+                                onclick: move |_| create_advanced.set(!create_advanced()),
+                                if create_advanced() { "Hide advanced" } else { "Advanced: region (optional)" }
+                            }
+                            if create_advanced() {
+                                {
+                                    let regions = crate::mesh_regions::load_known_regions(&state().db);
+                                    let active = crate::mesh_regions::load_active_region(&state().db)
+                                        .unwrap_or_default();
+                                    rsx! {
+                                        div { class: "rounded-md border border-border bg-background/50 p-3",
+                                            label {
+                                                class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground",
+                                                r#for: "channel-create-region",
+                                                "Region"
+                                            }
+                                            p { class: "mb-2 text-xs text-muted-foreground",
+                                                "Optional MeshCore region tag (Settings → Regions). Does not change the channel secret."
+                                            }
+                                            SelectInput {
+                                                id: "channel-create-region".to_string(),
+                                                value: create_region(),
+                                                onchange: move |event: FormEvent| create_region.set(event.value()),
+                                                option { value: "", style: "background-color: #151a20; color: #f4f4f5;", "None" }
+                                                if !active.is_empty() {
+                                                    option {
+                                                        value: "{active}",
+                                                        style: "background-color: #151a20; color: #f4f4f5;",
+                                                        "#{active} (active)"
+                                                    }
+                                                }
+                                                for name in regions.iter() {
+                                                    if active.is_empty() || name != &active {
+                                                        option {
+                                                            value: "{name}",
+                                                            style: "background-color: #151a20; color: #f4f4f5;",
+                                                            "#{name}"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Button {
+                                onclick: move |_| {
+                                    let region = if create_advanced() {
+                                        Some(create_region())
+                                    } else {
+                                        None
+                                    };
+                                    let region_ref = region.as_deref().filter(|s| !s.trim().is_empty());
+                                    match state().db.create_channel_with_region(
+                                        &create_name(),
+                                        &create_visibility(),
+                                        &state().secrets,
+                                        region_ref,
+                                    ) {
+                                        Ok(row) => {
+                                            create_name.set(String::new());
+                                            create_region.set(String::new());
+                                            create_advanced.set(false);
+                                            channel_desk_open.set(false);
+                                            channel_desk_mode.set(ChannelDeskMode::Pick);
+                                            let msg = format!("Created {}.", row.name);
+                                            if linked {
+                                                state().radio.push_channel(row.slot as u8, row.name.clone());
+                                            }
+                                            status_note(msg);
+                                        }
+                                        Err(err) => status_note(err.to_string()),
+                                    }
+                                },
+                                Icon { name: IconName::Check, size: 14 }
+                                "Create"
+                            }
+                        }
+                    },
+                    ChannelDeskMode::JoinPrivate => rsx! {
+                        div { class: "flex flex-col gap-3",
+                            TextInput {
+                                value: join_private_name(),
+                                placeholder: "Channel name".to_string(),
+                                oninput: move |event: FormEvent| join_private_name.set(event.value()),
+                            }
+                            TextInput {
+                                value: join_private_secret(),
+                                placeholder: "32-char hex secret".to_string(),
+                                oninput: move |event: FormEvent| join_private_secret.set(event.value()),
+                            }
+                            Button {
+                                onclick: move |_| {
+                                    match state().db.join_private_channel(
+                                        &join_private_name(),
+                                        &join_private_secret(),
+                                        &state().secrets,
+                                    ) {
+                                        Ok(row) => {
+                                            join_private_name.set(String::new());
+                                            join_private_secret.set(String::new());
+                                            channel_desk_open.set(false);
+                                            channel_desk_mode.set(ChannelDeskMode::Pick);
+                                            if linked {
+                                                state().radio.push_channel(row.slot as u8, row.name.clone());
+                                            }
+                                            status_note(format!("Joined private channel {}.", row.name));
+                                        }
+                                        Err(err) => status_note(err.to_string()),
+                                    }
+                                },
+                                "Join private"
+                            }
+                        }
+                    },
+                    ChannelDeskMode::JoinPublic => rsx! {
+                        div { class: "flex flex-col gap-3",
+                            p { class: "text-sm text-muted-foreground",
+                                "Restores Public on mesh slot 0 if it was removed from this HQ list."
+                            }
+                            Button {
+                                onclick: move |_| {
+                                    match state().db.restore_public_channel() {
+                                        Ok(row) => {
+                                            channel_desk_open.set(false);
+                                            channel_desk_mode.set(ChannelDeskMode::Pick);
+                                            if linked {
+                                                state().radio.push_channel(row.slot as u8, row.name.clone());
+                                            }
+                                            status_note("Public channel restored on slot 0.");
+                                        }
+                                        Err(err) => status_note(err.to_string()),
+                                    }
+                                },
+                                Icon { name: IconName::Messages, size: 14 }
+                                "Restore Public"
+                            }
+                        }
+                    },
+                    ChannelDeskMode::JoinHash => rsx! {
+                        div { class: "flex flex-col gap-3",
+                            TextInput {
+                                value: join_hash_name(),
+                                placeholder: "#community".to_string(),
+                                oninput: move |event: FormEvent| join_hash_name.set(event.value()),
+                            }
+                            Button {
+                                onclick: move |_| {
+                                    match state().db.join_hash_channel(
+                                        &join_hash_name(),
+                                        &state().secrets,
+                                    ) {
+                                        Ok(row) => {
+                                            join_hash_name.set(String::new());
+                                            channel_desk_open.set(false);
+                                            channel_desk_mode.set(ChannelDeskMode::Pick);
+                                            if linked {
+                                                state().radio.push_channel(row.slot as u8, row.name.clone());
+                                            }
+                                            status_note(format!("Joined hash channel {}.", row.name));
+                                        }
+                                        Err(err) => status_note(err.to_string()),
+                                    }
+                                },
+                                "Join hash"
+                            }
+                        }
+                    },
                 }
             }
             div { class: "grid grid-cols-[repeat(auto-fill,minmax(16rem,1fr))] gap-3",
@@ -5106,22 +5960,23 @@ fn MessagesPage() -> Element {
                             || channel.role == "emergency"
                             || channel.role == "info"
                             || channel.role == "net";
+                        let region_badge = channel.region.clone();
                         rsx! {
                             div {
                                 key: "{channel.name}-{channel.slot}",
                                 class: if system_private {
-                                    "flex flex-col rounded-lg border border-signal/40 bg-accent/50 p-4"
+                                    "channel-card flex flex-col rounded-lg border border-signal/40 bg-accent/50 p-4"
                                 } else {
-                                    "flex flex-col rounded-lg border border-border bg-card p-4"
+                                    "channel-card flex flex-col rounded-lg border border-border bg-card p-4"
                                 },
                                 button {
-                                    class: "flex flex-1 flex-col items-start gap-3 text-left cursor-pointer",
+                                    class: "flex min-w-0 flex-1 flex-col items-start gap-3 text-left cursor-pointer",
                                     onclick: move |_| {
                                         note.set(String::new());
                                         msg_window.set(None);
                                         selected_channel.set(Some(name.clone()));
                                     },
-                                    div { class: "flex w-full items-start justify-between gap-2",
+                                    div { class: "flex w-full min-w-0 items-start justify-between gap-2",
                                         div { class: "flex min-w-0 items-center gap-2",
                                             span {
                                                 class: if system_private { "text-signal" } else { "text-muted-foreground" },
@@ -5155,8 +6010,13 @@ fn MessagesPage() -> Element {
                                         Badge { tone: "signal".to_string(), "Bot home" }
                                     } else if channel.role == "net" {
                                         Badge { tone: "signal".to_string(), "Peer net" }
+                                    } else if channel.role == "hash" {
+                                        Badge { tone: "pending".to_string(), "Hash" }
                                     }
-                                    p { class: "line-clamp-2 text-sm text-muted-foreground",
+                                    if let Some(region) = region_badge.as_ref() {
+                                        Badge { tone: "pending".to_string(), "#{region}" }
+                                    }
+                                    p { class: "channel-card-preview",
                                         if let Some(text) = channel.last_text.as_ref() {
                                             "{text}"
                                         } else {
@@ -5602,6 +6462,7 @@ fn MessagesPage() -> Element {
                     }
                 }
             }
+        }
         }
     }
 }

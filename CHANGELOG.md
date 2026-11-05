@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Windows polish
+
+- Default EmergHQ brand logo uses an embedded data URL (WebView2 cannot load `metis://` in `<img>`); custom logos use `http://metis.localhost/…`
+- Bluetooth PIN slide-down sits above the welcome overlay so first-run Pair is usable
+- Welcome soft-deps probes are cached and Windows helper processes use `CREATE_NO_WINDOW` (stops UI stalls / flashing consoles during setup)
+- Release builds use `windows_subsystem = "windows"` so a cmd host does not stay open
+- Taskbar identity: set AppUserModelID + window icon from the mesh-head mark
+- BLE reconnect: skip aggressive GATT force-disconnect on session loss (avoids connect/disconnect loops); longer settle backoff
+- Offline map download: fetch Windows/Darwin `go-pmtiles` `.zip` (was looking for `.tar.gz`), extract with the zip crate, use `where` instead of `sh`
+- Map +/- zoom buttons owned by Dioxus (JS-injected controls were wiped on re-render)
+- Map trackpad zoom: HQ owns wheel/pinch (ctrl+wheel) so WebKitGTK/WebView2 cannot steal page zoom; two-finger scroll and pinch zoom the map on Linux and Windows
+- Messages page uses flex-fill main pane (WebKitGTK `height:100%` left a dead gap under the thread); reset WebView zoom to 1.0 on launch
+- Enrollment DMs: reply only to `#signup` / `#status` (same `#` command marker as channel bots); bare words and casual chat stay silent
+- BLE: three consecutive battery/channel timeouts while “connected” end the session and reconnect (was stuck Connected with `BLE TX error: Not connected`)
+- Messages compose **+** menu (channel and DM): my contact, my position, share channel name, share contact link, share map location; **Quick message (DM)** on channels only — channel share never includes secrets
+- Channel cards truncate long previews (URLs no longer bleed into the next card)
+- Chat bubbles: timestamp above; larger avatar/name inside the bubble with real padding; hops + sent/received below
+- Join channel: private (name + hex secret), restore Public, hash/hashtag channel; create channel optional advanced region tag
+- Messages list scrolls again under `hq-main-fill`; Create/join is one button → slide-down option picker → form
+- Companion already held (phone GATT / busy serial / early connect failures): stop auto-reconnect after a short streak and show “Companion busy — disconnect… then Connect again” instead of looping Reconnecting
+- Composer emoji picker: many more glyphs (reactions, faces, hands, mesh, status, weather, nature, food, people); panel scrolls
+
 ## 0.1.4.0 — 2026-11-04
 
 Package version `0.1.4` (Cargo / About). Windows Details may show `0.1.4.0`.

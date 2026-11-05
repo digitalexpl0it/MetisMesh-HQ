@@ -193,6 +193,18 @@ pub async fn map_fit_bounds(west: f64, south: f64, east: f64, north: f64) {
     let _ = document::eval(&js).await;
 }
 
+pub async fn map_zoom_by(delta: i32) {
+    let js = format!(
+        r#"(() => {{
+  if (!window.MetisMap || !window.MetisMap.zoomBy) return false;
+  return window.MetisMap.zoomBy({id}, {delta});
+}})()"#,
+        id = escape_js_string(MAP_ID),
+        delta = delta,
+    );
+    let _ = document::eval(&js).await;
+}
+
 pub async fn map_fly_to(lng: f64, lat: f64, zoom: f64) {
     let js = format!(
         r#"(() => {{

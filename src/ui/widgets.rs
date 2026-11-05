@@ -440,8 +440,9 @@ pub fn PinSlideDown(
         "pointer-events-none -translate-y-full opacity-0"
     };
     rsx! {
+        // Above welcome-overlay (z-index 80) so first-run Pair is usable.
         div {
-            class: "fixed inset-x-0 top-0 z-40 transition duration-300 ease-out {panel_class}",
+            class: "pin-slide-shell fixed inset-x-0 top-0 transition duration-300 ease-out {panel_class}",
             div { class: "border-b border-border bg-card/95 shadow-lg backdrop-blur-sm",
                 div { class: "mx-auto flex max-w-3xl flex-col gap-3 px-5 py-4",
                     div { class: "flex items-start justify-between gap-3",
@@ -1183,23 +1184,100 @@ pub fn BarMix(rows: Vec<BarMixRow>) -> Element {
     }
 }
 
-/// Common MeshCore / messaging emoji. Kept compact so packet budgets stay usable.
+/// Common MeshCore / messaging emoji for the composer picker.
+///
+/// Not a full Unicode set — enough for reactions and field ops without drowning
+/// the popover. Each glyph still counts against the 160-byte mesh budget on send.
 const EMOJI_PICKER_ROWS: &[(&str, &[&str])] = &[
     (
         "Reactions",
-        &["👍", "👎", "❤️", "😂", "🎉", "👏", "🔥", "✅"],
+        &[
+            "👍", "👎", "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "💔", "💯",
+            "😂", "🤣", "😅", "😆", "😊", "😍", "🥰", "😘", "😎", "🤩", "😏", "😌",
+            "🎉", "🎊", "👏", "🙌", "🤝", "💪", "🔥", "✅", "✨", "⭐", "🌟", "💫",
+        ],
     ),
     (
         "Faces",
-        &["😀", "😊", "😎", "🤔", "😅", "😢", "😡", "🫡"],
+        &[
+            "😀", "😃", "😄", "😁", "🙂", "😉", "😋", "😛", "😜", "🤪", "😝", "🤑",
+            "🤗", "🤭", "🤫", "🤔", "🤐", "🤨", "😐", "😑", "😶", "🙄", "😬", "🤥",
+            "😔", "😪", "🤤", "😴", "😷", "🤒", "🤕", "🤢", "🤮", "🥵", "🥶", "🥴",
+            "😵", "🤯", "🤠", "🥳", "🥸", "😓", "😥", "😢", "😭", "😤", "😠", "😡",
+            "🤬", "😈", "👿", "💀", "☠️", "💩", "🤡", "👹", "👺", "👻", "👽", "🤖",
+            "😺", "😸", "😹", "😻", "😼", "😽", "🙀", "😿", "😾", "🙈", "🙉", "🙊",
+            "🫡", "🫠", "🥹", "😮‍💨", "😶‍🌫️", "😵‍💫",
+        ],
+    ),
+    (
+        "Hands",
+        &[
+            "👋", "🤚", "🖐", "✋", "🖖", "👌", "🤌", "🤏", "✌️", "🤞", "🤟", "🤘",
+            "🤙", "👈", "👉", "👆", "👇", "☝️", "🫵", "👍", "👎", "✊", "👊", "🤛",
+            "🤜", "👏", "🙌", "👐", "🤲", "🙏", "✍️", "💅", "🤳", "💪", "🦾", "🦿",
+        ],
     ),
     (
         "Mesh",
-        &["📡", "📶", "📍", "🔋", "⚡", "🛰️", "🗺️", "💬"],
+        &[
+            "📡", "📶", "📍", "📌", "🧭", "🗺️", "🛰️", "🚀", "✈️", "🚁", "🚗", "🛻",
+            "🔋", "🪫", "⚡", "🔌", "💡", "🔦", "📻", "📱", "💻", "🖥️", "⌨️", "🖱️",
+            "💬", "💭", "📢", "📣", "🔔", "🔕", "📞", "☎️", "📧", "📨", "📩", "📬",
+            "🔐", "🔑", "🗝️", "🔒", "🔓", "🛡️", "⚙️", "🔧", "🔨", "🛠️", "🧲", "🧪",
+        ],
     ),
     (
-        "More",
-        &["🙏", "💪", "👀", "⚠️", "❌", "☀️", "🌧️", "🌙"],
+        "Status",
+        &[
+            "⚠️", "🚨", "⛔", "🚫", "❌", "⭕️", "❓", "❗", "‼️", "⁉️", "🔴", "🟠",
+            "🟡", "🟢", "🔵", "🟣", "⚫", "⚪", "🟤", "✅", "☑️", "✔️", "➕", "➖",
+            "➗", "✖️", "🔙", "🔚", "🔛", "🔜", "🔝", "♻️", "🔃", "🔄", "⬆️", "⬇️",
+            "⬅️", "➡️", "↗️", "↘️", "↙️", "↖️", "↕️", "↔️", "↩️", "↪️", "⤴️", "⤵️",
+        ],
+    ),
+    (
+        "Weather",
+        &[
+            "☀️", "🌤️", "⛅", "🌥️", "☁️", "🌦️", "🌧️", "⛈️", "🌩️", "🌨️", "❄️", "☃️",
+            "⛄", "🌬️", "💨", "🌪️", "🌫️", "🌈", "☂️", "☔", "⚡", "🔥", "💧", "🌊",
+            "🌙", "🌚", "🌛", "🌜", "🌝", "🌞", "⭐", "🌟", "✨", "☄️", "🌌", "🌃",
+        ],
+    ),
+    (
+        "Nature",
+        &[
+            "🌲", "🌳", "🌴", "🌵", "🌾", "🌿", "☘️", "🍀", "🍁", "🍂", "🍃", "🌺",
+            "🌻", "🌹", "🥀", "🌷", "🌼", "🌸", "💐", "🌱", "🪴", "🪵", "🪨", "⛰️",
+            "🏔️", "🌋", "🏕️", "⛺", "🏞️", "🌅", "🌄", "🌉", "🏙️", "🏘️", "🏠", "🏡",
+            "🐶", "🐱", "🐭", "🐹", "🐰", "🦊", "🐻", "🐼", "🐨", "🐯", "🦁", "🐮",
+            "🐷", "🐸", "🐵", "🐔", "🐧", "🐦", "🐤", "🦆", "🦅", "🦉", "🦇", "🐺",
+            "🐗", "🐴", "🦄", "🐝", "🪱", "🐛", "🦋", "🐌", "🐞", "🐜", "🪰", "🪲",
+            "🪳", "🦟", "🦗", "🕷", "🦂", "🐢", "🐍", "🦎", "🦖", "🦕", "🐙", "🦑",
+            "🦐", "🦞", "🦀", "🐡", "🐠", "🐟", "🐬", "🐳", "🐋", "🦈", "🐊", "🐅",
+        ],
+    ),
+    (
+        "Food",
+        &[
+            "🍎", "🍐", "🍊", "🍋", "🍌", "🍉", "🍇", "🍓", "🫐", "🍈", "🍒", "🍑",
+            "🥭", "🍍", "🥥", "🥝", "🍅", "🍆", "🥑", "🥦", "🥬", "🥒", "🌶", "🫑",
+            "🌽", "🥕", "🫒", "🧄", "🧅", "🥔", "🍠", "🥐", "🥯", "🍞", "🥖", "🥨",
+            "🧀", "🥚", "🍳", "🧈", "🥞", "🧇", "🥓", "🥩", "🍗", "🍖", "🦴", "🌭",
+            "🍔", "🍟", "🍕", "🫓", "🥪", "🥙", "🧆", "🌮", "🌯", "🥗", "🥘", "🫕",
+            "🥫", "🍝", "🍜", "🍲", "🍛", "🍣", "🍱", "🥟", "🦪", "🍤", "🍙", "🍚",
+            "🍘", "🍥", "🥠", "🥮", "🍢", "🍡", "🍧", "🍨", "🍦", "🥧", "🧁", "🍰",
+            "🎂", "🍮", "🍭", "🍬", "🍫", "🍿", "🍩", "🍪", "🌰", "🥜", "🍯", "🥛",
+            "🍼", "☕", "🫖", "🍵", "🧃", "🥤", "🧋", "🍶", "🍺", "🍻", "🥂", "🍷",
+        ],
+    ),
+    (
+        "People",
+        &[
+            "👀", "👁️", "👅", "👄", "💋", "🩸", "💧", "💦", "💤", "💭", "💬", "🗯",
+            "👤", "👥", "🫂", "🗣️", "🧑", "👨", "👩", "🧔", "👴", "👵", "🧒", "👶",
+            "👷", "👮", "🕵️", "💂", "🥷", "🦸", "🦹", "🧙", "🧚", "🧛", "🧜", "🧝",
+            "🧑‍⚕️", "🧑‍🚒", "🧑‍✈️", "🧑‍💻", "🧑‍🔧", "🧑‍🌾", "🧑‍🍳", "🧑‍🏫",
+        ],
     ),
 ];
 
@@ -1225,6 +1303,123 @@ pub fn append_emoji(draft: &str, emoji: &str) -> String {
         draft.to_string()
     } else {
         format!("{draft}{emoji}")
+    }
+}
+
+/// Insert a share snippet into the compose draft (space-separated, 160-byte clamp).
+pub fn insert_mesh_snippet(draft: &str, snippet: &str) -> String {
+    let snippet = snippet.trim();
+    if snippet.is_empty() {
+        return draft.to_string();
+    }
+    if draft.trim().is_empty() {
+        return clamp_mesh_text(snippet);
+    }
+    clamp_mesh_text(format!("{} {}", draft.trim_end(), snippet))
+}
+
+/// HQ / node position line for mesh share (never 0,0).
+pub fn format_position_share(label: &str, lat: f64, lon: f64) -> Option<String> {
+    if !lat.is_finite() || !lon.is_finite() {
+        return None;
+    }
+    if lat.abs() < 1e-9 && lon.abs() < 1e-9 {
+        return None;
+    }
+    let label = label.trim();
+    let body = if label.is_empty() {
+        format!("{lat:.5}, {lon:.5}")
+    } else {
+        format!("{label}: {lat:.5}, {lon:.5}")
+    };
+    Some(clamp_mesh_text(body))
+}
+
+/// Channel name only — never a secret.
+pub fn format_channel_share(name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        return String::new();
+    }
+    clamp_mesh_text(format!("Channel: {name}"))
+}
+
+/// Compose + menu actions (channel vs DM).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ComposePlusAction {
+    MyContact,
+    MyPosition,
+    ShareChannel,
+    ShareContact,
+    ShareMapLocation,
+    /// Channel composer only — open a quick DM to another node.
+    QuickDm,
+}
+
+/// Plus button that lists share / quick-DM actions above the compose field.
+#[component]
+pub fn ComposePlusButton(
+    #[props(default = false)] disabled: bool,
+    /// When true, include “Quick message (DM)” (channel threads only).
+    #[props(default = false)]
+    show_quick_dm: bool,
+    on_action: EventHandler<ComposePlusAction>,
+) -> Element {
+    let mut open = use_signal(|| false);
+    let items: Vec<(ComposePlusAction, &'static str)> = {
+        let mut rows = vec![
+            (ComposePlusAction::MyContact, "My contact info"),
+            (ComposePlusAction::MyPosition, "My current position"),
+            (ComposePlusAction::ShareChannel, "Share channel"),
+            (ComposePlusAction::ShareContact, "Share contact"),
+            (ComposePlusAction::ShareMapLocation, "Share location from map"),
+        ];
+        if show_quick_dm {
+            rows.push((ComposePlusAction::QuickDm, "Quick message (DM)"));
+        }
+        rows
+    };
+    rsx! {
+        div { class: "emoji-picker-wrap",
+            button {
+                r#type: "button",
+                class: "emoji-picker-trigger",
+                title: "Share and quick actions",
+                "aria-label": "Share and quick actions",
+                "aria-expanded": if open() { "true" } else { "false" },
+                disabled,
+                onclick: move |event: MouseEvent| {
+                    event.prevent_default();
+                    event.stop_propagation();
+                    if !disabled {
+                        open.set(!open());
+                    }
+                },
+                Icon { name: IconName::Plus, size: 18 }
+            }
+            if open() {
+                div {
+                    class: "compose-plus-panel",
+                    role: "menu",
+                    "aria-label": "Share and quick actions",
+                    onclick: move |event: MouseEvent| event.stop_propagation(),
+                    for (action, label) in items {
+                        button {
+                            r#type: "button",
+                            class: "compose-plus-item",
+                            role: "menuitem",
+                            onclick: move |event: MouseEvent| {
+                                event.prevent_default();
+                                event.stop_propagation();
+                                open.set(false);
+                                on_action.call(action);
+                            },
+                            "{label}"
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1344,15 +1539,20 @@ pub fn name_avatar_emojis(name: &str) -> String {
 pub fn ConversationAvatar(
     label: String,
     seed: String,
-    /// Smaller circle for chat rows beside bubbles.
+    /// Smaller circle for rail rows.
     #[props(default = false)]
     compact: bool,
+    /// Larger circle for thread headers inside the bubble.
+    #[props(default = false)]
+    large: bool,
 ) -> Element {
     use unicode_segmentation::UnicodeSegmentation;
     let emojis = name_avatar_emojis(&label);
     let letter = conversation_avatar_letter(&label);
     let tone = conversation_avatar_tone(&seed);
-    let size = if compact {
+    let size = if large {
+        "messages-avatar messages-avatar-lg"
+    } else if compact {
         "messages-avatar messages-avatar-sm"
     } else {
         "messages-avatar"
@@ -1532,5 +1732,36 @@ mod gauge_tests {
         assert!((gauge_fraction(-10.0, 0.0, 100.0) - 0.0).abs() < 0.001);
         assert!((gauge_fraction(200.0, 0.0, 100.0) - 1.0).abs() < 0.001);
         assert!((gauge_fraction(5.0, 10.0, 10.0) - 0.0).abs() < 0.001);
+    }
+}
+
+#[cfg(test)]
+mod compose_share_tests {
+    use super::{
+        format_channel_share, format_position_share, insert_mesh_snippet, MESH_TEXT_MAX_BYTES,
+    };
+
+    #[test]
+    fn position_share_skips_origin() {
+        assert!(format_position_share("HQ", 0.0, 0.0).is_none());
+        let text = format_position_share("HQ", 34.1, -117.2).unwrap();
+        assert!(text.contains("34.10000"));
+        assert!(text.starts_with("HQ:"));
+    }
+
+    #[test]
+    fn channel_share_never_includes_secret_word() {
+        let text = format_channel_share("highdesert");
+        assert_eq!(text, "Channel: highdesert");
+        assert!(!text.to_ascii_lowercase().contains("secret"));
+    }
+
+    #[test]
+    fn insert_snippet_respects_budget() {
+        let long = "a".repeat(MESH_TEXT_MAX_BYTES);
+        let out = insert_mesh_snippet(&long, " more");
+        assert!(out.len() <= MESH_TEXT_MAX_BYTES);
+        assert_eq!(insert_mesh_snippet("", "hi"), "hi");
+        assert_eq!(insert_mesh_snippet("hi", "there"), "hi there");
     }
 }

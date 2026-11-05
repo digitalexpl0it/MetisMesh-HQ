@@ -865,7 +865,16 @@ impl PoolShared {
         };
         self.reconcile_primary();
         if empty {
-            write_status(&self.idle, "disconnected", "Disconnected.");
+            // Keep a specific disconnect reason the ending slot already wrote
+            // (busy companion, USB permission, etc.).
+            let mut idle = self.idle.lock().unwrap_or_else(|err| err.into_inner());
+            let keep = idle.state == "disconnected"
+                && !idle.detail.trim().is_empty()
+                && idle.detail != "Disconnected.";
+            if !keep {
+                idle.state = "disconnected".into();
+                idle.detail = "Disconnected.".into();
+            }
         }
     }
 
@@ -995,7 +1004,7 @@ impl PoolShared {
         tokio::spawn(async move {
             pool.notify(
                 "pairing",
-                "Pairing with the radio. Enter the PIN shown on the radio if asked by the system.",
+                "Pairing with the radio. If Windows or macOS shows a Bluetooth PIN prompt, enter the same six-digit PIN there.",
             );
             match crate::ble_pair::ensure_paired(&target, pin).await {
                 Ok(()) => {
@@ -2230,7 +2239,7 @@ async fn connect_transport(transport: &str, address: &str) -> Result<MeshCore, S
             .map_err(|err| clarify_usb_connect_error(&err.to_string())),
         "ble" => MeshCore::ble_connect(address)
             .await
-            .map_err(|err| err.to_string()),
+            .map_err(|err| clarify_ble_connect_error(&err.to_string())),
         "tcp" => {
             let (host, port) = crate::tcp_radio::parse_tcp_address(address)?;
             MeshCore::tcp(&host, port)
@@ -2239,6 +2248,13 @@ async fn connect_transport(transport: &str, address: &str) -> Result<MeshCore, S
         }
         other => Err(format!("Unknown radio transport `{other}`.")),
     }
+}
+
+fn clarify_ble_connect_error(raw: &str) -> String {
+    if is_explicit_companion_busy_error(raw) {
+        return format_held_disconnect("ble", raw);
+    }
+    raw.to_string()
 }
 
 fn clarify_usb_connect_error(raw: &str) -> String {
@@ -2305,6 +2321,93 @@ fn is_fatal_usb_session_error(err: &str) -> bool {
         || lower.contains("sharing violation")
         || lower.contains("access is denied")
         || (lower.contains("timeout") && (lower.contains("selfinfo") || lower.contains("self info")))
+}
+
+/// How long a session must live before an early connect failure streak resets.
+const EARLY_SESSION: Duration = Duration::from_secs(20);
+/// Consecutive early held-link failures before we stop auto-reconnect.
+const COMPANION_BUSY_STREAK_LIMIT: u8 = 3;
+
+fn companion_held_message(transport: &str) -> &'static str {
+    match transport {
+        "ble" => {
+            "Companion busy — disconnect the phone MeshCore app (or any other Bluetooth client) from this radio, then Connect again."
+        }
+        "usb" => {
+            "Companion busy — close any other app using this serial port, then Connect again."
+        }
+        "tcp" => {
+            "Companion busy — another client may hold this TCP session, or the companion is not listening. Free the link, then Connect again."
+        }
+        _ => "Companion busy — free the link, then Connect again.",
+    }
+}
+
+/// Clear "someone else holds this companion" signals (port busy, GATT already taken).
+fn is_explicit_companion_busy_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("sharing violation")
+        || lower.contains("device or resource busy")
+        || lower.contains("resource busy")
+        || lower.contains("already connected")
+        || lower.contains("br-connection-busy")
+        || lower.contains("connection busy")
+        || lower.contains("in use by another")
+        || lower.contains("companion busy")
+}
+
+/// Early-session failures that usually mean the link is held elsewhere (or never came up).
+fn looks_like_held_companion(transport: &str, err: &str) -> bool {
+    if is_explicit_companion_busy_error(err) {
+        return true;
+    }
+    let lower = err.to_ascii_lowercase();
+    match transport {
+        "ble" => {
+            is_link_error(err)
+                || lower.contains("failed to connect")
+                || lower.contains("connection refused")
+                || lower.contains("connection aborted")
+                || lower.contains("timed out")
+                || lower.contains("timeout")
+                || lower.contains("gatt")
+        }
+        "tcp" => {
+            lower.contains("connection refused")
+                || lower.contains("connection reset")
+                || lower.contains("broken pipe")
+                || lower.contains("timed out")
+                || lower.contains("timeout")
+                || is_link_error(err)
+        }
+        "usb" => {
+            lower.contains("sharing violation")
+                || lower.contains("access is denied")
+                || (lower.contains("timeout")
+                    && (lower.contains("selfinfo") || lower.contains("self info")))
+        }
+        _ => false,
+    }
+}
+
+fn format_held_disconnect(transport: &str, raw: &str) -> String {
+    let hint = companion_held_message(transport);
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("companion busy") || lower.contains("disconnect the phone") {
+        return raw.to_string();
+    }
+    if raw.trim().is_empty() {
+        return hint.to_string();
+    }
+    format!("{raw} {hint}")
+}
+
+/// End the slot with a lasting status line (copied to idle so remove_slot keeps it).
+fn end_slot_disconnected(ctx: &SlotCtx, detail: String) {
+    clear_session_telemetry(&ctx.status);
+    write_status(&ctx.status, "disconnected", detail.clone());
+    write_status(&ctx.pool.idle, "disconnected", detail.clone());
+    let _ = ctx.pool.db.set_radio_error(ctx.id, &detail);
 }
 
 /// Rescan USB ports and rewrite the slot open path when the OS renumerated the device.
@@ -2380,7 +2483,7 @@ async fn wait_or_stop(
 }
 
 /// One task per radio: connect, run the session, reconnect with backoff until the
-/// operator disconnects.
+/// operator disconnects (or a held companion stops auto-retry).
 async fn slot_loop(
     ctx: Arc<SlotCtx>,
     mut rx: UnboundedReceiver<RadioCmd>,
@@ -2388,6 +2491,7 @@ async fn slot_loop(
 ) {
     let status = &ctx.status;
     let mut backoff = Duration::from_secs(2);
+    let mut busy_streak: u8 = 0;
     loop {
         if ctx.transport == "usb" {
             match resolve_and_store_usb_path(&ctx).await {
@@ -2456,7 +2560,24 @@ async fn slot_loop(
             }
             let _ = meshcore.disconnect().await;
         }
-        if ctx.transport == "ble" {
+        // Tear down OS GATT when the operator stops the slot (so the phone can
+        // take the radio). On Windows, also skipping force_disconnect during
+        // Lost avoids a WinRT connect/disconnect race that loops forever.
+        let force_ble_drop = ctx.transport == "ble"
+            && match &end {
+                SessionEnd::Stopped => true,
+                SessionEnd::Lost(_) => {
+                    #[cfg(target_os = "windows")]
+                    {
+                        false
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        true
+                    }
+                }
+            };
+        if force_ble_drop {
             let name = ctx
                 .address
                 .lock()
@@ -2493,13 +2614,33 @@ async fn slot_loop(
                     error
                 };
                 if ctx.transport == "usb" && is_fatal_usb_session_error(&error) {
-                    clear_session_telemetry(status);
-                    write_status(status, "disconnected", error.clone());
-                    let _ = ctx.pool.db.set_radio_error(ctx.id, &error);
+                    end_slot_disconnected(&ctx, error);
                     return;
                 }
+                let early = started.elapsed() <= EARLY_SESSION;
                 if started.elapsed() > Duration::from_secs(30) {
                     backoff = Duration::from_secs(2);
+                    busy_streak = 0;
+                }
+                let held = looks_like_held_companion(&ctx.transport, &error);
+                if early && held {
+                    busy_streak = busy_streak.saturating_add(1);
+                } else if early {
+                    busy_streak = 0;
+                }
+                // Explicit busy (port / GATT taken): stop now. Soft early failures
+                // (timeout / not connected while another client likely holds the
+                // radio): stop after a short streak so we do not reconnect forever.
+                let stop_for_busy = is_explicit_companion_busy_error(&error)
+                    || busy_streak >= COMPANION_BUSY_STREAK_LIMIT;
+                if stop_for_busy && held {
+                    end_slot_disconnected(&ctx, format_held_disconnect(&ctx.transport, &error));
+                    return;
+                }
+                // Windows BLE needs more settle time after a dropped GATT session.
+                #[cfg(target_os = "windows")]
+                if ctx.transport == "ble" {
+                    backoff = backoff.max(Duration::from_secs(5));
                 }
                 clear_session_telemetry(status);
                 write_status(status, "reconnecting", error.clone());
@@ -3695,6 +3836,9 @@ async fn run_session(
     let mut pushed_generation = 0i64;
     let mut was_primary = ctx.is_primary();
     let mut last_battery = Instant::now();
+    // Consecutive battery/channel TX failures while UI still says "connected".
+    // meshcore-rs often logs "BLE TX error: Not connected" beside a plain timeout.
+    let mut link_fail_streak: u8 = 0;
     // Periodic claimed-infra status sweep (Settings interval; 0 = connect-only).
     let mut last_infra_sweep = Instant::now();
     // Contacts were just synced during connect.
@@ -4282,20 +4426,43 @@ async fn run_session(
                 if primary && generation != pushed_generation {
                     if let Some(commands) = lock_commands_brief(&meshcore).await {
                         match push_channel(db, secrets, &commands, max_channels).await {
-                            Ok(true) => pushed_generation = generation,
+                            Ok(true) => {
+                                pushed_generation = generation;
+                                link_fail_streak = 0;
+                            }
                             Ok(false) => {}
-                            Err(err) => hq_log!(warn, "channel: {err}"),
+                            Err(err) => {
+                                hq_log!(warn, "channel: {err}");
+                                if is_link_error(&err) || is_channel_query_timeout(&err) {
+                                    link_fail_streak = link_fail_streak.saturating_add(1);
+                                }
+                            }
                         }
                     }
                 }
                 if last_battery.elapsed() >= Duration::from_secs(15) {
                     if let Some(commands) = lock_commands_brief(&meshcore).await {
                         match commands.get_bat().await {
-                            Ok(battery) => apply_battery(db, status, &battery),
-                            Err(err) => hq_log!(debug, "battery poll: {err}"),
+                            Ok(battery) => {
+                                apply_battery(db, status, &battery);
+                                link_fail_streak = 0;
+                            }
+                            Err(err) => {
+                                let msg = err.to_string();
+                                hq_log!(debug, "battery poll: {msg}");
+                                if is_link_error(&msg) || is_channel_query_timeout(&msg) {
+                                    link_fail_streak = link_fail_streak.saturating_add(1);
+                                }
+                            }
                         }
                         last_battery = Instant::now();
                     }
+                }
+                // GATT died under us: stop pretending Connected and reconnect.
+                if link_fail_streak >= 3 {
+                    return SessionEnd::Lost(
+                        "Companion link dropped (radio not responding). Reconnecting…".into(),
+                    );
                 }
                 // Periodic claimed repeater/room/sensor status (primary only).
                 if ctx.is_primary() {
@@ -4966,8 +5133,14 @@ async fn on_direct(
     }
     if let Some(reply) = decision.reply {
         if let Some(pubkey) = matches.first().map(|node| node.pubkey.clone()) {
-            db.queue_text(&pubkey, &reply, &reply)
-                .map_err(|err| err.to_string())?;
+            // Same gap as channel bot — stops reconnect/drain from double-queuing
+            // identical enrollment replies within a minute.
+            if crate::services::bot_rate_ok(&format!("dm-enroll:{pubkey}")) {
+                db.queue_text(&pubkey, &reply, &reply)
+                    .map_err(|err| err.to_string())?;
+            } else {
+                hq_log!(debug, "enrollment reply rate-limited for {pubkey}");
+            }
         }
     }
     Ok(())
@@ -4988,7 +5161,7 @@ fn handle_bot_channel(
         if !local_operator && !crate::services::is_enrolled(node.enrollment) {
             enqueue_channel_text(
                 slot,
-                crate::signup::fit_mesh("Not enrolled. DM signup to this HQ first."),
+                crate::signup::fit_mesh("Not enrolled. DM #signup to this HQ first."),
             );
             return;
         }
@@ -6041,6 +6214,36 @@ mod tests {
         let msg = clarify_usb_connect_error("No such file or directory (os error 2)");
         assert!(!is_fatal_usb_session_error(&msg), "{msg}");
         assert!(msg.to_ascii_lowercase().contains("rematch"), "{msg}");
+    }
+
+    #[test]
+    fn ble_already_connected_is_explicit_busy() {
+        let raw = "Bluetooth error: Already connected";
+        assert!(is_explicit_companion_busy_error(raw));
+        let msg = clarify_ble_connect_error(raw);
+        assert!(msg.to_ascii_lowercase().contains("companion busy"), "{msg}");
+        assert!(msg.to_ascii_lowercase().contains("phone"), "{msg}");
+    }
+
+    #[test]
+    fn early_ble_not_connected_looks_held() {
+        assert!(looks_like_held_companion(
+            "ble",
+            "Channel push failed — radio link likely dropped: BLE TX error: Not connected"
+        ));
+        assert!(looks_like_held_companion(
+            "ble",
+            "Timeout waiting for Some(SelfInfo)"
+        ));
+        assert!(!is_explicit_companion_busy_error(
+            "Timeout waiting for Some(SelfInfo)"
+        ));
+    }
+
+    #[test]
+    fn held_disconnect_keeps_existing_busy_copy() {
+        let existing = companion_held_message("ble");
+        assert_eq!(format_held_disconnect("ble", existing), existing);
     }
 
     #[test]

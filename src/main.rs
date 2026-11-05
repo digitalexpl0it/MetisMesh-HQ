@@ -1,3 +1,9 @@
+// Hide the console window on Windows release builds (avoids a lingering cmd host).
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 #[macro_use]
 mod app_log;
 mod backup;
@@ -35,6 +41,8 @@ use secrets::Secrets;
 use ui::{install, App, AppState};
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    set_windows_app_user_model_id();
     let data = data_dir();
     if let Err(err) = std::fs::create_dir_all(&data) {
         eprintln!(
@@ -97,14 +105,18 @@ fn desktop_config() -> dioxus::desktop::Config {
     // WebView briefly shows unstyled markup. Inline the app CSS in the HTML head
     // so layout/theme exist before Dioxus mounts content into #main.
     let boot_head = {
+        // user-scalable=no: keep trackpad pinch off WebView page-zoom so the
+        // map can own ctrl+wheel (Linux WebKitGTK / Windows WebView2).
         let mut head = String::from(
-            r#"<style>
+            r#"<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<style>
 html, body, #main {
   background-color: #101418;
   color: #f4f4f5;
   color-scheme: dark;
   margin: 0;
   min-height: 100%;
+  overscroll-behavior: none;
 }
 </style>
 <style>
@@ -117,10 +129,20 @@ html, body, #main {
         head
     };
     // Mesh-head mark from the EmergHQ / Metis brand logo (assets/app_icon.png).
+    // WindowBuilder also gets the icon so Windows taskbar / title bar pick it up
+    // (exe VERSIONINFO icon alone is not always enough for the live HWND).
     let app_icon = dioxus::desktop::icon_from_memory::<dioxus::desktop::tao::window::Icon>(
         include_bytes!("../assets/app_icon.png"),
     )
     .ok();
+
+    let mut window = WindowBuilder::new()
+        .with_title("Metis Mesh HQ")
+        .with_inner_size(LogicalSize::new(1200.0, 800.0))
+        .with_min_inner_size(LogicalSize::new(960.0, 640.0));
+    if let Some(ref icon) = app_icon {
+        window = window.with_window_icon(Some(icon.clone()));
+    }
 
     let mut cfg = Config::new()
         .with_menu(None)
@@ -130,12 +152,7 @@ html, body, #main {
         .with_custom_protocol("metis", |_id, request| {
             serve_metis_protocol(request)
         })
-        .with_window(
-            WindowBuilder::new()
-                .with_title("Metis Mesh HQ")
-                .with_inner_size(LogicalSize::new(1200.0, 800.0))
-                .with_min_inner_size(LogicalSize::new(960.0, 640.0)),
-        );
+        .with_window(window);
     if let Some(icon) = app_icon {
         cfg = cfg.with_icon(icon);
     }
@@ -149,6 +166,20 @@ html, body, #main {
             #[cfg(not(target_os = "linux"))]
             let _ = window;
         })
+}
+
+/// Group the process under one taskbar identity so the window icon (not a blank
+/// console host) shows for release builds.
+#[cfg(target_os = "windows")]
+fn set_windows_app_user_model_id() {
+    use std::os::windows::ffi::OsStrExt;
+    let id: Vec<u16> = std::ffi::OsStr::new("DigitalExpl0it.MetisMeshHQ.1")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        let _ = windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(id.as_ptr());
+    }
 }
 
 #[cfg(feature = "desktop")]

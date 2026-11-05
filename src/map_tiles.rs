@@ -1,5 +1,7 @@
 //! Multi-region offline PMTiles downloads (Protomaps extracts).
 
+use std::fs::File;
+use std::io::{copy, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
@@ -10,6 +12,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::Db;
 use crate::pmtiles_path;
+
+/// Spawn CLI helpers without flashing a console on Windows.
+fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(program);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
 
 const REGIONS_KEY: &str = "map_regions";
 const ACTIVE_KEY: &str = "map_active_region";
@@ -771,19 +786,43 @@ fn ensure_pmtiles_cli() -> Result<PathBuf, String> {
 }
 
 fn which_pmtiles() -> Result<PathBuf, String> {
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg("command -v pmtiles")
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err("pmtiles not on PATH".into());
+    #[cfg(target_os = "windows")]
+    {
+        let output = command("where")
+            .arg("pmtiles.exe")
+            .output()
+            .or_else(|_| command("where").arg("pmtiles").output())
+            .map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err("pmtiles not on PATH".into());
+        }
+        let path = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if path.is_empty() {
+            return Err("pmtiles not on PATH".into());
+        }
+        return Ok(PathBuf::from(path));
     }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if path.is_empty() {
-        return Err("pmtiles not on PATH".into());
+    #[cfg(not(target_os = "windows"))]
+    {
+        let output = command("sh")
+            .arg("-c")
+            .arg("command -v pmtiles")
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err("pmtiles not on PATH".into());
+        }
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if path.is_empty() {
+            return Err("pmtiles not on PATH".into());
+        }
+        Ok(PathBuf::from(path))
     }
-    Ok(PathBuf::from(path))
 }
 
 fn pmtiles_bin_name() -> &'static str {
@@ -812,8 +851,14 @@ fn download_pmtiles_cli(dest: &Path) -> Result<(), String> {
         .map_err(|e| format!("GitHub release lookup failed: {e}"))?
         .into_string()
         .map_err(|e| e.to_string())?;
-    let needle = format!("_{os}_{arch}.tar.gz");
-    let url = api
+    // Linux ships .tar.gz; Windows and recent Darwin builds ship .zip.
+    let needles = [
+        format!("_{os}_{arch}.zip"),
+        format!("-{os}_{arch}.zip"),
+        format!("_{os}_{arch}.tar.gz"),
+        format!("-{os}_{arch}.tar.gz"),
+    ];
+    let urls: Vec<String> = api
         .split("\"browser_download_url\"")
         .skip(1)
         .filter_map(|chunk| {
@@ -822,34 +867,53 @@ fn download_pmtiles_cli(dest: &Path) -> Result<(), String> {
             let end = rest.find('"')?;
             Some(rest[..end].to_string())
         })
-        .find(|u| u.contains(&needle))
+        .collect();
+    let url = needles
+        .iter()
+        .find_map(|needle| urls.iter().find(|u| u.contains(needle.as_str())).cloned())
         .ok_or_else(|| format!("No pmtiles CLI asset for {os}/{arch}"))?;
-    let tmp = bin_dir().join("go-pmtiles.tgz");
+    let is_zip = url.ends_with(".zip");
+    let tmp = bin_dir().join(if is_zip {
+        "go-pmtiles.zip"
+    } else {
+        "go-pmtiles.tgz"
+    });
     {
         let resp = ureq::get(&url)
             .set("User-Agent", "metis-mesh-hq")
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(180))
             .call()
             .map_err(|e| format!("CLI download failed: {e}"))?;
         let mut reader = resp.into_reader();
-        let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-        std::io::copy(&mut reader, &mut file).map_err(|e| e.to_string())?;
+        let mut file = File::create(&tmp).map_err(|e| e.to_string())?;
+        copy(&mut reader, &mut file).map_err(|e| e.to_string())?;
     }
-    // Extract with tar.
-    let status = Command::new("tar")
-        .args(["-xzf", tmp.to_str().unwrap_or(""), "-C"])
-        .arg(bin_dir())
-        .status()
-        .map_err(|e| format!("tar extract failed: {e}"))?;
+    set_download(DownloadStatus {
+        region_id: String::new(),
+        phase: "cli".into(),
+        detail: "Extracting pmtiles CLI…".into(),
+        running: true,
+    });
+    if is_zip {
+        extract_zip_archive(&tmp, &bin_dir())?;
+    } else {
+        let status = command("tar")
+            .args(["-xzf", tmp.to_str().unwrap_or(""), "-C"])
+            .arg(bin_dir())
+            .status()
+            .map_err(|e| format!("tar extract failed: {e}"))?;
+        if !status.success() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err("Failed to extract pmtiles CLI archive.".into());
+        }
+    }
     let _ = std::fs::remove_file(&tmp);
-    if !status.success() {
-        return Err("Failed to extract pmtiles CLI archive.".into());
-    }
     // Binary may be named go-pmtiles or pmtiles depending on release.
     let candidates = [
+        bin_dir().join(pmtiles_bin_name()),
         bin_dir().join("pmtiles"),
         bin_dir().join("go-pmtiles"),
-        bin_dir().join(pmtiles_bin_name()),
+        bin_dir().join("pmtiles.exe"),
     ];
     let found = candidates.into_iter().find(|p| p.is_file());
     let Some(found) = found else {
@@ -864,6 +928,44 @@ fn download_pmtiles_cli(dest: &Path) -> Result<(), String> {
         let _ = std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755));
     }
     Ok(())
+}
+
+fn extract_zip_archive(archive: &Path, dest_dir: &Path) -> Result<(), String> {
+    let file = File::open(archive).map_err(|e| format!("open zip: {e}"))?;
+    let mut zip = zip::ZipArchive::new(BufReader::new(file))
+        .map_err(|e| format!("read zip: {e}"))?;
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| format!("zip entry: {e}"))?;
+        let name = entry.name().replace('\\', "/");
+        let base = Path::new(&name)
+            .file_name()
+            .map(|s| s.to_os_string())
+            .filter(|s| !s.is_empty());
+        let Some(base) = base else {
+            continue;
+        };
+        // Only lift the CLI binary (ignore README / LICENSE in the zip).
+        let base_str = base.to_string_lossy();
+        let is_cli = base_str.eq_ignore_ascii_case("pmtiles")
+            || base_str.eq_ignore_ascii_case("pmtiles.exe")
+            || base_str.eq_ignore_ascii_case("go-pmtiles")
+            || base_str.eq_ignore_ascii_case("go-pmtiles.exe");
+        if !is_cli || entry.is_dir() {
+            continue;
+        }
+        let out_path = dest_dir.join(&base);
+        let mut out = File::create(&out_path).map_err(|e| format!("write {base_str}: {e}"))?;
+        copy(&mut entry, &mut out).map_err(|e| format!("extract {base_str}: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(0o755));
+        }
+        return Ok(());
+    }
+    Err("pmtiles binary not found inside zip.".into())
 }
 
 fn pmtiles_release_triplet() -> Result<(&'static str, &'static str), String> {
@@ -974,7 +1076,7 @@ fn run_download(db: &Db, region_id: &str) -> Result<(), String> {
     let min_zoom = min_zoom_for_bbox(bbox);
     let minzoom_flag = format!("--minzoom={min_zoom}");
     let maxzoom_flag = format!("--maxzoom={MAX_ZOOM}");
-    let output = Command::new(&cli)
+    let output = command(&cli)
         .args([
             "extract",
             &source,

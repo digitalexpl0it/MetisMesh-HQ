@@ -19,8 +19,8 @@ use super::map_host::{
     map_get_camera, map_init, map_pulse_at, map_set_geojson, map_camera_from_global,
     map_clear_region_draft, map_is_moving, map_place_region_draft, map_region_draft_seq,
     map_set_nodes, map_set_style, map_set_visibility, map_snapshot_region_draft,
-    map_take_favorite_toggle, map_take_selection, region_draft_from_placement, save_basemap,
-    save_camera, BasemapKind, MapCamera, RegionDraftConfirm, MAP_CONTAINER_ID,
+    map_take_favorite_toggle, map_take_selection, map_zoom_by, region_draft_from_placement,
+    save_basemap, save_camera, BasemapKind, MapCamera, RegionDraftConfirm, MAP_CONTAINER_ID,
 };
 use super::state;
 use super::widgets::{Button, ButtonKind, PageHeading, SelectInput, SlideDownPanel};
@@ -2423,6 +2423,37 @@ pub fn MapPage() -> Element {
                 div {
                     id: "{MAP_CONTAINER_ID}",
                     class: "map-canvas",
+                }
+                // Owned by Dioxus so re-renders do not wipe JS-injected buttons
+                // (common on Windows while the download card ticks).
+                div {
+                    class: "map-zoom-controls",
+                    role: "group",
+                    aria_label: "Map zoom",
+                    button {
+                        r#type: "button",
+                        class: "map-zoom-btn",
+                        title: "Zoom in",
+                        aria_label: "Zoom in",
+                        onclick: move |_| {
+                            spawn(async move {
+                                map_zoom_by(1).await;
+                            });
+                        },
+                        "+"
+                    }
+                    button {
+                        r#type: "button",
+                        class: "map-zoom-btn",
+                        title: "Zoom out",
+                        aria_label: "Zoom out",
+                        onclick: move |_| {
+                            spawn(async move {
+                                map_zoom_by(-1).await;
+                            });
+                        },
+                        "−"
+                    }
                 }
                 if show_download()
                     || pending_region().is_some()

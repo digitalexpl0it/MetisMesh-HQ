@@ -38,6 +38,8 @@ pub enum IconName {
     Terminal,
     /// Circle with i — Help.
     Help,
+    /// Plus — compose attach / share menu.
+    Plus,
 }
 
 #[component]
@@ -213,5 +215,6 @@ fn icon_paths(name: IconName) -> &'static [&'static str] {
             "M12 16v-4",
             "M12 8h.01",
         ],
+        IconName::Plus => &["M12 5v14", "M5 12h14"],
     }
 }

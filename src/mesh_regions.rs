@@ -49,6 +49,28 @@ pub fn region_scope_key(name: &str) -> [u8; 16] {
     key
 }
 
+/// Normalize a hash-channel name for join: trim, strip one leading `#`.
+pub fn normalize_hash_channel_name(raw: &str) -> Result<String, String> {
+    let name = raw.trim().strip_prefix('#').unwrap_or(raw.trim()).trim();
+    if name.is_empty() {
+        return Err("Hash channel name is required.".into());
+    }
+    if name.len() > 16 {
+        return Err("Hash channel name is limited to 16 characters.".into());
+    }
+    Ok(name.to_string())
+}
+
+/// MeshCore hash-channel secret: first 16 bytes of SHA-256(UTF-8 name).
+pub fn hash_channel_secret(name: &str) -> [u8; 16] {
+    let mut hasher = Sha256::new();
+    hasher.update(name.as_bytes());
+    let digest = hasher.finalize();
+    let mut key = [0u8; 16];
+    key.copy_from_slice(&digest[..16]);
+    key
+}
+
 /// Build `CMD_SET_DEFAULT_FLOOD_SCOPE (63)` frame: clear, or name(31 NUL) + key(16).
 pub fn default_flood_scope_frame(scope: Option<&str>) -> Result<Vec<u8>, String> {
     const CMD: u8 = 63;
@@ -170,6 +192,18 @@ pub fn save_active_region(db: &Db, scope: Option<&str>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hash_channel_secret_is_stable() {
+        let a = hash_channel_secret("highdesert");
+        let b = hash_channel_secret("highdesert");
+        assert_eq!(a, b);
+        assert_ne!(a, hash_channel_secret("other"));
+        assert_eq!(
+            normalize_hash_channel_name("#Ops").unwrap(),
+            "Ops"
+        );
+    }
 
     #[test]
     fn validate_and_normalize() {

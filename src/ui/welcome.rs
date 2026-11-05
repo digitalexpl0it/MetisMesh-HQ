@@ -158,6 +158,7 @@ pub fn WelcomeWizard(
                                                                     .set(format!("Install task failed: {err}")),
                                                             }
                                                             install_kind.set(None);
+                                                            deps::invalidate_soft_status();
                                                             soft_tick.with_mut(|n| *n = n.wrapping_add(1));
                                                         });
                                                     },
@@ -180,6 +181,7 @@ pub fn WelcomeWizard(
                                 kind: ButtonKind::Ghost,
                                 disabled: install_kind().is_some(),
                                 onclick: move |_| {
+                                    deps::invalidate_soft_status();
                                     soft_tick.with_mut(|n| *n = n.wrapping_add(1));
                                     install_note.set(String::new());
                                 },

@@ -1,6 +1,6 @@
 [package]
 name = "metis-mesh-hq"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "Offline emergency headquarters for MeshCore communities"
 license = "MIT"
@@ -43,6 +43,9 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 bluer = { version = "0.17", features = ["bluetoothd"] }
 gtk = "0.18"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_UI_Shell", "Win32_Foundation"] }
 
 [features]
 default = ["desktop"]

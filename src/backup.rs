@@ -527,7 +527,7 @@ mod tests {
         secrets.store("METIS-INFO", &secret).unwrap();
         let _ = db.set_setting("hq_name", "Test HQ");
         // Private channel row for secret inventory (Public occupies slot 0 in defaults).
-        let _ = db.create_channel("BACKUP-TEST", "private", &secrets);
+        let _ = db.create_channel_with_region("BACKUP-TEST", "private", &secrets, None);
 
         let bytes = create_backup_bytes(&db, &secrets, "correct horse").unwrap();
         assert!(bytes.starts_with(MAGIC));

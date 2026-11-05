@@ -4,6 +4,21 @@
 //! Soft checks (BlueZ, dialout, flasher CLIs) run inside the welcome UI.
 
 use std::process::Command;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// Spawn helper processes without flashing a console window on Windows.
+fn command(program: &str) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(program);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CriticalStatus {
@@ -137,8 +152,38 @@ fn install_critical() -> Result<(), String> {
     }
 }
 
+fn soft_status_cache() -> &'static Mutex<Option<(Instant, SoftDepsReport)>> {
+    static CACHE: Mutex<Option<(Instant, SoftDepsReport)>> = Mutex::new(None);
+    &CACHE
+}
+
 /// Soft deps for the welcome System setup step.
+///
+/// Cached briefly: welcome re-renders on the app tick, and uncached probes spawn
+/// `where` / PowerShell on Windows (console flash + UI stall).
 pub fn soft_status() -> SoftDepsReport {
+    if let Ok(guard) = soft_status_cache().lock() {
+        if let Some((at, report)) = guard.as_ref() {
+            if at.elapsed() < Duration::from_secs(4) {
+                return report.clone();
+            }
+        }
+    }
+    let report = soft_status_uncached();
+    if let Ok(mut guard) = soft_status_cache().lock() {
+        *guard = Some((Instant::now(), report.clone()));
+    }
+    report
+}
+
+/// Bust the soft-deps cache after an Install attempt.
+pub fn invalidate_soft_status() {
+    if let Ok(mut guard) = soft_status_cache().lock() {
+        *guard = None;
+    }
+}
+
+fn soft_status_uncached() -> SoftDepsReport {
     let mut items = Vec::new();
 
     #[cfg(target_os = "linux")]
@@ -354,7 +399,7 @@ fn python_commands() -> &'static [&'static str] {
 #[cfg(not(target_os = "windows"))]
 fn python_pip_module_ok() -> bool {
     python_commands().iter().any(|py| {
-        Command::new(py)
+        command(py)
             .args(["-m", "pip", "--version"])
             .output()
             .map(|o| o.status.success())
@@ -373,13 +418,13 @@ fn run_pip_user_install(pip_name: &str) -> Result<(bool, String), String> {
             "--user".into(),
             pip_name.to_string(),
         ];
-        match Command::new(py).args(&args).output() {
+        match command(py).args(&args).output() {
             Ok(output) if output.status.success() => return Ok((true, String::new())),
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();
                 if stderr.contains("externally-managed-environment") {
                     args.push("--break-system-packages".into());
-                    match Command::new(py).args(&args).output() {
+                    match command(py).args(&args).output() {
                         Ok(retry) if retry.status.success() => return Ok((true, String::new())),
                         Ok(retry) => {
                             last_err = String::from_utf8_lossy(&retry.stderr).to_string();
@@ -434,7 +479,7 @@ fn install_nrfutil() -> Result<String, String> {
 fn install_python_cli(pip_name: &str, binaries: &[&str]) -> Result<String, String> {
     // Prefer pipx on Ubuntu 26.04+ (avoids PEP 668 externally-managed env).
     if ensure_pipx().is_ok() {
-        let output = Command::new(pipx_bin())
+        let output = command(pipx_bin())
             .args(["install", pip_name])
             .output()
             .map_err(|e| format!("Could not run pipx: {e}"))?;
@@ -501,7 +546,7 @@ fn ensure_pipx() -> Result<(), String> {
 
 fn tool_on_path(names: &[&str]) -> bool {
     for name in names {
-        if let Ok(output) = Command::new("which").arg(name).output() {
+        if let Ok(output) = command("which").arg(name).output() {
             if output.status.success() {
                 let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !path.is_empty() {
@@ -509,7 +554,7 @@ fn tool_on_path(names: &[&str]) -> bool {
                 }
             }
         }
-        if let Ok(output) = Command::new("where").arg(name).output() {
+        if let Ok(output) = command("where").arg(name).output() {
             if output.status.success() {
                 let path = String::from_utf8_lossy(&output.stdout)
                     .lines()
@@ -585,7 +630,7 @@ fn linux_is_apt() -> bool {
 
 #[cfg(target_os = "linux")]
 fn linux_package_installed(name: &str) -> bool {
-    Command::new("dpkg-query")
+    command("dpkg-query")
         .args(["-W", "-f=${Status}", name])
         .output()
         .ok()
@@ -650,7 +695,7 @@ fn run_pkexec_apt(packages: &[&str]) -> Result<(), String> {
         "-y".into(),
     ];
     args.extend(packages.iter().map(|s| (*s).to_string()));
-    let output = Command::new(pkexec)
+    let output = command(pkexec)
         .args(&args)
         .output()
         .map_err(|e| {
@@ -682,7 +727,7 @@ fn linux_bluez_ok() -> bool {
 #[cfg(target_os = "linux")]
 fn linux_in_dialout() -> bool {
     // Primary: id -nG
-    if let Ok(output) = Command::new("id").args(["-nG"]).output() {
+    if let Ok(output) = command("id").args(["-nG"]).output() {
         if output.status.success() {
             let groups = String::from_utf8_lossy(&output.stdout);
             if groups.split_whitespace().any(|g| g == "dialout") {
@@ -691,7 +736,7 @@ fn linux_in_dialout() -> bool {
         }
     }
     // Fallback: some images use `uucp` instead of dialout for serial.
-    if let Ok(output) = Command::new("id").args(["-nG"]).output() {
+    if let Ok(output) = command("id").args(["-nG"]).output() {
         if output.status.success() {
             let groups = String::from_utf8_lossy(&output.stdout);
             if groups.split_whitespace().any(|g| g == "uucp") {
@@ -715,7 +760,7 @@ fn linux_add_dialout() -> Result<String, String> {
     } else {
         "pkexec"
     };
-    let output = Command::new(pkexec)
+    let output = command(pkexec)
         .args(["usermod", "-aG", "dialout", &user])
         .output()
         .map_err(|e| format!("Could not run pkexec usermod: {e}"))?;
@@ -730,7 +775,7 @@ fn linux_add_dialout() -> Result<String, String> {
 
 #[cfg(target_os = "windows")]
 fn windows_powershell_available() -> bool {
-    Command::new("powershell")
+    command("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.Major"])
         .output()
         .map(|o| o.status.success())
@@ -739,7 +784,7 @@ fn windows_powershell_available() -> bool {
 
 #[cfg(target_os = "windows")]
 fn windows_run_powershell(script: &str) -> Result<String, String> {
-    let output = Command::new("powershell")
+    let output = command("powershell")
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -789,7 +834,7 @@ fn windows_webview2_present() -> bool {
         r"SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
     ];
     for key in KEYS {
-        if let Ok(output) = Command::new("reg")
+        if let Ok(output) = command("reg")
             .args(["query", &format!("HKLM\\{key}"), "/v", "pv"])
             .output()
         {

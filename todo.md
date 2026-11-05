@@ -152,6 +152,17 @@ Opt-in local HTTP so external apps (and Home Assistant) can **pull** HQ status. 
 
 Do **not**: expose the API on the public internet by default, share channel secrets over HTTP, treat linking HQs as an API bridge, or require Prometheus/Grafana/MeshMonitor as the integration path.
 
+## Phase N — Compose spellcheck (offline)
+
+OS/WebView spellcheck for channel + DM compose — no cloud dictionary, no bundled Hunspell unless OS path fails.
+
+- [ ] **N1** Enable `spellcheck` on Messages channel + DM compose fields (prefer `<textarea>` where needed); keep PIN / secrets / codes `spellcheck: false`
+- [ ] **N2** Right-click suggestions: today `with_disable_context_menu(true)` blocks the WebView replace menu — re-enable context menu at least on editable compose (or otherwise surface OS suggestions) so misspellings can be replaced offline
+- [ ] **N3** (optional) Settings toggle for compose spellcheck; note mesh callsigns / `#weather` / hex may false-positive
+- [ ] **N4** (later, only if OS/WebView is weak) App-owned Hunspell + dictionary under `assets/` — not first cut
+
+Do **not**: send compose text to a network spell service; spellcheck PIN/token/password fields.
+
 ## Non-goals (for now)
 
 - Potato federation / multi-ingestor dashboard
@@ -181,6 +192,7 @@ Do **not**: expose the API on the public internet by default, share channel secr
 13. K1 → K4 (appearance, name-block, Overview KPI strip)
 14. L1 → L7 done (Repeater Overview time range, gauge, favorites, outlier cleanup, hover labels, channel badges; L3/L5 probe honesty + settings)
 15. M1 → M3 (toggle + bearer + read JSON), then M4–M6 (deny list, audit, HA REST docs); M7 MQTT discovery; M8–M9 only if needed
+16. N1 → N2 (compose spellcheck + context-menu suggestions); N3 toggle; N4 Hunspell only if OS path fails
 
 ## Success checks
 

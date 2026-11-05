@@ -201,6 +201,8 @@ pub struct ChannelRow {
     pub message_keep: Option<String>,
     /// True when this channel has a local appearance override JSON.
     pub has_appearance_override: bool,
+    /// Optional MeshCore region tag (flood / hashtag association).
+    pub region: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -352,6 +354,10 @@ impl Db {
         );
         let _ = conn.execute(
             "ALTER TABLE channels ADD COLUMN appearance_json TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE channels ADD COLUMN region TEXT",
             [],
         );
         let _ = conn.execute(
@@ -603,6 +609,10 @@ impl Db {
         );
         let _ = conn.execute(
             "ALTER TABLE channels ADD COLUMN appearance_json TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE channels ADD COLUMN region TEXT",
             [],
         );
         let _ = conn.execute(
@@ -1951,7 +1961,8 @@ impl Db {
                      WHERE m.kind = 'channel' AND m.channel_idx = c.slot
                      ORDER BY m.received_at DESC, m.id DESC LIMIT 1),
                     NULLIF(TRIM(COALESCE(c.message_keep, '')), ''),
-                    NULLIF(TRIM(COALESCE(c.appearance_json, '')), '')
+                    NULLIF(TRIM(COALESCE(c.appearance_json, '')), ''),
+                    NULLIF(TRIM(COALESCE(c.region, '')), '')
              FROM channels c
              WHERE COALESCE(c.active, 1) = 1
              ORDER BY
@@ -1971,6 +1982,7 @@ impl Db {
                     Self::normalize_message_keep(&v).map(str::to_string)
                 });
                 let appearance_raw: Option<String> = row.get(11)?;
+                let region: Option<String> = row.get(12)?;
                 Ok(ChannelRow {
                     name: row.get(0)?,
                     slot: row.get(1)?,
@@ -1987,6 +1999,7 @@ impl Db {
                     last_text: row.get(9)?,
                     message_keep,
                     has_appearance_override: appearance_raw.is_some(),
+                    region,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -2100,11 +2113,13 @@ impl Db {
         Err(Error::Msg("No free channel slots (0–31).".into()))
     }
 
-    pub fn create_channel(
+    /// Create a channel; optional `region` is stored for UI / flood association.
+    pub fn create_channel_with_region(
         &self,
         name: &str,
         visibility: &str,
         secrets: &Secrets,
+        region: Option<&str>,
     ) -> Result<ChannelRow> {
         let name = name.trim();
         if name.is_empty() {
@@ -2123,6 +2138,10 @@ impl Db {
         } else {
             "private"
         };
+        let region = region
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(|s| crate::mesh_regions::validate_region_name(s).ok());
         let slot = self.next_channel_slot()?;
         if visibility == "private" {
             let secret = Secrets::generate();
@@ -2130,10 +2149,104 @@ impl Db {
             self.set_setting("secret_store", kind.as_str())?;
         }
         self.ensure_channel_row(name, slot, visibility, "general")?;
+        if let Some(ref region) = region {
+            self.set_channel_region(name, Some(region))?;
+        }
         self.list_channels()?
             .into_iter()
             .find(|row| row.name == name)
             .ok_or_else(|| Error::Msg("Channel was created but could not be reloaded.".into()))
+    }
+
+    pub fn set_channel_region(&self, name: &str, region: Option<&str>) -> Result<()> {
+        let value = region
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(|s| crate::mesh_regions::validate_region_name(s).ok());
+        let changed = self.lock().execute(
+            "UPDATE channels SET region = ?2 WHERE name = ?1 COLLATE NOCASE",
+            params![name, value],
+        )?;
+        if changed == 0 {
+            return Err(Error::Msg("Channel not found.".into()));
+        }
+        Ok(())
+    }
+
+    /// Join an existing private channel with a known 16-byte secret (32 hex chars).
+    pub fn join_private_channel(
+        &self,
+        name: &str,
+        secret_hex: &str,
+        secrets: &Secrets,
+    ) -> Result<ChannelRow> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(Error::Msg("Channel name is required.".into()));
+        }
+        if name.eq_ignore_ascii_case("Public") {
+            return Err(Error::Msg(
+                "Use Restore Public for the default public channel.".into(),
+            ));
+        }
+        if self.is_reserved_private(name) {
+            return Err(Error::Msg("That channel name is reserved.".into()));
+        }
+        if name.len() > MAX_CHANNEL_NAME_BYTES {
+            return Err(Error::Msg(format!(
+                "Channel name is limited to {MAX_CHANNEL_NAME_BYTES} characters."
+            )));
+        }
+        let secret = parse_channel_secret_hex(secret_hex)?;
+        if self
+            .list_channels()?
+            .iter()
+            .any(|row| row.name.eq_ignore_ascii_case(name))
+        {
+            return Err(Error::Msg(format!("Channel {name} is already on this HQ.")));
+        }
+        let slot = self.next_channel_slot()?;
+        let kind = secrets.store(name, &secret).map_err(Error::Msg)?;
+        self.set_setting("secret_store", kind.as_str())?;
+        self.ensure_channel_row(name, slot, "private", "general")?;
+        self.list_channels()?
+            .into_iter()
+            .find(|row| row.name.eq_ignore_ascii_case(name))
+            .ok_or_else(|| Error::Msg("Channel was joined but could not be reloaded.".into()))
+    }
+
+    /// Re-add Public on slot 0 after soft-delete or if missing.
+    pub fn restore_public_channel(&self) -> Result<ChannelRow> {
+        self.ensure_channel_row("Public", 0, "public", "general")?;
+        self.list_channels()?
+            .into_iter()
+            .find(|row| row.name.eq_ignore_ascii_case("Public"))
+            .ok_or_else(|| Error::Msg("Public channel could not be restored.".into()))
+    }
+
+    /// Join a MeshCore hash channel: secret = SHA-256(name)[:16].
+    pub fn join_hash_channel(&self, name: &str, secrets: &Secrets) -> Result<ChannelRow> {
+        let name = crate::mesh_regions::normalize_hash_channel_name(name)
+            .map_err(Error::Msg)?;
+        if name.eq_ignore_ascii_case("Public") || self.is_reserved_private(&name) {
+            return Err(Error::Msg("That channel name is reserved.".into()));
+        }
+        if self
+            .list_channels()?
+            .iter()
+            .any(|row| row.name.eq_ignore_ascii_case(&name))
+        {
+            return Err(Error::Msg(format!("Channel {name} is already on this HQ.")));
+        }
+        let secret = crate::mesh_regions::hash_channel_secret(&name);
+        let slot = self.next_channel_slot()?;
+        let kind = secrets.store(&name, &secret).map_err(Error::Msg)?;
+        self.set_setting("secret_store", kind.as_str())?;
+        self.ensure_channel_row(&name, slot, "private", "hash")?;
+        self.list_channels()?
+            .into_iter()
+            .find(|row| row.name.eq_ignore_ascii_case(&name))
+            .ok_or_else(|| Error::Msg("Hash channel was joined but could not be reloaded.".into()))
     }
 
     pub fn set_channel_visibility(&self, name: &str, visibility: &str) -> Result<()> {
@@ -4983,6 +5096,21 @@ fn fill_hourly_f32(starts: &[i64], map: std::collections::HashMap<i64, i64>) -> 
 }
 
 /// Trim and validate a MeshCore channel name for HQ settings / create.
+fn parse_channel_secret_hex(raw: &str) -> Result<[u8; 16]> {
+    let hex = raw.trim().trim_start_matches("0x");
+    if hex.len() != 32 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(Error::Msg(
+            "Private channel secret must be 32 hex characters (16 bytes).".into(),
+        ));
+    }
+    let mut out = [0u8; 16];
+    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        let s = std::str::from_utf8(chunk).map_err(|e| Error::Msg(e.to_string()))?;
+        out[i] = u8::from_str_radix(s, 16).map_err(|e| Error::Msg(e.to_string()))?;
+    }
+    Ok(out)
+}
+
 pub fn normalize_channel_name(raw: &str) -> Option<String> {
     let name = raw.trim();
     if name.is_empty() || name.eq_ignore_ascii_case("Public") {

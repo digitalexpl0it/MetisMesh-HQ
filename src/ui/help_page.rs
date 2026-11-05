@@ -250,10 +250,12 @@ pub fn HelpPage() -> Element {
                             }
                             li {
                                 "Send "
-                                code { "signup" }
+                                code { "#signup" }
                                 " or "
-                                code { "signup YourName" }
-                                " (name optional, short)."
+                                code { "#signup YourName" }
+                                " (name optional, short). The "
+                                code { "#" }
+                                " marks a command — plain chat is ignored."
                             }
                             li { "Wait for an operator to Approve you in HQ Inbox. You should get a reply that you are pending, then two approval messages." }
                             li {
@@ -267,7 +269,7 @@ pub fn HelpPage() -> Element {
                             }
                             li {
                                 "Send "
-                                code { "status" }
+                                code { "#status" }
                                 " anytime to check enrollment. Bot commands like "
                                 code { "#weather" }
                                 " work only after you are enrolled, on "
@@ -287,7 +289,7 @@ pub fn HelpPage() -> Element {
                         }
                         p { "Settings → Connect. One pool supports Bluetooth, USB serial, and TCP (Wi-Fi / Ethernet companions, default port 5000)." }
                         ul { class: "help-bullets",
-                            li { "Bluetooth: phone app must disconnect from that radio first; enter the six-digit companion PIN when asked." }
+                            li { "Bluetooth: phone app must disconnect from that radio first; enter the six-digit companion PIN when asked. If HQ stops with Companion busy, free the radio on the phone (or other client), then Connect again — HQ will not reconnect forever while the link is held." }
                             li { "USB: pick the port; sticky identity survives OS renumbering when possible." }
                             li { "TCP: host + port; no PIN." }
                         }
@@ -303,7 +305,7 @@ pub fn HelpPage() -> Element {
                             "Enrollment desk"
                         }
                         p { "Heard nodes appear on Roster automatically. They stay “heard” until they DM "
-                            code { "signup" }
+                            code { "#signup" }
                             "."
                         }
                         ul { class: "help-bullets",
@@ -318,7 +320,7 @@ pub fn HelpPage() -> Element {
                             li {
                                 strong { "Deny" }
                                 " — no secret sent. They may "
-                                code { "signup" }
+                                code { "#signup" }
                                 " again later (back to pending)."
                             }
                             li {

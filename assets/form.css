@@ -88,11 +88,21 @@
   overflow: hidden;
 }
 
+/* Messages (and similar): flex-fill the pane. height:100% inside a scrollable
+ * flex child is unreliable on WebKitGTK and leaves a dead gap under the thread. */
+.hq-main-fill {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 /* Fill the main pane; avoid 100vh which ignores the top bar + footer. */
 .hq-page-fill {
   display: flex;
-  height: 100%;
+  flex: 1 1 auto;
+  width: 100%;
   min-height: 0;
+  height: auto;
   flex-direction: column;
 }
 
@@ -1007,7 +1017,10 @@ button.overview-stat:hover {
   bottom: calc(100% + 0.4rem);
   left: 0;
   z-index: 40;
-  width: 17.5rem;
+  width: 19.5rem;
+  max-height: min(22rem, 55vh);
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 0.55rem 0.6rem 0.65rem;
   border-radius: 0.65rem;
   border: 1px solid #ffffff14;
@@ -1018,6 +1031,38 @@ button.overview-stat:hover {
 .emoji-picker-panel-end {
   left: auto;
   right: 0;
+}
+
+.compose-plus-panel {
+  position: absolute;
+  bottom: calc(100% + 0.4rem);
+  left: 0;
+  z-index: 40;
+  min-width: 14.5rem;
+  padding: 0.35rem;
+  border-radius: 0.65rem;
+  border: 1px solid #ffffff14;
+  background: #151a20;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+}
+
+.compose-plus-item {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0.55rem 0.7rem;
+  border: 0;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: #e4e4e7;
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.compose-plus-item:hover {
+  background: rgba(61, 214, 140, 0.12);
+  color: #f4f4f5;
 }
 
 .dm-contact-results {
@@ -1815,7 +1860,7 @@ option {
   position: absolute;
   top: 0.75rem;
   right: 0.75rem;
-  z-index: 5;
+  z-index: 6;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1856,6 +1901,11 @@ option {
 
 .map-zoom-btn:active {
   background: rgba(61, 214, 140, 0.22);
+}
+
+/* Bluetooth PIN slide-down — must sit above .welcome-overlay (80). */
+.pin-slide-shell {
+  z-index: 100;
 }
 
 /* First-run welcome wizard */
@@ -2728,6 +2778,92 @@ option {
   font-size: 0.62rem;
 }
 
+/* Channel / DM thread header avatar (inside the bubble). */
+.messages-avatar-lg {
+  height: 2.15rem;
+  width: 2.15rem;
+  font-size: 0.85rem;
+}
+
+.messages-avatar-lg.messages-avatar-emoji {
+  font-size: 1.05rem;
+}
+
+.message-meta-time {
+  margin: 0 0.15rem;
+  font-size: 0.72rem;
+  color: #9aa3af;
+}
+
+.message-meta-head {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0 0 0.55rem;
+}
+
+.message-meta-name {
+  min-width: 0;
+  font-size: 0.92rem;
+  font-weight: 650;
+  color: #f4f4f5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-meta-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0.15rem 0.15rem 0;
+  font-size: 0.68rem;
+  color: #9aa3af;
+}
+
+.message-meta-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #9aa3af;
+}
+
+.message-meta-pill-ok {
+  background: rgba(56, 189, 248, 0.12);
+  color: #bae6fd;
+}
+
+.message-meta-pill-bad {
+  background: rgba(248, 113, 113, 0.15);
+  color: #fecaca;
+}
+
+/* Channel grid cards: long URLs must not bleed into the next card. */
+.channel-card {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.channel-card-preview {
+  display: -webkit-box;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  font-size: 0.875rem;
+  color: #9aa3af;
+}
+
 /* MeshCore custom avatar: emoji(s) taken from the node display name. */
 .messages-avatar-emoji {
   width: auto;
@@ -2870,10 +3006,14 @@ option {
 }
 
 /* Channel bubble hover actions — pill on the bubble's bottom-right.
-   Use explicit position here: frozen Tailwind may omit `.relative`/`.absolute`. */
+   Use explicit position here: frozen Tailwind may omit `.relative`/`.absolute`.
+   Padding lives here too — utility classes like `px-3.5`/`py-3` are not in the
+   shipped stylesheet. */
 .message-bubble {
   position: relative;
   overflow: visible;
+  box-sizing: border-box;
+  padding: 0.75rem 0.95rem;
 }
 
 .message-action-wrap {

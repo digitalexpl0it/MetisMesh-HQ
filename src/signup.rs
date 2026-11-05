@@ -48,10 +48,15 @@ pub enum InboundCommand {
     Other,
 }
 
-/// `#` is a future bot prefix. `signup` and `status` are the enrollment desk.
+/// Enrollment desk DMs use the same `#` command marker as channel bots.
+/// Bare `signup` / `status` are ordinary chat and do not trigger a reply.
 pub fn parse_command(text: &str) -> InboundCommand {
     let trimmed = text.trim();
-    let lower = trimmed.to_ascii_lowercase();
+    let Some(bare) = trimmed.strip_prefix('#') else {
+        return InboundCommand::Other;
+    };
+    let bare = bare.trim();
+    let lower = bare.to_ascii_lowercase();
     if lower == "status" {
         return InboundCommand::Status;
     }
@@ -59,7 +64,7 @@ pub fn parse_command(text: &str) -> InboundCommand {
         return InboundCommand::Signup { name: None };
     }
     if let Some(rest) = lower.strip_prefix("signup ") {
-        let raw = trimmed[trimmed.len() - rest.len()..].trim();
+        let raw = bare[bare.len() - rest.len()..].trim();
         let name = if raw.is_empty() {
             None
         } else {
@@ -110,21 +115,12 @@ pub fn decide(command: &InboundCommand, current: Enrollment, unique_contact: boo
             reply: Some(status_line(current).into()),
             requested_name: None,
         },
-        InboundCommand::Other => {
-            if current == Enrollment::Enrolled || current == Enrollment::Hq {
-                ReplyDecision {
-                    enrollment: current,
-                    reply: None,
-                    requested_name: None,
-                }
-            } else {
-                ReplyDecision {
-                    enrollment: current,
-                    reply: Some("Send signup to enroll.".into()),
-                    requested_name: None,
-                }
-            }
-        }
+        // Casual DMs stay silent — enrollment desk is #signup / #status only.
+        InboundCommand::Other => ReplyDecision {
+            enrollment: current,
+            reply: None,
+            requested_name: None,
+        },
     }
 }
 
@@ -230,17 +226,20 @@ mod tests {
     #[test]
     fn parses_signup_forms() {
         assert_eq!(
-            parse_command("  SIGNUP  "),
+            parse_command("  #SIGNUP  "),
             InboundCommand::Signup { name: None }
         );
         assert_eq!(
-            parse_command("signup Ada Lovelace"),
+            parse_command("#signup Ada Lovelace"),
             InboundCommand::Signup {
                 name: Some("Ada Lovelace".into())
             }
         );
-        assert_eq!(parse_command("status"), InboundCommand::Status);
+        assert_eq!(parse_command("#status"), InboundCommand::Status);
         assert_eq!(parse_command("hello"), InboundCommand::Other);
+        // Bare words are chat, not commands.
+        assert_eq!(parse_command("signup"), InboundCommand::Other);
+        assert_eq!(parse_command("status"), InboundCommand::Other);
     }
 
     #[test]
@@ -277,6 +276,16 @@ mod tests {
         assert!(decision.reply.is_none());
         let status = decide(&InboundCommand::Status, Enrollment::Enrolled, true);
         assert_eq!(status.reply.as_deref(), Some("approved"));
+    }
+
+    #[test]
+    fn casual_dm_from_heard_does_not_nag_signup() {
+        let decision = decide(&InboundCommand::Other, Enrollment::Heard, true);
+        assert!(decision.reply.is_none());
+        let denied = decide(&InboundCommand::Other, Enrollment::Denied, true);
+        assert!(denied.reply.is_none());
+        let pending = decide(&InboundCommand::Other, Enrollment::Pending, true);
+        assert!(pending.reply.is_none());
     }
 
     #[test]

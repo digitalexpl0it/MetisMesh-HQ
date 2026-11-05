@@ -984,6 +984,14 @@ button.overview-stat:hover {
 }
 
 /* Composer emoji popover (channel + DM). */
+/* Full-viewport click catcher under popovers (z < panel). */
+.popover-dismiss-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 35;
+  background: transparent;
+}
+
 .emoji-picker-wrap {
   position: relative;
   flex-shrink: 0;
@@ -1441,6 +1449,29 @@ option {
   border-radius: 0.45rem;
   border: 1px solid #ffffff12;
   background: #0c1014;
+}
+
+.infra-cli-result {
+  padding: 0.55rem 0.7rem;
+  border-radius: 0.45rem;
+  border: 1px solid rgba(61, 214, 140, 0.28);
+  background: rgba(61, 214, 140, 0.08);
+}
+
+.infra-cli-result__cmd {
+  margin: 0 0 0.2rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.72rem;
+  color: #9aa3af;
+}
+
+.infra-cli-result__body {
+  margin: 0;
+  font-size: 0.875rem;
+  color: #f4f4f5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .infra-cli-transcript {

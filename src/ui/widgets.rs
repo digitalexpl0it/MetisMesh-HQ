@@ -1356,6 +1356,22 @@ pub enum ComposePlusAction {
     QuickDm,
 }
 
+/// Invisible full-viewport layer under a popover so a click outside dismisses it.
+#[component]
+pub fn PopoverDismissLayer(on_dismiss: EventHandler<()>) -> Element {
+    rsx! {
+        div {
+            class: "popover-dismiss-layer",
+            "aria-hidden": "true",
+            onclick: move |event: MouseEvent| {
+                event.prevent_default();
+                event.stop_propagation();
+                on_dismiss.call(());
+            },
+        }
+    }
+}
+
 /// Plus button that lists share / quick-DM actions above the compose field.
 #[component]
 pub fn ComposePlusButton(
@@ -1398,6 +1414,9 @@ pub fn ComposePlusButton(
                 Icon { name: IconName::Plus, size: 18 }
             }
             if open() {
+                PopoverDismissLayer {
+                    on_dismiss: move |_| open.set(false),
+                }
                 div {
                     class: "compose-plus-panel",
                     role: "menu",
@@ -1615,6 +1634,9 @@ pub fn EmojiPickerButton(
                 Icon { name: IconName::Emoji, size: 18 }
             }
             if open() {
+                PopoverDismissLayer {
+                    on_dismiss: move |_| open.set(false),
+                }
                 div {
                     class: "{panel_class}",
                     role: "dialog",

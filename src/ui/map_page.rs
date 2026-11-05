@@ -23,7 +23,9 @@ use super::map_host::{
     save_basemap, save_camera, BasemapKind, MapCamera, RegionDraftConfirm, MAP_CONTAINER_ID,
 };
 use super::state;
-use super::widgets::{Button, ButtonKind, PageHeading, SelectInput, SlideDownPanel};
+use super::widgets::{
+    Button, ButtonKind, PageHeading, PopoverDismissLayer, SelectInput, SlideDownPanel,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NodeFilterKind {
@@ -1797,6 +1799,14 @@ pub fn MapPage() -> Element {
                     }
                 }
                 div { class: "map-overlay-controls",
+                    if filter_menu_open() || settings_menu_open() {
+                        PopoverDismissLayer {
+                            on_dismiss: move |_| {
+                                filter_menu_open.set(false);
+                                settings_menu_open.set(false);
+                            },
+                        }
+                    }
                     span {
                         title: "Select tracked devices to plot trails and waypoints",
                         Button {

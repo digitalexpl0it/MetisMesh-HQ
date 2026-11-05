@@ -23,6 +23,10 @@
 - Messages list scrolls again under `hq-main-fill`; Create/join is one button → slide-down option picker → form
 - Companion already held (phone GATT / busy serial / early connect failures): stop auto-reconnect after a short streak and show “Companion busy — disconnect… then Connect again” instead of looping Reconnecting
 - Composer emoji picker: many more glyphs (reactions, faces, hands, mesh, status, weather, nature, food, people); panel scrolls
+- Messages: switching channels/DMs while a thread is open no longer shows a blank chat (paint from freshly loaded messages; scroller remounts per thread)
+- Infra Radio/TX settings: Get TX fills the dBm field; Get radio updates the Radio line; Get/Set TX and Get radio show a throbber while waiting on the mesh reply
+- Infra admin gets: capture replies into Status metrics / Settings fields (intervals, lat/lon, clock, repeat, …) with a green result banner and button throbbers — not only the bottom CLI transcript
+- Popovers (Messages compose + / emoji, Map Settings / Filters): click outside the menu to dismiss
 
 ## 0.1.4.0 — 2026-11-04
 

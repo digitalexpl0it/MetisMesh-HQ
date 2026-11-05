@@ -15,7 +15,7 @@ use super::cli_page::{
 use super::icons::{Icon, IconName};
 use super::state;
 use super::widgets::{
-    Badge, Button, ButtonKind, Dialog, PageHeading, SelectInput, TextInput,
+    Badge, Button, ButtonKind, Dialog, PageHeading, SelectInput, TextInput, Throbber,
 };
 use crate::radio::RadioStatus;
 
@@ -159,14 +159,163 @@ fn format_airtime(ms: i64) -> String {
 }
 
 fn parse_tx_power(reply: &str) -> Option<i64> {
-    let cleaned = reply
-        .trim()
-        .trim_start_matches(|c: char| !c.is_ascii_digit() && c != '-');
+    let reply = reply.trim();
+    if reply.is_empty() {
+        return None;
+    }
+    let lower = reply.to_ascii_lowercase();
+    // Prefer a number immediately before "dbm" (e.g. "TX power: 14 dBm").
+    if let Some(idx) = lower.find("dbm") {
+        let before = &reply[..idx];
+        let num: String = before
+            .chars()
+            .rev()
+            .skip_while(|c| c.is_whitespace())
+            .take_while(|c| c.is_ascii_digit() || *c == '-')
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        if let Ok(v) = num.parse::<i64>() {
+            if (-10..=30).contains(&v) {
+                return Some(v);
+            }
+        }
+    }
+    // Plain leading integer, or trailing value from `set tx 22`.
+    let cleaned = reply.trim_start_matches(|c: char| !c.is_ascii_digit() && c != '-');
     let num: String = cleaned
         .chars()
         .take_while(|c| c.is_ascii_digit() || *c == '-')
         .collect();
-    num.parse().ok().filter(|v| (-10..=30).contains(v))
+    if let Ok(v) = num.parse::<i64>() {
+        if (-10..=30).contains(&v) {
+            return Some(v);
+        }
+    }
+    // Last integer token in range (covers multi-word OK lines).
+    for token in reply.split_whitespace().rev() {
+        let t = token.trim_matches(|c: char| !c.is_ascii_digit() && c != '-');
+        if let Ok(v) = t.parse::<i64>() {
+            if (-10..=30).contains(&v) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// Normalize a sent CLI string to the capture / busy key used in settings UI.
+fn cli_capture_kind(cmd: &str) -> Option<&'static str> {
+    let t = cmd.trim().to_ascii_lowercase();
+    if t == "get tx" {
+        Some("get tx")
+    } else if t == "set tx" || t.starts_with("set tx ") {
+        Some("set tx")
+    } else if t == "get radio" {
+        Some("get radio")
+    } else if t == "ver" {
+        Some("ver")
+    } else if t == "clock" || t == "clock sync" {
+        Some("clock")
+    } else if t == "neighbors" {
+        Some("neighbors")
+    } else if t == "get guest.password" {
+        Some("get guest.password")
+    } else if t == "get flood.advert.interval" {
+        Some("get flood.advert.interval")
+    } else if t.starts_with("set flood.advert.interval") {
+        Some("set flood.advert.interval")
+    } else if t == "get advert.interval" {
+        Some("get advert.interval")
+    } else if t.starts_with("set advert.interval") {
+        Some("set advert.interval")
+    } else if t == "get repeat" {
+        Some("get repeat")
+    } else if t == "get flood.max" {
+        Some("get flood.max")
+    } else if t == "get path.hash.mode" {
+        Some("get path.hash.mode")
+    } else if t == "get lat" {
+        Some("get lat")
+    } else if t == "get lon" {
+        Some("get lon")
+    } else if t.starts_with("set lat ") {
+        Some("set lat")
+    } else if t.starts_with("set lon ") {
+        Some("set lon")
+    } else if t.starts_with("region") {
+        Some("region")
+    } else if t.starts_with("get ") {
+        // Advanced CLI / catalog gets — still surface the reply on the page.
+        Some("get other")
+    } else {
+        None
+    }
+}
+
+fn pending_cli_is(pending: &Option<(String, String)>, kind: &str) -> bool {
+    pending
+        .as_ref()
+        .and_then(|(_, cmd)| cli_capture_kind(cmd))
+        .is_some_and(|k| k == kind)
+}
+
+/// Pull a useful scalar from a CLI reply (`3`, `key: 3`, `interval 3 hours`).
+fn parse_cli_scalar(reply: &str) -> Option<String> {
+    let t = reply.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let lower = t.to_ascii_lowercase();
+    if lower == "ok" || lower == "done" || lower.starts_with("error") {
+        return None;
+    }
+    if let Some((_, rest)) = t.split_once(':') {
+        let v = rest.trim();
+        if !v.is_empty() {
+            // Prefer a leading number in the value side.
+            let num: String = v
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
+                .collect();
+            if !num.is_empty() && num.chars().any(|c| c.is_ascii_digit()) {
+                return Some(num);
+            }
+            return Some(v.to_string());
+        }
+    }
+    for tok in t.split_whitespace() {
+        let cleaned: String = tok
+            .chars()
+            .filter(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
+            .collect();
+        if !cleaned.is_empty()
+            && cleaned.chars().any(|c| c.is_ascii_digit())
+            && cleaned != "-"
+            && cleaned != "."
+        {
+            return Some(cleaned);
+        }
+    }
+    Some(t.to_string())
+}
+
+fn parse_cli_scalar_from_cmd_or_body(cmd: &str, body: &str) -> Option<String> {
+    parse_cli_scalar(body).or_else(|| {
+        // `set flood.advert.interval 3` → 3
+        cmd.split_whitespace().last().and_then(|tok| {
+            let cleaned: String = tok
+                .chars()
+                .filter(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
+                .collect();
+            if cleaned.chars().any(|c| c.is_ascii_digit()) {
+                Some(cleaned)
+            } else {
+                None
+            }
+        })
+    })
 }
 
 /// Lines that must not clear `pending_cli_capture` (send-ack / local waiting chrome).
@@ -243,20 +392,22 @@ pub fn InfraPage(radio: RadioStatus) -> Element {
     let mut discover_note = use_signal(String::new);
     let mut need_relogin = use_signal(|| false);
     let mut pending_cli_capture = use_signal(|| None::<(String, String)>);
+    // Last captured admin CLI reply shown on Status/Settings (command → body).
+    let mut cli_last_result = use_signal(|| None::<(String, String)>);
     let status_note = use_signal(String::new);
 
     // Settings form drafts.
-    let pos_lat = use_signal(String::new);
-    let pos_lon = use_signal(String::new);
+    let mut pos_lat = use_signal(String::new);
+    let mut pos_lon = use_signal(String::new);
     let acl_key = use_signal(String::new);
     let acl_perm = use_signal(|| "3".to_string());
     let mut admin_pw = use_signal(String::new);
     let mut guest_pw = use_signal(String::new);
     let region_name = use_signal(String::new);
     let region_parent = use_signal(|| "*".to_string());
-    let flood_advert_hrs = use_signal(String::new);
-    let advert_mins = use_signal(String::new);
-    let tx_dbm = use_signal(String::new);
+    let mut flood_advert_hrs = use_signal(String::new);
+    let mut advert_mins = use_signal(String::new);
+    let mut tx_dbm = use_signal(String::new);
     let mut settings_dialog = use_signal(|| None::<String>); // admin_pw | guest_pw
 
     if !poll_started() {
@@ -349,9 +500,21 @@ pub fn InfraPage(radio: RadioStatus) -> Element {
             let body = line.trim();
             // Remote send-acks used to clear capture before the mesh CLI_DATA reply.
             if !is_cli_capture_noise(body) {
-                match cmd.as_str() {
-                    "get tx" => {
-                        if let Some(dbm) = parse_tx_power(body) {
+                let kind = cli_capture_kind(&cmd).unwrap_or("get other");
+                let display_body = if kind == "get guest.password" {
+                    "[secret]".to_string()
+                } else {
+                    body.to_string()
+                };
+                cli_last_result.set(Some((cmd.clone(), display_body)));
+                match kind {
+                    "get tx" | "set tx" => {
+                        // Reply may be bare "22", "TX power: 22 dBm", or just "ok"
+                        // after set — fall back to the number in `set tx N`.
+                        if let Some(dbm) =
+                            parse_tx_power(body).or_else(|| parse_tx_power(&cmd))
+                        {
+                            tx_dbm.set(dbm.to_string());
                             let _ = state().db.update_infra_status_cli_fields(
                                 &pubkey,
                                 Some(dbm),
@@ -360,7 +523,6 @@ pub fn InfraPage(radio: RadioStatus) -> Element {
                                 None,
                                 None,
                             );
-                            tick.with_mut(|n| *n += 1);
                         }
                     }
                     "ver" => {
@@ -372,7 +534,6 @@ pub fn InfraPage(radio: RadioStatus) -> Element {
                             None,
                             None,
                         );
-                        tick.with_mut(|n| *n += 1);
                     }
                     "clock" => {
                         let _ = state().db.update_infra_status_cli_fields(
@@ -383,7 +544,6 @@ pub fn InfraPage(radio: RadioStatus) -> Element {
                             Some(body),
                             None,
                         );
-                        tick.with_mut(|n| *n += 1);
                     }
                     "get radio" => {
                         let _ = state().db.update_infra_status_cli_fields(
@@ -394,7 +554,6 @@ pub fn InfraPage(radio: RadioStatus) -> Element {
                             None,
                             None,
                         );
-                        tick.with_mut(|n| *n += 1);
                     }
                     "neighbors" => {
                         let _ = state().db.update_infra_status_cli_fields(
@@ -405,10 +564,38 @@ pub fn InfraPage(radio: RadioStatus) -> Element {
                             None,
                             Some(body),
                         );
-                        tick.with_mut(|n| *n += 1);
+                    }
+                    "get flood.advert.interval" | "set flood.advert.interval" => {
+                        if let Some(v) = parse_cli_scalar_from_cmd_or_body(&cmd, body) {
+                            flood_advert_hrs.set(v);
+                        }
+                    }
+                    "get advert.interval" | "set advert.interval" => {
+                        if let Some(v) = parse_cli_scalar_from_cmd_or_body(&cmd, body) {
+                            advert_mins.set(v);
+                        }
+                    }
+                    "get lat" | "set lat" => {
+                        if let Some(v) = parse_cli_scalar_from_cmd_or_body(&cmd, body) {
+                            pos_lat.set(v);
+                        }
+                    }
+                    "get lon" | "set lon" => {
+                        if let Some(v) = parse_cli_scalar_from_cmd_or_body(&cmd, body) {
+                            pos_lon.set(v);
+                        }
+                    }
+                    "get guest.password"
+                    | "get repeat"
+                    | "get flood.max"
+                    | "get path.hash.mode"
+                    | "region"
+                    | "get other" => {
+                        // Shown via cli_last_result; no dedicated form field.
                     }
                     _ => {}
                 }
+                tick.with_mut(|n| *n += 1);
                 pending_cli_capture.set(None);
             }
         }
@@ -714,6 +901,7 @@ pub fn InfraPage(radio: RadioStatus) -> Element {
                                             "Status refresh unlocks after admin verification."
                                         }
                                     }
+                                    { cli_result_banner(cli_last_result()) }
                                     { status_panel(latest.as_ref()) }
                                 }
 
@@ -723,6 +911,7 @@ pub fn InfraPage(radio: RadioStatus) -> Element {
                                             "Verify admin first. Passwords are typed here only — never stored in HQ."
                                         }
                                     }
+                                    { cli_result_banner(cli_last_result()) }
                                     { settings_list(
                                         verified && linked,
                                         linked,
@@ -979,6 +1168,7 @@ pub fn InfraPage(radio: RadioStatus) -> Element {
                                                                 kind_draft.set(kind.clone());
                                                                 editing_notes.set(false);
                                                                 need_relogin.set(false);
+                                                                cli_last_result.set(None);
                                                                 detail_tab.set("status".into());
                                                                 selected.set(Some(key.clone()));
                                                             },
@@ -1441,10 +1631,9 @@ fn run_infra_cli_cmd(
     let snap = state().radio.snapshot();
     let expected_seq = snap.cli_seq;
     let cmd_key = text.trim().to_string();
-    if STATUS_CLI_FOLLOWUP.contains(&cmd_key.as_str())
-        || cmd_key == "get guest.password"
-        || cmd_key.starts_with("region")
-    {
+    // Capture status/settings replies (including `set tx N`) so fields update
+    // and the matching button can show a throbber while waiting.
+    if cli_capture_kind(&cmd_key).is_some() {
         pending_cli_capture.set(Some((pubkey.clone(), cmd_key)));
     }
     state().radio.run_infra_cli(pubkey, text);
@@ -1475,6 +1664,18 @@ fn status_metric(label: &str, value: String) -> Element {
         div { class: "infra-status-metric",
             p { class: "infra-status-metric__label", "{label}" }
             p { class: "infra-status-metric__value", "{value}" }
+        }
+    }
+}
+
+fn cli_result_banner(result: Option<(String, String)>) -> Element {
+    let Some((cmd, body)) = result else {
+        return rsx! {};
+    };
+    rsx! {
+        div { class: "infra-cli-result mb-3",
+            p { class: "infra-cli-result__cmd", "> {cmd}" }
+            p { class: "infra-cli-result__body", "{body}" }
         }
     }
 }
@@ -1608,6 +1809,29 @@ fn settings_list(
         .and_then(|s| s.tx_power_dbm)
         .map(|v| v.to_string())
         .unwrap_or_default();
+    let radio_hint = latest
+        .map(|s| s.radio.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "—".into());
+    let pending_now = pending_cli_capture();
+    let get_tx_busy = pending_cli_is(&pending_now, "get tx");
+    let set_tx_busy = pending_cli_is(&pending_now, "set tx");
+    let get_radio_busy = pending_cli_is(&pending_now, "get radio");
+    let get_lat_busy = pending_cli_is(&pending_now, "get lat");
+    let get_lon_busy = pending_cli_is(&pending_now, "get lon");
+    let clock_busy = pending_cli_is(&pending_now, "clock");
+    let guest_pw_busy = pending_cli_is(&pending_now, "get guest.password");
+    let region_busy = pending_cli_is(&pending_now, "region");
+    let get_flood_int_busy = pending_cli_is(&pending_now, "get flood.advert.interval");
+    let get_advert_int_busy = pending_cli_is(&pending_now, "get advert.interval");
+    let get_repeat_busy = pending_cli_is(&pending_now, "get repeat");
+    let get_flood_max_busy = pending_cli_is(&pending_now, "get flood.max");
+    let get_path_busy = pending_cli_is(&pending_now, "get path.hash.mode");
+    let settings_cli_busy = pending_now.is_some();
+    let clock_hint = latest
+        .map(|s| s.clock.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "—".into());
 
     rsx! {
         div { class: "infra-settings-list",
@@ -1634,6 +1858,31 @@ fn settings_list(
                     div { class: "flex flex-wrap gap-2",
                         Button {
                             kind: ButtonKind::Ghost,
+                            disabled: settings_cli_busy,
+                            onclick: {
+                                let key = key.clone();
+                                move |_| run_infra_cli_cmd(linked, transcript, pending_cli_capture, need_relogin, key.clone(), "get lat".into())
+                            },
+                            if get_lat_busy {
+                                Throbber { size: 14 }
+                            }
+                            if get_lat_busy { "Getting…" } else { "Get lat" }
+                        }
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            disabled: settings_cli_busy,
+                            onclick: {
+                                let key = key.clone();
+                                move |_| run_infra_cli_cmd(linked, transcript, pending_cli_capture, need_relogin, key.clone(), "get lon".into())
+                            },
+                            if get_lon_busy {
+                                Throbber { size: 14 }
+                            }
+                            if get_lon_busy { "Getting…" } else { "Get lon" }
+                        }
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            disabled: settings_cli_busy,
                             onclick: move |_| {
                                 if let Some((_, lat, lon)) = state().db.hq_position().ok().flatten() {
                                     pos_lat.set(format!("{lat:.6}"));
@@ -1643,7 +1892,7 @@ fn settings_list(
                             "Use HQ GPS"
                         }
                         Button {
-                            disabled: pos_lat().trim().is_empty() || pos_lon().trim().is_empty(),
+                            disabled: pos_lat().trim().is_empty() || pos_lon().trim().is_empty() || settings_cli_busy,
                             onclick: {
                                 let key = key.clone();
                                 move |_| {
@@ -1662,12 +1911,17 @@ fn settings_list(
             { settings_row("clock", IconName::Clock, "Sync Clock", "Updates the repeater clock.", &open, settings_panel, enabled) }
             if open.as_deref() == Some("clock") {
                 div { class: "infra-settings-panel",
+                    p { class: "mb-2 text-xs text-muted-foreground", "Last clock: {clock_hint}" }
                     Button {
+                        disabled: settings_cli_busy,
                         onclick: {
                             let key = key.clone();
                             move |_| run_infra_cli_cmd(linked, transcript, pending_cli_capture, need_relogin, key.clone(), "clock sync".into())
                         },
-                        "Sync clock now"
+                        if clock_busy {
+                            Throbber { size: 14 }
+                        }
+                        if clock_busy { "Syncing…" } else { "Sync clock now" }
                     }
                 }
             }
@@ -1734,13 +1988,18 @@ fn settings_list(
                     div { class: "flex flex-wrap gap-2",
                         Button {
                             kind: ButtonKind::Ghost,
+                            disabled: settings_cli_busy,
                             onclick: {
                                 let key = key.clone();
                                 move |_| run_infra_cli_cmd(linked, transcript, pending_cli_capture, need_relogin, key.clone(), "get guest.password".into())
                             },
-                            "Get guest password"
+                            if guest_pw_busy {
+                                Throbber { size: 14 }
+                            }
+                            if guest_pw_busy { "Getting…" } else { "Get guest password" }
                         }
                         Button {
+                            disabled: settings_cli_busy,
                             onclick: move |_| settings_dialog.set(Some("guest_pw".into())),
                             "Set guest password…"
                         }
@@ -1756,14 +2015,19 @@ fn settings_list(
                     div { class: "mb-2 flex flex-wrap gap-2",
                         Button {
                             kind: ButtonKind::Ghost,
+                            disabled: settings_cli_busy,
                             onclick: {
                                 let key = key.clone();
                                 move |_| run_infra_cli_cmd(linked, transcript, pending_cli_capture, need_relogin, key.clone(), "region".into())
                             },
-                            "Dump regions"
+                            if region_busy {
+                                Throbber { size: 14 }
+                            }
+                            if region_busy { "Waiting…" } else { "Dump regions" }
                         }
                         Button {
                             kind: ButtonKind::Ghost,
+                            disabled: settings_cli_busy,
                             onclick: {
                                 let key = key.clone();
                                 move |_| run_infra_cli_cmd(linked, transcript, pending_cli_capture, need_relogin, key.clone(), "region list allowed".into())
@@ -1772,6 +2036,7 @@ fn settings_list(
                         }
                         Button {
                             kind: ButtonKind::Ghost,
+                            disabled: settings_cli_busy,
                             onclick: {
                                 let key = key.clone();
                                 move |_| run_infra_cli_cmd(linked, transcript, pending_cli_capture, need_relogin, key.clone(), "region save".into())
@@ -1861,19 +2126,27 @@ fn settings_list(
                     div { class: "mb-2 flex flex-wrap gap-2",
                         Button {
                             kind: ButtonKind::Ghost,
+                            disabled: settings_cli_busy,
                             onclick: {
                                 let key = key.clone();
                                 move |_| run_infra_cli_cmd(linked, transcript, pending_cli_capture, need_relogin, key.clone(), "get flood.advert.interval".into())
                             },
-                            "Get flood interval"
+                            if get_flood_int_busy {
+                                Throbber { size: 14 }
+                            }
+                            if get_flood_int_busy { "Getting…" } else { "Get flood interval" }
                         }
                         Button {
                             kind: ButtonKind::Ghost,
+                            disabled: settings_cli_busy,
                             onclick: {
                                 let key = key.clone();
                                 move |_| run_infra_cli_cmd(linked, transcript, pending_cli_capture, need_relogin, key.clone(), "get advert.interval".into())
                             },
-                            "Get zero-hop interval"
+                            if get_advert_int_busy {
+                                Throbber { size: 14 }
+                            }
+                            if get_advert_int_busy { "Getting…" } else { "Get zero-hop interval" }
                         }
                     }
                     div { class: "grid grid-cols-2 gap-2",
@@ -1892,7 +2165,7 @@ fn settings_list(
                     }
                     div { class: "mt-2 flex flex-wrap gap-2",
                         Button {
-                            disabled: flood_advert_hrs().trim().is_empty(),
+                            disabled: flood_advert_hrs().trim().is_empty() || settings_cli_busy,
                             onclick: {
                                 let key = key.clone();
                                 move |_| {
@@ -1903,7 +2176,7 @@ fn settings_list(
                             "Set flood interval"
                         }
                         Button {
-                            disabled: advert_mins().trim().is_empty(),
+                            disabled: advert_mins().trim().is_empty() || settings_cli_busy,
                             onclick: {
                                 let key = key.clone();
                                 move |_| {
@@ -1920,26 +2193,41 @@ fn settings_list(
             { settings_row("tx", IconName::Radio, "Radio / TX power", "Antenna TX power (reboot may be required).", &open, settings_panel, enabled) }
             if open.as_deref() == Some("tx") {
                 div { class: "infra-settings-panel",
-                    p { class: "mb-2 text-xs text-muted-foreground",
-                        "Last known: {tx_hint} dBm"
+                    p { class: "mb-1 text-xs text-muted-foreground",
+                        if tx_hint.is_empty() {
+                            "Last known TX: —"
+                        } else {
+                            "Last known TX: {tx_hint} dBm"
+                        }
+                    }
+                    p { class: "mb-2 text-xs text-muted-foreground break-words",
+                        "Radio: {radio_hint}"
                     }
                     div { class: "flex flex-wrap gap-2",
                         Button {
                             kind: ButtonKind::Ghost,
+                            disabled: settings_cli_busy,
                             onclick: {
                                 let key = key.clone();
                                 move |_| run_infra_cli_cmd(linked, transcript, pending_cli_capture, need_relogin, key.clone(), "get tx".into())
                             },
-                            "Get TX"
+                            if get_tx_busy {
+                                Throbber { size: 14 }
+                            }
+                            if get_tx_busy { "Getting…" } else { "Get TX" }
                         }
                         TextInput {
                             value: tx_dbm(),
-                            placeholder: "dBm".to_string(),
+                            placeholder: if tx_hint.is_empty() {
+                                "dBm".to_string()
+                            } else {
+                                format!("{tx_hint} dBm")
+                            },
                             kind: "text".to_string(),
                             oninput: move |e: FormEvent| tx_dbm.set(e.value()),
                         }
                         Button {
-                            disabled: tx_dbm().trim().is_empty(),
+                            disabled: tx_dbm().trim().is_empty() || settings_cli_busy,
                             onclick: {
                                 let key = key.clone();
                                 move |_| {
@@ -1947,15 +2235,22 @@ fn settings_list(
                                     run_infra_cli_cmd(linked, transcript, pending_cli_capture, need_relogin, key.clone(), format!("set tx {v}"));
                                 }
                             },
-                            "Set TX"
+                            if set_tx_busy {
+                                Throbber { size: 14 }
+                            }
+                            if set_tx_busy { "Setting…" } else { "Set TX" }
                         }
                         Button {
                             kind: ButtonKind::Ghost,
+                            disabled: settings_cli_busy,
                             onclick: {
                                 let key = key.clone();
                                 move |_| run_infra_cli_cmd(linked, transcript, pending_cli_capture, need_relogin, key.clone(), "get radio".into())
                             },
-                            "Get radio"
+                            if get_radio_busy {
+                                Throbber { size: 14 }
+                            }
+                            if get_radio_busy { "Getting…" } else { "Get radio" }
                         }
                     }
                 }
@@ -1964,30 +2259,45 @@ fn settings_list(
             { settings_row("repeat", IconName::Signal, "Repeat / path", "Repeat flag and flood limits.", &open, settings_panel, enabled) }
             if open.as_deref() == Some("repeat") {
                 div { class: "infra-settings-panel",
+                    p { class: "mb-2 text-xs text-muted-foreground",
+                        "Replies also appear in the green result banner above."
+                    }
                     div { class: "flex flex-wrap gap-2",
                         Button {
                             kind: ButtonKind::Ghost,
+                            disabled: settings_cli_busy,
                             onclick: {
                                 let key = key.clone();
                                 move |_| run_infra_cli_cmd(linked, transcript, pending_cli_capture, need_relogin, key.clone(), "get repeat".into())
                             },
-                            "Get repeat"
+                            if get_repeat_busy {
+                                Throbber { size: 14 }
+                            }
+                            if get_repeat_busy { "Getting…" } else { "Get repeat" }
                         }
                         Button {
                             kind: ButtonKind::Ghost,
+                            disabled: settings_cli_busy,
                             onclick: {
                                 let key = key.clone();
                                 move |_| run_infra_cli_cmd(linked, transcript, pending_cli_capture, need_relogin, key.clone(), "get flood.max".into())
                             },
-                            "Get flood.max"
+                            if get_flood_max_busy {
+                                Throbber { size: 14 }
+                            }
+                            if get_flood_max_busy { "Getting…" } else { "Get flood.max" }
                         }
                         Button {
                             kind: ButtonKind::Ghost,
+                            disabled: settings_cli_busy,
                             onclick: {
                                 let key = key.clone();
                                 move |_| run_infra_cli_cmd(linked, transcript, pending_cli_capture, need_relogin, key.clone(), "get path.hash.mode".into())
                             },
-                            "Get path hash"
+                            if get_path_busy {
+                                Throbber { size: 14 }
+                            }
+                            if get_path_busy { "Getting…" } else { "Get path hash" }
                         }
                     }
                 }
@@ -2022,7 +2332,10 @@ fn settings_list(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_cli_capture_noise, parse_tx_power};
+    use super::{
+        cli_capture_kind, is_cli_capture_noise, parse_cli_scalar, parse_cli_scalar_from_cmd_or_body,
+        parse_tx_power,
+    };
 
     #[test]
     fn parse_tx_power_reads_plain_and_labeled() {
@@ -2030,6 +2343,38 @@ mod tests {
         assert_eq!(parse_tx_power("TX power: 14 dBm"), Some(14));
         assert_eq!(parse_tx_power("-5"), Some(-5));
         assert_eq!(parse_tx_power("99"), None);
+        assert_eq!(parse_tx_power("set tx 18"), Some(18));
+        assert_eq!(parse_tx_power("ok"), None);
+    }
+
+    #[test]
+    fn cli_capture_kind_covers_settings_gets() {
+        assert_eq!(cli_capture_kind("get tx"), Some("get tx"));
+        assert_eq!(cli_capture_kind("set tx 22"), Some("set tx"));
+        assert_eq!(cli_capture_kind("get radio"), Some("get radio"));
+        assert_eq!(
+            cli_capture_kind("get flood.advert.interval"),
+            Some("get flood.advert.interval")
+        );
+        assert_eq!(cli_capture_kind("get advert.interval"), Some("get advert.interval"));
+        assert_eq!(cli_capture_kind("get repeat"), Some("get repeat"));
+        assert_eq!(cli_capture_kind("clock sync"), Some("clock"));
+        assert_eq!(cli_capture_kind("get name"), Some("get other"));
+        assert_eq!(cli_capture_kind("advert"), None);
+    }
+
+    #[test]
+    fn parse_cli_scalar_reads_labeled_and_plain() {
+        assert_eq!(parse_cli_scalar("3").as_deref(), Some("3"));
+        assert_eq!(
+            parse_cli_scalar("flood.advert.interval: 6").as_deref(),
+            Some("6")
+        );
+        assert_eq!(
+            parse_cli_scalar_from_cmd_or_body("set advert.interval 15", "ok").as_deref(),
+            Some("15")
+        );
+        assert_eq!(parse_cli_scalar("ok"), None);
     }
 
     #[test]

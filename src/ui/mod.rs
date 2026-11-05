@@ -3900,7 +3900,8 @@ const MSG_WINDOW_PAGE: i64 = 10;
 
 #[derive(Clone, PartialEq, Eq)]
 enum MsgWindowKey {
-    Channel(i64),
+    /// Channel display name (not radio slot — slots remap on sync).
+    Channel(String),
     Dm(String),
 }
 
@@ -4425,34 +4426,32 @@ fn MessagesPage() -> Element {
                 dm_pubkey.chars().take(12).collect::<String>()
             });
         let window_key = MsgWindowKey::Dm(dm_pubkey.clone());
-        let need_window = !matches!(
-            msg_window(),
-            Some(ref w) if w.key == window_key
-        );
-        if need_window {
-            let (messages, has_older) = state()
-                .db
-                .list_dm_messages(&dm_pubkey, MSG_WINDOW_INITIAL)
-                .unwrap_or_else(|_| (Vec::new(), false));
-            msg_window.set(Some(MsgWindowState {
-                key: window_key.clone(),
-                messages,
-                has_older,
-            }));
-        } else if let Some(mut window) = msg_window() {
-            if let Ok((newest, _)) = state()
-                .db
-                .list_dm_messages(&dm_pubkey, MSG_WINDOW_INITIAL)
-            {
-                if merge_newer_messages(&mut window, newest) {
-                    msg_window.set(Some(window));
+        // Paint from locals — reading msg_window() right after a set during
+        // render can still be empty when switching threads in-place.
+        let (messages, has_older) = match msg_window() {
+            Some(mut window) if window.key == window_key => {
+                if let Ok((newest, _)) =
+                    state().db.list_dm_messages(&dm_pubkey, MSG_WINDOW_INITIAL)
+                {
+                    if merge_newer_messages(&mut window, newest) {
+                        msg_window.set(Some(window.clone()));
+                    }
                 }
+                (window.messages, window.has_older)
             }
-        }
-        let messages = msg_window()
-            .map(|w| w.messages)
-            .unwrap_or_default();
-        let has_older = msg_window().map(|w| w.has_older).unwrap_or(false);
+            _ => {
+                let (messages, has_older) = state()
+                    .db
+                    .list_dm_messages(&dm_pubkey, MSG_WINDOW_INITIAL)
+                    .unwrap_or_else(|_| (Vec::new(), false));
+                msg_window.set(Some(MsgWindowState {
+                    key: window_key.clone(),
+                    messages: messages.clone(),
+                    has_older,
+                }));
+                (messages, has_older)
+            }
+        };
         let latest_id = messages.last().map(|m| m.id);
         let anchor = state()
             .db
@@ -4589,6 +4588,7 @@ fn MessagesPage() -> Element {
                 div { class: "flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border bg-card",
                     div {
                         id: "dm-scroller",
+                        key: "dm-scroller-{dm_pubkey}",
                         class: "{dm_pane_class}",
                         style: "{dm_pane_style}",
                         onscroll: {
@@ -4838,32 +4838,34 @@ fn MessagesPage() -> Element {
             };
         };
         let slot = channel.slot;
-        let window_key = MsgWindowKey::Channel(slot);
-        let need_window = !matches!(
-            msg_window(),
-            Some(ref w) if w.key == window_key
-        );
-        if need_window {
-            let (messages, has_older) = state()
-                .db
-                .list_channel_messages(slot, MSG_WINDOW_INITIAL)
-                .unwrap_or_else(|_| (Vec::new(), false));
-            msg_window.set(Some(MsgWindowState {
-                key: window_key.clone(),
-                messages,
-                has_older,
-            }));
-        } else if let Some(mut window) = msg_window() {
-            if let Ok((newest, _)) = state().db.list_channel_messages(slot, MSG_WINDOW_INITIAL) {
-                if merge_newer_messages(&mut window, newest) {
-                    msg_window.set(Some(window));
+        let window_key = MsgWindowKey::Channel(selected_name.clone());
+        // Paint from locals when the cached window is for another channel.
+        // Setting msg_window during render and then reading it for this paint
+        // used to leave the thread blank until leave/re-enter remounted.
+        let (messages, has_older) = match msg_window() {
+            Some(mut window) if window.key == window_key => {
+                if let Ok((newest, _)) =
+                    state().db.list_channel_messages(slot, MSG_WINDOW_INITIAL)
+                {
+                    if merge_newer_messages(&mut window, newest) {
+                        msg_window.set(Some(window.clone()));
+                    }
                 }
+                (window.messages, window.has_older)
             }
-        }
-        let messages = msg_window()
-            .map(|w| w.messages)
-            .unwrap_or_default();
-        let has_older = msg_window().map(|w| w.has_older).unwrap_or(false);
+            _ => {
+                let (messages, has_older) = state()
+                    .db
+                    .list_channel_messages(slot, MSG_WINDOW_INITIAL)
+                    .unwrap_or_else(|_| (Vec::new(), false));
+                msg_window.set(Some(MsgWindowState {
+                    key: window_key.clone(),
+                    messages: messages.clone(),
+                    has_older,
+                }));
+                (messages, has_older)
+            }
+        };
         let emergency = channel.role == "emergency";
         let latest_id = messages.last().map(|message| message.id);
         let needs_session = read_session()
@@ -5080,6 +5082,9 @@ fn MessagesPage() -> Element {
                     },
                     div {
                         id: "channel-scroller",
+                        // Remount the scroller when switching channels so a
+                        // prior empty paint cannot stick in the WebView.
+                        key: "channel-scroller-{selected_name}",
                         class: "{channel_pane_class}",
                         style: "{channel_pane_style}",
                         onscroll: move |_| {
@@ -5093,6 +5098,8 @@ fn MessagesPage() -> Element {
                             if !has_older || loading_older() {
                                 return;
                             }
+                            let expect_name = selected_name.clone();
+                            let load_slot = slot;
                             spawn(async move {
                                 let near_top = document::eval(
                                     r#"return (() => {
@@ -5108,9 +5115,10 @@ fn MessagesPage() -> Element {
                                     return;
                                 }
                                 let Some(window) = msg_window() else { return };
-                                let MsgWindowKey::Channel(slot) = window.key.clone() else {
-                                    return;
-                                };
+                                match &window.key {
+                                    MsgWindowKey::Channel(name) if name == &expect_name => {}
+                                    _ => return,
+                                }
                                 let Some(before_id) = window.messages.first().map(|m| m.id) else {
                                     return;
                                 };
@@ -5123,7 +5131,7 @@ fn MessagesPage() -> Element {
                                 .unwrap_or(0.0);
                                 loading_older.set(true);
                                 match state().db.list_channel_messages_before(
-                                    slot,
+                                    load_slot,
                                     before_id,
                                     MSG_WINDOW_PAGE,
                                 ) {

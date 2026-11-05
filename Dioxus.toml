@@ -9,4 +9,5 @@ title = "Metis Mesh HQ"
 [bundle]
 identifier = "dev.metis.mesh-hq"
 publisher = "Metis Mesh"
+icon = ["assets/app_icon.png", "assets/app_icon.ico"]
 resources = ["assets/*"]

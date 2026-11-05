@@ -136,6 +136,22 @@ Fleet dashboard landed (Claimed|Claim infra, status samples, Overview Repeaters:
 
 Do **not**: embed MeshMonitor, store repeater admin passwords for polling, or expect continuous high-rate RF scrapes over LoRa.
 
+## Phase M — Local JSON API + Home Assistant
+
+Opt-in local HTTP so external apps (and Home Assistant) can **pull** HQ status. Same spirit as Ecowitt custom-server: desktop-owned listener, default off, not a cloud product. Reuse the Ecowitt listen-loop pattern (or one shared local HTTP server with a route table) before adding a heavy web framework.
+
+- [x] **M1** Settings toggle: enable local API; bind (default `127.0.0.1`), port, path prefix `/api/v1`; clear LAN-bind warning; bump/restart listener on change (Ecowitt-style)
+- [x] **M2** Bearer token auth on every request; token in `data/local-api.token` (`0600`); generate + rotate + copy in Settings; never log the token; reject when API off or token unset
+- [x] **M3** Read-only JSON v1: `GET /health`, `/status` (companion / HQ name / clock), `/nodes` + `/nodes/{prefix}`, `/infra` + latest status samples, `/channels` metadata (names + unread — **no** secrets), `/stats` (counts)
+- [x] **M4** Hard deny by default: channel secrets, keyring material, Compose/send, enroll/approve/deny, radio CLI, full message bodies, GPS trails (trails only if a later explicit opt-in); forbidden paths → 403
+- [x] **M5** Rate-limit + audit: per-IP sliding window (default 120/min); audit only when settings change; `/health` includes `api_version`
+- [x] **M6** Help: curl examples + Home Assistant `rest` sensor YAML using the bearer token (companion online, repeater battery/noise, enrolled count, last probe age)
+- [x] **M7** Optional MQTT Home Assistant discovery: publish `homeassistant/sensor/.../config` + state topics for the same read sensors (reuse MQTT weather stack patterns); discovery default **off**
+- [ ] **M8** (later) Scoped tokens (`read:status` / `read:nodes` / `read:infra`) and/or write APIs only if operators ask
+- [ ] **M9** (later) Custom Home Assistant integration — only after REST + MQTT discovery prove out; not required for v1
+
+Do **not**: expose the API on the public internet by default, share channel secrets over HTTP, treat linking HQs as an API bridge, or require Prometheus/Grafana/MeshMonitor as the integration path.
+
 ## Non-goals (for now)
 
 - Potato federation / multi-ingestor dashboard
@@ -145,6 +161,7 @@ Do **not**: embed MeshMonitor, store repeater admin passwords for polling, or ex
 - Stamping Open-Meteo/USGS URLs on mesh text (devices are plain text)
 - Adopting MeshMonitor / Prometheus-Grafana as required HQ runtime
 - Third-party website analytics inside the desktop app
+- Public / cloud-hosted HQ API; requiring a custom HA Python component for first cut
 
 ## Suggested order
 
@@ -163,6 +180,7 @@ Do **not**: embed MeshMonitor, store repeater admin passwords for polling, or ex
 12. J1 → J6 (nav order, fuzzy jump, zebra, heard-week icon, shell layout, Help page)  
 13. K1 → K4 (appearance, name-block, Overview KPI strip)
 14. L1 → L7 done (Repeater Overview time range, gauge, favorites, outlier cleanup, hover labels, channel badges; L3/L5 probe honesty + settings)
+15. M1 → M3 (toggle + bearer + read JSON), then M4–M6 (deny list, audit, HA REST docs); M7 MQTT discovery; M8–M9 only if needed
 
 ## Success checks
 
@@ -187,4 +205,5 @@ Do **not**: embed MeshMonitor, store repeater admin passwords for polling, or ex
 - [x] Map Trace on claimed/tracked pin with Ready companion; Traffic overlay toggles without extra airtime
 - [x] Bot/service post on METIS-INFO badges the info channel when not open; operator Compose does not badge
 - [x] Overview Enrolled/Pending/GPS/Traffic sparklines tip with hour + unit (not `#N`)
+- [x] Local API off by default; with token, HA (or curl) can read `/health` + infra latest without seeing channel secrets
 

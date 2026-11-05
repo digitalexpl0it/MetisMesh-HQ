@@ -122,6 +122,8 @@ cargo build --release
 
 Binary lands at `target/release/metis-mesh-hq` (`.exe` on Windows). MapLibre and other `assets/` files are embedded via Dioxus `asset!()`.
 
+Desktop window icon uses the mesh-head mark from the brand logo (`assets/app_icon.png`). On Windows builds, `build.rs` / `winres` also embeds that `.ico` plus VERSIONINFO so Explorer **Properties → Details** shows File description, Product name/version, and Copyright (needs a native Windows or properly tooled cross-compile — plain Linux hosts skip embedding with a warning).
+
 ## Layout
 
 | Path | What |

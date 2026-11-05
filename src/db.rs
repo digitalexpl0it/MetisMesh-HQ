@@ -1004,6 +1004,48 @@ impl Db {
         if self.setting("svc_weather_ecowitt_pull_interval_secs")?.is_none() {
             self.set_setting("svc_weather_ecowitt_pull_interval_secs", "30")?;
         }
+        if self.setting("local_api_enabled")?.is_none() {
+            self.set_setting("local_api_enabled", "0")?;
+        }
+        if self.setting("local_api_bind")?.is_none() {
+            self.set_setting("local_api_bind", "127.0.0.1")?;
+        }
+        if self.setting("local_api_port")?.is_none() {
+            self.set_setting("local_api_port", "8787")?;
+        }
+        if self.setting("local_api_prefix")?.is_none() {
+            self.set_setting("local_api_prefix", "/api/v1")?;
+        }
+        if self.setting("local_api_rate_limit_per_min")?.is_none() {
+            self.set_setting("local_api_rate_limit_per_min", "120")?;
+        }
+        if self.setting("ha_mqtt_enabled")?.is_none() {
+            self.set_setting("ha_mqtt_enabled", "0")?;
+        }
+        if self.setting("ha_mqtt_broker")?.is_none() {
+            self.set_setting("ha_mqtt_broker", "")?;
+        }
+        if self.setting("ha_mqtt_port")?.is_none() {
+            self.set_setting("ha_mqtt_port", "1883")?;
+        }
+        if self.setting("ha_mqtt_tls")?.is_none() {
+            self.set_setting("ha_mqtt_tls", "0")?;
+        }
+        if self.setting("ha_mqtt_username")?.is_none() {
+            self.set_setting("ha_mqtt_username", "")?;
+        }
+        if self.setting("ha_mqtt_discovery_prefix")?.is_none() {
+            self.set_setting("ha_mqtt_discovery_prefix", "homeassistant")?;
+        }
+        if self.setting("ha_mqtt_node_id")?.is_none() {
+            self.set_setting("ha_mqtt_node_id", "metis_mesh_hq")?;
+        }
+        if self.setting("ha_mqtt_state_prefix")?.is_none() {
+            self.set_setting("ha_mqtt_state_prefix", "metis_mesh_hq")?;
+        }
+        if self.setting("ha_mqtt_interval_secs")?.is_none() {
+            self.set_setting("ha_mqtt_interval_secs", "30")?;
+        }
         if self.setting("svc_amber_enabled")?.is_none() {
             self.set_setting("svc_amber_enabled", "0")?;
         }

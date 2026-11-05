@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Desktop packaging
+
+- Application icon: mesh-head mark cropped from the EmergHQ / Metis brand logo (`assets/app_icon.png` / `.ico`); set on the desktop window
+- Linux: GTK pixbuf icon + user `.desktop` / hicolor install so Wayland docks show the mark (tao `with_icon` alone is not enough); install runs before the window maps so first launch is not a blank placeholder
+- Windows `.exe` Properties → Details: File description, Product name/version, Copyright via `winres` (`build.rs`)
+
+### Local JSON API
+
+- Opt-in Settings → Services → **Local API**: bind (default `127.0.0.1`), port `8787`, prefix `/api/v1`
+- Bearer token in `data/local-api.token` (`0600`); generate / rotate / copy / clear; required on every request
+- Read-only JSON: `/health`, `/status`, `/nodes`, `/nodes/{id}`, `/infra`, `/channels`, `/stats` (no secrets, no message bodies)
+- M4: explicit deny paths return `403`; Settings/Help list what is never exposed
+- M5: per-IP rate limit (default 120/min, failed-auth tighter); `Retry-After` on `429`; audit only on real setting changes; `/health` includes `api_version: 1`
+- M6: Help → Local API with curl examples and Home Assistant REST sensor YAML
+- M7: Opt-in Home Assistant MQTT discovery (separate from Weather MQTT): retained config + state every 10–300s for companion online/state, enrolled count, first claimed repeater battery/noise/probed_at; Settings Fill from Weather MQTT; Help Mosquitto + HA discovery note
+
 ### Overview · Repeaters
 
 - Fleet dashboard: summary tiles, compact claim cards, **Details for** dropdown with KPIs + charts

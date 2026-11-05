@@ -339,6 +339,9 @@ const NAV_SEARCH_INDEX: &[NavSearchEntry] = &[
             "GW1200",
             "WittBoy",
             "custom server",
+            "Local API",
+            "bearer",
+            "Home Assistant",
             "NWS",
             "quake",
             "amber",
@@ -6182,6 +6185,7 @@ enum ServicesTab {
     Weather,
     Ecowitt,
     Mqtt,
+    LocalApi,
     Alerts,
     Quake,
 }
@@ -6767,6 +6771,105 @@ fn SettingsPage(
             .flatten()
             .unwrap_or_default()
     });
+    let mut local_api_enabled = use_signal(|| {
+        crate::services::setting_bool(&state().db, "local_api_enabled", false)
+    });
+    let mut local_api_bind = use_signal(|| {
+        state()
+            .db
+            .setting("local_api_bind")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "127.0.0.1".into())
+    });
+    let mut local_api_port = use_signal(|| {
+        state()
+            .db
+            .setting("local_api_port")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "8787".into())
+    });
+    let mut local_api_prefix = use_signal(|| {
+        state()
+            .db
+            .setting("local_api_prefix")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "/api/v1".into())
+    });
+    let mut local_api_rate = use_signal(|| {
+        state()
+            .db
+            .setting("local_api_rate_limit_per_min")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "120".into())
+    });
+    let mut local_api_token_reveal = use_signal(String::new);
+    let mut ha_mqtt_enabled = use_signal(|| {
+        crate::services::setting_bool(&state().db, "ha_mqtt_enabled", false)
+    });
+    let mut ha_mqtt_broker = use_signal(|| {
+        state()
+            .db
+            .setting("ha_mqtt_broker")
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    });
+    let mut ha_mqtt_port = use_signal(|| {
+        state()
+            .db
+            .setting("ha_mqtt_port")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "1883".into())
+    });
+    let mut ha_mqtt_tls = use_signal(|| {
+        crate::services::setting_bool(&state().db, "ha_mqtt_tls", false)
+    });
+    let mut ha_mqtt_user = use_signal(|| {
+        state()
+            .db
+            .setting("ha_mqtt_username")
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    });
+    let mut ha_mqtt_pass = use_signal(String::new);
+    let mut ha_mqtt_discovery_prefix = use_signal(|| {
+        state()
+            .db
+            .setting("ha_mqtt_discovery_prefix")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "homeassistant".into())
+    });
+    let mut ha_mqtt_node_id = use_signal(|| {
+        state()
+            .db
+            .setting("ha_mqtt_node_id")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "metis_mesh_hq".into())
+    });
+    let mut ha_mqtt_state_prefix = use_signal(|| {
+        state()
+            .db
+            .setting("ha_mqtt_state_prefix")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "metis_mesh_hq".into())
+    });
+    let mut ha_mqtt_interval = use_signal(|| {
+        state()
+            .db
+            .setting("ha_mqtt_interval_secs")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "30".into())
+    });
     let mut svc_ecowitt_interval = use_signal(|| {
         state()
             .db
@@ -6938,6 +7041,10 @@ fn SettingsPage(
     let mqtt_wx_status = crate::services::mqtt_weather_status_line(&state().db);
     let ecowitt_push_status = crate::services::ecowitt_push_status_line(&state().db);
     let ecowitt_pull_status = crate::services::ecowitt_pull_status_line(&state().db);
+    let local_api_status = crate::services::local_api_status_line(&state().db);
+    let local_api_has_token = crate::services::local_api_token_present(&crate::data_dir());
+    let ha_mqtt_status = crate::services::ha_mqtt_status_line(&state().db);
+    let ha_mqtt_pass_saved = crate::services::ha_mqtt_password_present(&crate::data_dir());
     let mqtt_template_default =
         crate::services::default_json_template(crate::services::weather_unit_f(&state().db));
     let mqtt_pass_saved = crate::services::password_file_present(&crate::data_dir());
@@ -7464,16 +7571,21 @@ fn SettingsPage(
                         onclick: move |_| services_tab.set(ServicesTab::Ecowitt),
                         "Ecowitt"
                     }
-                    button {
-                        class: if services_tab() == ServicesTab::Mqtt { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
-                        onclick: move |_| services_tab.set(ServicesTab::Mqtt),
-                        "MQTT"
-                    }
-                    button {
-                        class: if services_tab() == ServicesTab::Alerts { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
-                        onclick: move |_| services_tab.set(ServicesTab::Alerts),
-                        "Alerts"
-                    }
+                        button {
+                            class: if services_tab() == ServicesTab::Mqtt { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
+                            onclick: move |_| services_tab.set(ServicesTab::Mqtt),
+                            "MQTT"
+                        }
+                        button {
+                            class: if services_tab() == ServicesTab::LocalApi { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
+                            onclick: move |_| services_tab.set(ServicesTab::LocalApi),
+                            "Local API"
+                        }
+                        button {
+                            class: if services_tab() == ServicesTab::Alerts { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
+                            onclick: move |_| services_tab.set(ServicesTab::Alerts),
+                            "Alerts"
+                        }
                     button {
                         class: if services_tab() == ServicesTab::Quake { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
                         onclick: move |_| services_tab.set(ServicesTab::Quake),
@@ -8022,6 +8134,583 @@ fn SettingsPage(
                                 }
                             }
                             span { class: "text-xs text-muted-foreground", "seconds (shared; then bare #weather falls back to Open-Meteo)" }
+                        }
+                    }
+                }
+
+                if services_tab() == ServicesTab::LocalApi {
+                    div { class: "services-panel",
+                        p { class: "text-sm text-muted-foreground",
+                            "Opt-in read-only JSON API for local apps and Home Assistant. Default bind is loopback. Bearer token is required on every request (including /health). Token is stored as local-api.token under the HQ data folder (0600) — never in the database. See Help → Local API for curl and Home Assistant examples."
+                        }
+                        p { class: "text-xs text-muted-foreground", "{local_api_status}" }
+                        p { class: "text-xs text-muted-foreground",
+                            strong { "Never exposed: " }
+                            "channel secrets, keyring material, Compose/send, enroll/approve/deny, radio CLI, full message bodies, or GPS trails."
+                        }
+                        ToggleSwitch {
+                            checked: local_api_enabled(),
+                            label: "Enable local JSON API".to_string(),
+                            hint: Some("GET /api/v1/health, /status, /nodes, /infra, /channels, /stats".to_string()),
+                            onchange: move |next| {
+                                let prev = crate::services::setting_bool(
+                                    &state().db,
+                                    "local_api_enabled",
+                                    false,
+                                );
+                                if next {
+                                    match crate::services::ensure_local_api_token(&crate::data_dir()) {
+                                        Ok(token) => {
+                                            local_api_token_reveal.set(token);
+                                        }
+                                        Err(err) => {
+                                            crate::toast::push(
+                                                crate::toast::ToastKind::Error,
+                                                format!("Could not create API token: {err}"),
+                                            );
+                                            return;
+                                        }
+                                    }
+                                }
+                                local_api_enabled.set(next);
+                                crate::services::set_setting_bool(
+                                    &state().db,
+                                    "local_api_enabled",
+                                    next,
+                                );
+                                if prev != next {
+                                    let _ = state().db.audit(
+                                        if next { "local_api_enable" } else { "local_api_disable" },
+                                        "",
+                                        "",
+                                    );
+                                }
+                                crate::services::bump_local_api_config();
+                            }
+                        }
+                        if !crate::services::is_loopback_bind(&local_api_bind()) {
+                            p { class: "text-xs text-amber-200",
+                                "Bind is not loopback — anything on this LAN that knows the bearer token can read HQ status. Prefer 127.0.0.1 unless Home Assistant runs on another machine."
+                            }
+                        }
+                        div { class: "grid gap-2 sm:grid-cols-2 lg:grid-cols-4",
+                            div { class: "flex flex-col gap-1",
+                                label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Bind" }
+                                TextInput {
+                                    value: local_api_bind(),
+                                    placeholder: "127.0.0.1".to_string(),
+                                    oninput: move |event: FormEvent| {
+                                        let value = event.value();
+                                        local_api_bind.set(value.clone());
+                                        let trimmed = value.trim();
+                                        if trimmed.is_empty() {
+                                            return;
+                                        }
+                                        let prev = state()
+                                            .db
+                                            .setting("local_api_bind")
+                                            .ok()
+                                            .flatten()
+                                            .unwrap_or_default();
+                                        if prev == trimmed {
+                                            return;
+                                        }
+                                        let _ = state().db.set_setting("local_api_bind", trimmed);
+                                        let _ = state().db.audit("local_api_bind", "", trimmed);
+                                        crate::services::bump_local_api_config();
+                                    },
+                                }
+                            }
+                            div { class: "flex flex-col gap-1",
+                                label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Port" }
+                                TextInput {
+                                    value: local_api_port(),
+                                    placeholder: "8787".to_string(),
+                                    oninput: move |event: FormEvent| {
+                                        let value = event.value();
+                                        local_api_port.set(value.clone());
+                                        let trimmed = value.trim();
+                                        if trimmed.parse::<u16>().is_err() {
+                                            return;
+                                        }
+                                        let prev = state()
+                                            .db
+                                            .setting("local_api_port")
+                                            .ok()
+                                            .flatten()
+                                            .unwrap_or_default();
+                                        if prev == trimmed {
+                                            return;
+                                        }
+                                        let _ = state().db.set_setting("local_api_port", trimmed);
+                                        let _ = state().db.audit("local_api_port", "", trimmed);
+                                        crate::services::bump_local_api_config();
+                                    },
+                                }
+                            }
+                            div { class: "flex flex-col gap-1",
+                                label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Path prefix" }
+                                TextInput {
+                                    value: local_api_prefix(),
+                                    placeholder: "/api/v1".to_string(),
+                                    oninput: move |event: FormEvent| {
+                                        let value = event.value();
+                                        local_api_prefix.set(value.clone());
+                                        let normalized =
+                                            crate::services::normalize_local_api_prefix(value.trim());
+                                        let prev = state()
+                                            .db
+                                            .setting("local_api_prefix")
+                                            .ok()
+                                            .flatten()
+                                            .unwrap_or_default();
+                                        if prev == normalized {
+                                            return;
+                                        }
+                                        let _ = state().db.set_setting(
+                                            "local_api_prefix",
+                                            &normalized,
+                                        );
+                                        let _ = state().db.audit(
+                                            "local_api_prefix",
+                                            "",
+                                            &normalized,
+                                        );
+                                        crate::services::bump_local_api_config();
+                                    },
+                                }
+                            }
+                            div { class: "flex flex-col gap-1",
+                                label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Max requests / minute" }
+                                TextInput {
+                                    value: local_api_rate(),
+                                    placeholder: "120".to_string(),
+                                    oninput: move |event: FormEvent| {
+                                        let value = event.value();
+                                        local_api_rate.set(value.clone());
+                                        let Ok(parsed) = value.trim().parse::<u32>() else {
+                                            return;
+                                        };
+                                        let clamped =
+                                            crate::services::clamp_local_api_rate_limit(parsed);
+                                        let stored = clamped.to_string();
+                                        let prev = state()
+                                            .db
+                                            .setting("local_api_rate_limit_per_min")
+                                            .ok()
+                                            .flatten()
+                                            .unwrap_or_default();
+                                        if prev == stored {
+                                            return;
+                                        }
+                                        let _ = state().db.set_setting(
+                                            "local_api_rate_limit_per_min",
+                                            &stored,
+                                        );
+                                        let _ = state().db.audit(
+                                            "local_api_rate_limit",
+                                            "",
+                                            &stored,
+                                        );
+                                        crate::services::bump_local_api_config();
+                                    },
+                                }
+                            }
+                        }
+                        div { class: "flex flex-col gap-2",
+                            label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Bearer token" }
+                            if !local_api_token_reveal().is_empty() {
+                                TextInput {
+                                    value: local_api_token_reveal(),
+                                    placeholder: "".to_string(),
+                                    oninput: move |_| {},
+                                }
+                                p { class: "text-xs text-muted-foreground",
+                                    "Token shown after generate/rotate/enable. Copy it now — it is not stored in Settings history."
+                                }
+                            } else if local_api_has_token {
+                                p { class: "text-xs text-muted-foreground",
+                                    "A token file is present. Rotate to reveal a new value, or Copy if you just generated one this session."
+                                }
+                            } else {
+                                p { class: "text-xs text-muted-foreground",
+                                    "No token yet. Enabling the API or Generate will create one."
+                                }
+                            }
+                            div { class: "flex flex-wrap gap-2",
+                                Button {
+                                    kind: ButtonKind::Ghost,
+                                    onclick: move |_| {
+                                        let token = crate::services::generate_local_api_token();
+                                        match crate::services::save_local_api_token(
+                                            &crate::data_dir(),
+                                            &token,
+                                        ) {
+                                            Ok(()) => {
+                                                local_api_token_reveal.set(token);
+                                                let _ = state().db.audit(
+                                                    "local_api_token_rotate",
+                                                    "",
+                                                    "",
+                                                );
+                                                crate::toast::push(
+                                                    crate::toast::ToastKind::Success,
+                                                    "API token saved.",
+                                                );
+                                            }
+                                            Err(err) => {
+                                                crate::toast::push(
+                                                    crate::toast::ToastKind::Error,
+                                                    format!("Token save failed: {err}"),
+                                                );
+                                            }
+                                        }
+                                    },
+                                    if local_api_has_token { "Rotate token" } else { "Generate token" }
+                                }
+                                Button {
+                                    kind: ButtonKind::Ghost,
+                                    onclick: move |_| {
+                                        let token = if !local_api_token_reveal().is_empty() {
+                                            local_api_token_reveal()
+                                        } else {
+                                            crate::services::load_local_api_token(&crate::data_dir())
+                                        };
+                                        if token.is_empty() {
+                                            crate::toast::push(
+                                                crate::toast::ToastKind::Error,
+                                                "No token to copy.",
+                                            );
+                                        } else {
+                                            copy_text_to_clipboard(&token);
+                                            crate::toast::push(
+                                                crate::toast::ToastKind::Success,
+                                                "Token copied.",
+                                            );
+                                        }
+                                    },
+                                    "Copy token"
+                                }
+                                Button {
+                                    kind: ButtonKind::Danger,
+                                    onclick: move |_| {
+                                        crate::services::clear_local_api_token(&crate::data_dir());
+                                        local_api_token_reveal.set(String::new());
+                                        let _ = state().db.audit("local_api_token_clear", "", "");
+                                        crate::toast::push(
+                                            crate::toast::ToastKind::Success,
+                                            "API token cleared — requests will 401 until you generate again.",
+                                        );
+                                    },
+                                    "Clear token"
+                                }
+                            }
+                        }
+
+                        div { class: "mt-6 flex flex-col gap-3 border-t border-border/60 pt-4",
+                            h3 { class: "text-sm font-medium text-foreground",
+                                "Home Assistant MQTT discovery"
+                            }
+                            p { class: "text-sm text-muted-foreground",
+                                "Separate from Weather MQTT. Publishes retained discovery configs and state every interval for companion online/state, enrolled count, and the first claimed repeater’s battery, noise, and probe time. Default off."
+                            }
+                            p { class: "text-xs text-muted-foreground", "{ha_mqtt_status}" }
+                            ToggleSwitch {
+                                checked: ha_mqtt_enabled(),
+                                label: "Enable Home Assistant MQTT discovery".to_string(),
+                                hint: Some("Requires a broker (Mosquitto). Discovery prefix must match HA MQTT integration.".to_string()),
+                                onchange: move |next| {
+                                    let prev = crate::services::setting_bool(
+                                        &state().db,
+                                        "ha_mqtt_enabled",
+                                        false,
+                                    );
+                                    ha_mqtt_enabled.set(next);
+                                    crate::services::set_setting_bool(
+                                        &state().db,
+                                        "ha_mqtt_enabled",
+                                        next,
+                                    );
+                                    if prev != next {
+                                        let _ = state().db.audit(
+                                            if next { "ha_mqtt_enable" } else { "ha_mqtt_disable" },
+                                            "",
+                                            "",
+                                        );
+                                    }
+                                    crate::services::bump_ha_mqtt_config();
+                                }
+                            }
+                            div { class: "grid gap-2 sm:grid-cols-2",
+                                div { class: "flex flex-col gap-1",
+                                    label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Broker host" }
+                                    TextInput {
+                                        value: ha_mqtt_broker(),
+                                        placeholder: "127.0.0.1".to_string(),
+                                        oninput: move |event: FormEvent| {
+                                            let value = event.value();
+                                            ha_mqtt_broker.set(value.clone());
+                                            let prev = state()
+                                                .db
+                                                .setting("ha_mqtt_broker")
+                                                .ok()
+                                                .flatten()
+                                                .unwrap_or_default();
+                                            let trimmed = value.trim().to_string();
+                                            let _ = state().db.set_setting("ha_mqtt_broker", &trimmed);
+                                            if prev != trimmed {
+                                                let _ = state().db.audit("ha_mqtt_broker", "", &trimmed);
+                                            }
+                                            crate::services::bump_ha_mqtt_config();
+                                        },
+                                    }
+                                }
+                                div { class: "flex flex-col gap-1",
+                                    label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Port" }
+                                    TextInput {
+                                        value: ha_mqtt_port(),
+                                        placeholder: "1883".to_string(),
+                                        oninput: move |event: FormEvent| {
+                                            let value = event.value();
+                                            ha_mqtt_port.set(value.clone());
+                                            if value.trim().parse::<u16>().is_ok() {
+                                                let _ = state().db.set_setting(
+                                                    "ha_mqtt_port",
+                                                    value.trim(),
+                                                );
+                                                crate::services::bump_ha_mqtt_config();
+                                            }
+                                        },
+                                    }
+                                }
+                            }
+                            ToggleSwitch {
+                                checked: ha_mqtt_tls(),
+                                disabled: !ha_mqtt_enabled(),
+                                label: "TLS".to_string(),
+                                onchange: move |next| {
+                                    ha_mqtt_tls.set(next);
+                                    crate::services::set_setting_bool(
+                                        &state().db,
+                                        "ha_mqtt_tls",
+                                        next,
+                                    );
+                                    crate::services::bump_ha_mqtt_config();
+                                }
+                            }
+                            div { class: "grid gap-2 sm:grid-cols-2",
+                                div { class: "flex flex-col gap-1",
+                                    label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Username (optional)" }
+                                    TextInput {
+                                        value: ha_mqtt_user(),
+                                        placeholder: "".to_string(),
+                                        oninput: move |event: FormEvent| {
+                                            let value = event.value();
+                                            ha_mqtt_user.set(value.clone());
+                                            let _ = state().db.set_setting(
+                                                "ha_mqtt_username",
+                                                value.trim(),
+                                            );
+                                            crate::services::bump_ha_mqtt_config();
+                                        },
+                                    }
+                                }
+                                div { class: "flex flex-col gap-1",
+                                    label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground",
+                                        if ha_mqtt_pass_saved {
+                                            "Password (saved in HQ data folder · leave blank to keep)"
+                                        } else {
+                                            "Password (saved as ha-mqtt.pass in HQ data folder · 0600)"
+                                        }
+                                    }
+                                    TextInput {
+                                        value: ha_mqtt_pass(),
+                                        placeholder: "Broker password".to_string(),
+                                        kind: "password".to_string(),
+                                        oninput: move |event: FormEvent| ha_mqtt_pass.set(event.value()),
+                                    }
+                                    div { class: "flex gap-2",
+                                        Button {
+                                            kind: ButtonKind::Ghost,
+                                            onclick: move |_| {
+                                                let pass = ha_mqtt_pass();
+                                                match crate::services::save_ha_mqtt_password(
+                                                    &crate::data_dir(),
+                                                    &pass,
+                                                ) {
+                                                    Ok(()) => {
+                                                        ha_mqtt_pass.set(String::new());
+                                                        crate::toast::push(
+                                                            crate::toast::ToastKind::Success,
+                                                            if pass.trim().is_empty() {
+                                                                "HA MQTT password cleared."
+                                                            } else {
+                                                                "HA MQTT password saved."
+                                                            },
+                                                        );
+                                                    }
+                                                    Err(err) => {
+                                                        crate::toast::push(
+                                                            crate::toast::ToastKind::Error,
+                                                            format!("Password save failed: {err}"),
+                                                        );
+                                                    }
+                                                }
+                                            },
+                                            "Save password"
+                                        }
+                                        Button {
+                                            kind: ButtonKind::Ghost,
+                                            onclick: move |_| {
+                                                crate::services::clear_ha_mqtt_password(&crate::data_dir());
+                                                ha_mqtt_pass.set(String::new());
+                                                crate::toast::push(
+                                                    crate::toast::ToastKind::Success,
+                                                    "HA MQTT password cleared.",
+                                                );
+                                            },
+                                            "Clear"
+                                        }
+                                    }
+                                }
+                            }
+                            div { class: "grid gap-2 sm:grid-cols-3",
+                                div { class: "flex flex-col gap-1",
+                                    label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Discovery prefix" }
+                                    TextInput {
+                                        value: ha_mqtt_discovery_prefix(),
+                                        placeholder: "homeassistant".to_string(),
+                                        oninput: move |event: FormEvent| {
+                                            let value = event.value();
+                                            ha_mqtt_discovery_prefix.set(value.clone());
+                                            let trimmed = value.trim();
+                                            let store = if trimmed.is_empty() {
+                                                "homeassistant"
+                                            } else {
+                                                trimmed
+                                            };
+                                            let _ = state().db.set_setting(
+                                                "ha_mqtt_discovery_prefix",
+                                                store,
+                                            );
+                                            crate::services::bump_ha_mqtt_config();
+                                        },
+                                    }
+                                }
+                                div { class: "flex flex-col gap-1",
+                                    label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Node id" }
+                                    TextInput {
+                                        value: ha_mqtt_node_id(),
+                                        placeholder: "metis_mesh_hq".to_string(),
+                                        oninput: move |event: FormEvent| {
+                                            let value = event.value();
+                                            ha_mqtt_node_id.set(value.clone());
+                                            let trimmed = value.trim();
+                                            let store = if trimmed.is_empty() {
+                                                "metis_mesh_hq"
+                                            } else {
+                                                trimmed
+                                            };
+                                            let _ = state().db.set_setting("ha_mqtt_node_id", store);
+                                            crate::services::bump_ha_mqtt_config();
+                                        },
+                                    }
+                                }
+                                div { class: "flex flex-col gap-1",
+                                    label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "State prefix" }
+                                    TextInput {
+                                        value: ha_mqtt_state_prefix(),
+                                        placeholder: "metis_mesh_hq".to_string(),
+                                        oninput: move |event: FormEvent| {
+                                            let value = event.value();
+                                            ha_mqtt_state_prefix.set(value.clone());
+                                            let trimmed = value.trim();
+                                            let store = if trimmed.is_empty() {
+                                                "metis_mesh_hq"
+                                            } else {
+                                                trimmed
+                                            };
+                                            let _ = state().db.set_setting(
+                                                "ha_mqtt_state_prefix",
+                                                store,
+                                            );
+                                            crate::services::bump_ha_mqtt_config();
+                                        },
+                                    }
+                                }
+                            }
+                            div { class: "flex flex-col gap-1",
+                                label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Publish interval (seconds)" }
+                                TextInput {
+                                    value: ha_mqtt_interval(),
+                                    placeholder: "30".to_string(),
+                                    oninput: move |event: FormEvent| {
+                                        let value = event.value();
+                                        ha_mqtt_interval.set(value.clone());
+                                        if let Ok(parsed) = value.trim().parse::<u64>() {
+                                            let clamped =
+                                                crate::services::clamp_ha_mqtt_interval(parsed);
+                                            let _ = state().db.set_setting(
+                                                "ha_mqtt_interval_secs",
+                                                &clamped.to_string(),
+                                            );
+                                            ha_mqtt_interval.set(clamped.to_string());
+                                            crate::services::bump_ha_mqtt_config();
+                                        }
+                                    },
+                                }
+                                span { class: "text-xs text-muted-foreground", "10–300 seconds (default 30)" }
+                            }
+                            div { class: "flex flex-wrap gap-2",
+                                Button {
+                                    kind: ButtonKind::Ghost,
+                                    onclick: move |_| {
+                                        let wx_broker = state()
+                                            .db
+                                            .setting("svc_weather_mqtt_broker")
+                                            .ok()
+                                            .flatten()
+                                            .unwrap_or_default();
+                                        let wx_port = state()
+                                            .db
+                                            .setting("svc_weather_mqtt_port")
+                                            .ok()
+                                            .flatten()
+                                            .unwrap_or_else(|| "1883".into());
+                                        let wx_tls = crate::services::setting_bool(
+                                            &state().db,
+                                            "svc_weather_mqtt_tls",
+                                            false,
+                                        );
+                                        let wx_user = state()
+                                            .db
+                                            .setting("svc_weather_mqtt_username")
+                                            .ok()
+                                            .flatten()
+                                            .unwrap_or_default();
+                                        ha_mqtt_broker.set(wx_broker.clone());
+                                        ha_mqtt_port.set(wx_port.clone());
+                                        ha_mqtt_tls.set(wx_tls);
+                                        ha_mqtt_user.set(wx_user.clone());
+                                        let _ = state().db.set_setting("ha_mqtt_broker", wx_broker.trim());
+                                        let _ = state().db.set_setting("ha_mqtt_port", wx_port.trim());
+                                        crate::services::set_setting_bool(
+                                            &state().db,
+                                            "ha_mqtt_tls",
+                                            wx_tls,
+                                        );
+                                        let _ = state()
+                                            .db
+                                            .set_setting("ha_mqtt_username", wx_user.trim());
+                                        crate::services::bump_ha_mqtt_config();
+                                        crate::toast::push(
+                                            crate::toast::ToastKind::Success,
+                                            "Copied broker/port/TLS/username from Weather MQTT. Password not copied — paste if needed.",
+                                        );
+                                    },
+                                    "Fill from Weather MQTT"
+                                }
+                            }
                         }
                     }
                 }

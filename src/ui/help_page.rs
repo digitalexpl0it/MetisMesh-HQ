@@ -51,6 +51,10 @@ const TOPICS: &[HelpTopic] = &[
         label: "Weather & alerts",
     },
     HelpTopic {
+        id: "help-local-api",
+        label: "Local API",
+    },
+    HelpTopic {
         id: "help-cli-flasher",
         label: "CLI & Flasher",
     },
@@ -418,9 +422,73 @@ pub fn HelpPage() -> Element {
                             code { "#amber" }
                             ", "
                             code { "#alert" }
-                            "). Settings → Services configures ZIP schedules, NWS / Amber polls, MQTT or Ecowitt stations, and auto-relay vs Inbox confirm."
+                            "). Settings → Services configures ZIP schedules, NWS / Amber polls, MQTT or Ecowitt stations, and auto-relay vs Inbox confirm. For Home Assistant / scripts, see "
+                            strong { "Local API" }
+                            " below."
                         }
                         p { "Label source and time. Mesh text stays plain — never treat it as an official agency product." }
+                    }
+
+                    section { id: "help-local-api", class: "help-section",
+                        h3 { class: "help-section-title",
+                            Icon { name: IconName::Settings, size: 16 }
+                            "Local API"
+                        }
+                        p {
+                            "Opt-in read-only JSON under Settings → Services → "
+                            strong { "Local API" }
+                            ". Default "
+                            code { "127.0.0.1:8787" }
+                            " with path prefix "
+                            code { "/api/v1" }
+                            ". Bearer token required on every request (stored as "
+                            code { "data/local-api.token" }
+                            ", mode 0600). Field names under "
+                            code { "/api/v1" }
+                            " are stable; breaking changes would use a new version prefix."
+                        }
+                        p {
+                            strong { "Never exposed: " }
+                            "channel secrets, keyring material, Compose/send, enroll/approve/deny, radio CLI, full message bodies, or GPS trails. Forbidden paths return "
+                            code { "403" }
+                            "."
+                        }
+                        p { class: "help-muted",
+                            "Prefer loopback. Binding to the LAN means anyone with the token on that network can read status."
+                        }
+                        h4 { class: "help-subtitle", "curl" }
+                        pre { class: "help-pre",
+                            {"TOKEN=…   # paste from Settings → Local API → Copy token\ncurl -sS -H \"Authorization: Bearer $TOKEN\" \\\n  http://127.0.0.1:8787/api/v1/health\ncurl -sS -H \"Authorization: Bearer $TOKEN\" \\\n  http://127.0.0.1:8787/api/v1/status\ncurl -sS -H \"Authorization: Bearer $TOKEN\" \\\n  http://127.0.0.1:8787/api/v1/stats\ncurl -sS -H \"Authorization: Bearer $TOKEN\" \\\n  http://127.0.0.1:8787/api/v1/infra"}
+                        }
+                        h4 { class: "help-subtitle", "Home Assistant (REST)" }
+                        p { class: "help-muted",
+                            "Replace "
+                            code { "YOUR_TOKEN" }
+                            ". Infra sensors use the first claimed row ("
+                            code { "$[0].latest…" }
+                            "); adjust the JSON path if you have several claims."
+                        }
+                        pre { class: "help-pre",
+                            {"# configuration.yaml (or a package)\nsensor:\n  - platform: rest\n    name: Metis companion state\n    resource: http://127.0.0.1:8787/api/v1/status\n    headers:\n      Authorization: Bearer YOUR_TOKEN\n    value_template: \"{{ value_json.companion.state }}\"\n    json_attributes_path: \"$.companion\"\n    json_attributes:\n      - connected_name\n      transport\n\n  - platform: rest\n    name: Metis enrolled count\n    resource: http://127.0.0.1:8787/api/v1/stats\n    headers:\n      Authorization: Bearer YOUR_TOKEN\n    value_template: \"{{ value_json.enrollment.enrolled }}\"\n\n  - platform: rest\n    name: Metis repeater battery mV\n    resource: http://127.0.0.1:8787/api/v1/infra\n    headers:\n      Authorization: Bearer YOUR_TOKEN\n    value_template: \"{{ value_json[0].latest.battery_mv }}\"\n    unit_of_measurement: mV\n\n  - platform: rest\n    name: Metis repeater noise\n    resource: http://127.0.0.1:8787/api/v1/infra\n    headers:\n      Authorization: Bearer YOUR_TOKEN\n    value_template: \"{{ value_json[0].latest.noise_floor }}\"\n    unit_of_measurement: dBm\n\n  - platform: rest\n    name: Metis repeater probed at\n    resource: http://127.0.0.1:8787/api/v1/infra\n    headers:\n      Authorization: Bearer YOUR_TOKEN\n    value_template: \"{{ value_json[0].latest.probed_at }}\""}
+                        }
+                        h4 { class: "help-subtitle", "Home Assistant (MQTT discovery)" }
+                        p {
+                            "Opt-in under Settings → Services → Local API → "
+                            strong { "Home Assistant MQTT discovery" }
+                            " (separate from Weather MQTT). HQ publishes retained discovery under your discovery prefix (default "
+                            code { "homeassistant" }
+                            ") and state under the state prefix (default "
+                            code { "metis_mesh_hq" }
+                            "). Same six entities as the REST examples: companion online/state, enrolled count, first claimed repeater battery/noise/probe time. Password file: "
+                            code { "data/ha-mqtt.pass" }
+                            " (0600)."
+                        }
+                        p { class: "help-muted",
+                            "Enable the MQTT integration in Home Assistant and set its discovery prefix to match HQ. Example Mosquitto on the LAN:"
+                        }
+                        pre { class: "help-pre",
+                            {"# mosquitto.conf (minimal LAN example)\nlistener 1883\nallow_anonymous true\n# Or set a user/password and enter them in HQ Settings.\n\n# HA → Settings → Devices & services → MQTT\n# Discovery prefix: homeassistant  (must match HQ)"}
+                        }
                     }
 
                     section { id: "help-cli-flasher", class: "help-section",

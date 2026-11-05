@@ -4,6 +4,10 @@ version = "0.1.4"
 edition = "2021"
 description = "Offline emergency headquarters for MeshCore communities"
 license = "MIT"
+authors = ["DigitalExpl0it"]
+
+[build-dependencies]
+winres = "0.1"
 
 [dependencies]
 argon2 = "0.5"

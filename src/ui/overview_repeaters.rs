@@ -199,24 +199,7 @@ pub fn hard_gate_rate(v: f32) -> bool {
     v.is_finite() && v >= 0.0
 }
 
-/// Display-only outlier filter: hard gate, then Hampel when n≥5.
-pub fn filter_outliers(values: &[f32], gate: fn(f32) -> bool) -> (Vec<f32>, usize) {
-    let gated: Vec<f32> = values.iter().copied().filter(|&v| gate(v)).collect();
-    let dropped_gate = values.len().saturating_sub(gated.len());
-    if gated.len() < 5 {
-        return (gated, dropped_gate);
-    }
-    let keep = hampel_keep_mask(&gated, 2, 3.0);
-    let out: Vec<f32> = gated
-        .iter()
-        .zip(keep.iter())
-        .filter_map(|(v, k)| k.then_some(*v))
-        .collect();
-    let dropped = dropped_gate + gated.len().saturating_sub(out.len());
-    (out, dropped)
-}
-
-/// Same as [`filter_outliers`] but keeps labels aligned with surviving values.
+/// Display-only outlier filter: hard gate, then Hampel when n≥5. Keeps labels aligned.
 pub fn filter_outliers_labeled(
     values: &[f32],
     labels: &[String],
@@ -325,23 +308,107 @@ fn counter_delta_per_hour(points: Vec<(i64, i64)>) -> Vec<f32> {
     out
 }
 
-/// TX+RX airtime delta as percent of wall-clock between samples.
-fn airtime_pct_series(points: &[(i64, i64, i64)]) -> Vec<f32> {
-    if points.is_empty() {
-        return Vec::new();
+/// TX+RX airtime delta as percent of wall-clock between samples, plus end stamps.
+/// Skips intervals with a counter reset/jump (raw usage > 100% of wall time).
+fn airtime_pct_series_labeled(points: &[(i64, i64, i64)]) -> (Vec<f32>, Vec<i64>) {
+    if points.len() < 2 {
+        return (Vec::new(), Vec::new());
     }
-    if points.len() == 1 {
-        return vec![0.0];
-    }
-    let mut out = Vec::with_capacity(points.len().saturating_sub(1));
+    let mut vals = Vec::with_capacity(points.len().saturating_sub(1));
+    let mut ends = Vec::with_capacity(points.len().saturating_sub(1));
     for w in points.windows(2) {
         let dt_ms = ((w[1].0 - w[0].0).max(1) as f64) * 1000.0;
+        // Lifetime counters starting at 0 on the first probe look like a full dump.
+        if w[0].1 == 0 && w[0].2 == 0 && (w[1].1 > 0 || w[1].2 > 0) {
+            continue;
+        }
         let d_tx = (w[1].1 - w[0].1).max(0) as f64;
         let d_rx = (w[1].2 - w[0].2).max(0) as f64;
-        let pct = ((d_tx + d_rx) / dt_ms * 100.0).clamp(0.0, 100.0);
-        out.push(pct as f32);
+        let ratio = (d_tx + d_rx) / dt_ms;
+        if !ratio.is_finite() || ratio > 1.0 {
+            // Counter discontinuity / reboot — do not clamp into a fake 100% spike.
+            continue;
+        }
+        vals.push((ratio * 100.0) as f32);
+        ends.push(w[1].0);
     }
-    out
+    (vals, ends)
+}
+
+/// End-of-interval unix stamps for rate/airtime series (one per windows(2)).
+fn interval_end_ats(sample_ats: &[i64]) -> Vec<i64> {
+    if sample_ats.is_empty() {
+        return Vec::new();
+    }
+    if sample_ats.len() == 1 {
+        return vec![sample_ats[0]];
+    }
+    sample_ats.windows(2).map(|w| w[1]).collect()
+}
+
+/// One hover/axis label per interval, stamped at the interval end sample.
+fn interval_end_labels(sample_ats: &[i64]) -> Vec<String> {
+    interval_end_ats(sample_ats)
+        .into_iter()
+        .map(|t| format_time(Some(t)))
+        .collect()
+}
+
+/// Sparse first / mid / last labels for the chart footer.
+fn sparse_chart_labels(point_labels: &[String]) -> Vec<String> {
+    let n = point_labels.len();
+    point_labels
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| n <= 4 || *i == 0 || *i == n / 2 || *i + 1 == n)
+        .map(|(_, s)| s.clone())
+        .collect()
+}
+
+/// Keep packet-rate series time-aligned (shared hard gate + joint Hampel).
+fn filter_aligned_rate_series(
+    recv: &[f32],
+    flood: &[f32],
+    direct: &[f32],
+    labels: &[String],
+) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<String>, usize) {
+    let n = recv.len().min(flood.len()).min(direct.len()).min(labels.len());
+    let mut g_recv = Vec::new();
+    let mut g_flood = Vec::new();
+    let mut g_direct = Vec::new();
+    let mut g_labels = Vec::new();
+    let mut dropped = 0usize;
+    for i in 0..n {
+        if hard_gate_rate(recv[i]) && hard_gate_rate(flood[i]) && hard_gate_rate(direct[i]) {
+            g_recv.push(recv[i]);
+            g_flood.push(flood[i]);
+            g_direct.push(direct[i]);
+            g_labels.push(labels[i].clone());
+        } else {
+            dropped += 1;
+        }
+    }
+    if g_recv.len() < 5 {
+        return (g_recv, g_flood, g_direct, g_labels, dropped);
+    }
+    let kr = hampel_keep_mask(&g_recv, 2, 3.0);
+    let kf = hampel_keep_mask(&g_flood, 2, 3.0);
+    let kd = hampel_keep_mask(&g_direct, 2, 3.0);
+    let mut o_recv = Vec::new();
+    let mut o_flood = Vec::new();
+    let mut o_direct = Vec::new();
+    let mut o_labels = Vec::new();
+    for i in 0..g_recv.len() {
+        if kr[i] && kf[i] && kd[i] {
+            o_recv.push(g_recv[i]);
+            o_flood.push(g_flood[i]);
+            o_direct.push(g_direct[i]);
+            o_labels.push(g_labels[i].clone());
+        } else {
+            dropped += 1;
+        }
+    }
+    (o_recv, o_flood, o_direct, o_labels, dropped)
 }
 
 fn format_time(seconds: Option<i64>) -> String {
@@ -843,41 +910,42 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
                     let (queue_vals, queue_labels, d_queue) =
                         filter_outliers_labeled(&queue_raw, &queue_labels_raw, hard_gate_queue);
 
-                    let (recv_rate, d_recv) = filter_outliers(
-                        &counter_delta_per_hour(
-                            samples.iter().map(|s| (s.at, s.nb_recv)).collect(),
-                        ),
-                        hard_gate_rate,
+                    let sample_ats: Vec<i64> = samples.iter().map(|s| s.at).collect();
+                    let interval_labels_raw = interval_end_labels(&sample_ats);
+                    let recv_raw = counter_delta_per_hour(
+                        samples.iter().map(|s| (s.at, s.nb_recv)).collect(),
                     );
-                    let (flood_rate, d_flood) = filter_outliers(
-                        &counter_delta_per_hour(
-                            samples.iter().map(|s| (s.at, s.flood_sent)).collect(),
-                        ),
-                        hard_gate_rate,
+                    let flood_raw = counter_delta_per_hour(
+                        samples.iter().map(|s| (s.at, s.flood_sent)).collect(),
                     );
-                    let (direct_rate, d_direct) = filter_outliers(
-                        &counter_delta_per_hour(
-                            samples.iter().map(|s| (s.at, s.direct_sent)).collect(),
-                        ),
-                        hard_gate_rate,
+                    let direct_raw = counter_delta_per_hour(
+                        samples.iter().map(|s| (s.at, s.direct_sent)).collect(),
                     );
-                    let (air_pct, d_air) = filter_outliers(
-                        &airtime_pct_series(
-                            &samples
-                                .iter()
-                                .map(|s| (s.at, s.airtime_ms, s.rx_airtime_ms))
-                                .collect::<Vec<_>>(),
-                        ),
-                        hard_gate_rate,
+                    let (recv_rate, flood_rate, direct_rate, rate_labels, d_rate) =
+                        filter_aligned_rate_series(
+                            &recv_raw,
+                            &flood_raw,
+                            &direct_raw,
+                            &interval_labels_raw,
+                        );
+                    let (air_raw, air_ends) = airtime_pct_series_labeled(
+                        &samples
+                            .iter()
+                            .map(|s| (s.at, s.airtime_ms, s.rx_airtime_ms))
+                            .collect::<Vec<_>>(),
                     );
+                    let air_labels_raw: Vec<String> =
+                        air_ends.iter().map(|t| format_time(Some(*t))).collect();
+                    let (air_pct, air_labels, d_air) =
+                        filter_outliers_labeled(&air_raw, &air_labels_raw, hard_gate_rate);
+                    let rate_chart_labels = sparse_chart_labels(&rate_labels);
+                    let air_chart_labels = sparse_chart_labels(&air_labels);
                     let outliers_hidden = d_batt
                         + d_noise
                         + d_rssi
                         + d_snr
                         + d_queue
-                        + d_recv
-                        + d_flood
-                        + d_direct
+                        + d_rate
                         + d_air;
 
                     // Time-aligned RF chart: keep sample indices that pass all RF hard gates,
@@ -922,15 +990,7 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
                         }
                         (n_out, r_out, s_out, l_out)
                     };
-                    let rf_chart_labels: Vec<String> = {
-                        let n = rf_labels.len();
-                        rf_labels
-                            .iter()
-                            .enumerate()
-                            .filter(|(i, _)| n <= 4 || *i == 0 || *i == n / 2 || *i + 1 == n)
-                            .map(|(_, s)| s.clone())
-                            .collect()
-                    };
+                    let rf_chart_labels = sparse_chart_labels(&rf_labels);
                     let packet_rows = latest
                         .as_ref()
                         .map(|s| {
@@ -1432,8 +1492,8 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
                                                 },
                                             ],
                                             height: 140.0,
-                                            labels: Vec::new(),
-                                            point_labels: Vec::new(),
+                                            labels: rate_chart_labels.clone(),
+                                            point_labels: rate_labels.clone(),
                                             zero_based: true,
                                         }
                                     }
@@ -1450,8 +1510,8 @@ pub fn OverviewRepeatersTab(on_navigate: EventHandler<Page>) -> Element {
                                                 },
                                             ],
                                             height: 120.0,
-                                            labels: Vec::new(),
-                                            point_labels: Vec::new(),
+                                            labels: air_chart_labels.clone(),
+                                            point_labels: air_labels.clone(),
                                             zero_based: true,
                                         }
                                     }
@@ -1508,11 +1568,45 @@ mod tests {
 
     #[test]
     fn airtime_pct_between_samples() {
-        let pts = vec![(100, 0, 0), (200, 5_000, 5_000)];
-        let series = airtime_pct_series(&pts);
+        let pts = vec![(100, 1_000, 1_000), (200, 6_000, 6_000)];
+        let (series, ends) = airtime_pct_series_labeled(&pts);
         assert_eq!(series.len(), 1);
+        assert_eq!(ends, vec![200]);
         // 10_000 ms airtime over 100_000 ms wall → 10%
         assert!((series[0] - 10.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn airtime_skips_zero_start_and_counter_jumps() {
+        // First probe often has 0 airtime then a lifetime dump — skip that interval.
+        let cold = vec![(100, 0, 0), (200, 50_000, 50_000)];
+        assert!(airtime_pct_series_labeled(&cold).0.is_empty());
+        // Jump > 100% of wall clock — skip.
+        let jump = vec![(100, 1_000, 0), (110, 500_000, 0)];
+        assert!(airtime_pct_series_labeled(&jump).0.is_empty());
+    }
+
+    #[test]
+    fn interval_end_ats_use_window_end() {
+        assert_eq!(
+            interval_end_ats(&[100, 200, 300]),
+            vec![200, 300]
+        );
+        assert_eq!(interval_end_ats(&[42]), vec![42]);
+        assert!(interval_end_ats(&[]).is_empty());
+    }
+
+    #[test]
+    fn aligned_rate_series_keeps_equal_lengths() {
+        let recv = vec![10.0, 12.0, 11.0, 1000.0, 10.0, 9.0];
+        let flood = vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        let direct = vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let labels: Vec<String> = (1..=6).map(|i| format!("t{i}")).collect();
+        let (r, f, d, l, _) = filter_aligned_rate_series(&recv, &flood, &direct, &labels);
+        assert_eq!(r.len(), f.len());
+        assert_eq!(f.len(), d.len());
+        assert_eq!(d.len(), l.len());
+        assert!(!r.is_empty());
     }
 
     #[test]
@@ -1592,11 +1686,19 @@ mod tests {
     #[test]
     fn filter_outliers_skips_hampel_when_few_points() {
         let values = vec![10.0, 500.0, 10.0];
-        let (out, dropped) = filter_outliers(&values, hard_gate_rate);
+        let labels = vec!["a".into(), "b".into(), "c".into()];
+        let (out, out_labels, dropped) =
+            filter_outliers_labeled(&values, &labels, hard_gate_rate);
         assert_eq!(out, values);
+        assert_eq!(out_labels, labels);
         assert_eq!(dropped, 0);
-        let (gated, d) = filter_outliers(&[0.0, -100.0, -95.0], hard_gate_rf_dbm);
+        let (gated, gated_labels, d) = filter_outliers_labeled(
+            &[0.0, -100.0, -95.0],
+            &["x".into(), "y".into(), "z".into()],
+            hard_gate_rf_dbm,
+        );
         assert_eq!(gated, vec![-100.0, -95.0]);
+        assert_eq!(gated_labels, vec!["y".to_string(), "z".to_string()]);
         assert_eq!(d, 1);
     }
 }

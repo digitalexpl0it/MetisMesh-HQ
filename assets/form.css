@@ -3971,6 +3971,30 @@ option {
   color: #e7e5e4;
 }
 
+.help-subtitle {
+  margin: 0.85rem 0 0.35rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #a1a1aa;
+}
+
+.help-pre {
+  margin: 0.35rem 0 0.75rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: 0.4rem;
+  border: 1px solid #ffffff18;
+  background: rgba(0, 0, 0, 0.4);
+  color: #e4e4e7;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-x: auto;
+}
+
 .help-actions {
   display: flex;
   flex-wrap: wrap;

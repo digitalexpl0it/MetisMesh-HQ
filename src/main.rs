@@ -75,6 +75,10 @@ fn main() {
 
 #[cfg(feature = "desktop")]
 fn launch_window() {
+    // Wayland docks resolve icons from .desktop / hicolor at map time — install
+    // before the window is created so the first launch is not a blank placeholder.
+    #[cfg(target_os = "linux")]
+    ensure_linux_desktop_integration();
     dioxus::LaunchBuilder::desktop()
         .with_cfg(desktop_config())
         .launch(App);
@@ -112,7 +116,13 @@ html, body, #main {
         head.push_str("\n</style>");
         head
     };
-    Config::new()
+    // Mesh-head mark from the EmergHQ / Metis brand logo (assets/app_icon.png).
+    let app_icon = dioxus::desktop::icon_from_memory::<dioxus::desktop::tao::window::Icon>(
+        include_bytes!("../assets/app_icon.png"),
+    )
+    .ok();
+
+    let mut cfg = Config::new()
         .with_menu(None)
         .with_background_color((16, 20, 24, 255))
         .with_custom_head(boot_head)
@@ -125,7 +135,11 @@ html, body, #main {
                 .with_title("Metis Mesh HQ")
                 .with_inner_size(LogicalSize::new(1200.0, 800.0))
                 .with_min_inner_size(LogicalSize::new(960.0, 640.0)),
-        )
+        );
+    if let Some(icon) = app_icon {
+        cfg = cfg.with_icon(icon);
+    }
+    cfg
         .with_on_window(|window, _dom| {
             // tao draws its own Wayland header ("Dioxus App") under the desktop title bar,
             // and the default menu adds a Window / Edit / Help row. Drop that extra header
@@ -372,6 +386,84 @@ fn quiet_linux_titlebar(window: &dioxus::desktop::tao::window::Window) {
     if let Some(settings) = gtk::Settings::default() {
         settings.set_gtk_application_prefer_dark_theme(true);
     }
+    // Wayland docks ignore tao window_icon; GTK pixbuf still helps window chrome.
+    apply_linux_window_icon(&gtk_window);
+}
+
+#[cfg(all(feature = "desktop", target_os = "linux"))]
+const LINUX_ICON_PNG: &[u8] = include_bytes!("../assets/app_icon.png");
+#[cfg(all(feature = "desktop", target_os = "linux"))]
+const LINUX_ICON_NAME: &str = "metis-mesh-hq";
+
+/// Install user `.desktop` + hicolor icon and refresh caches *before* the window
+/// maps, so the first launch is not stuck with a generic dock placeholder.
+#[cfg(all(feature = "desktop", target_os = "linux"))]
+fn ensure_linux_desktop_integration() {
+    // Match StartupWMClass / app id before GTK creates the surface.
+    // (gdk::set_program_class waits until the window exists — needs a display.)
+    gtk::glib::set_prgname(Some(LINUX_ICON_NAME));
+
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
+    let icon_dir = home.join(".local/share/icons/hicolor/256x256/apps");
+    let desktop_dir = home.join(".local/share/applications");
+    let _ = std::fs::create_dir_all(&icon_dir);
+    let _ = std::fs::create_dir_all(&desktop_dir);
+    let icon_path = icon_dir.join(format!("{LINUX_ICON_NAME}.png"));
+    if std::fs::write(&icon_path, LINUX_ICON_PNG).is_err() {
+        return;
+    }
+    let exe = std::env::current_exe()
+        .ok()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| LINUX_ICON_NAME.to_string());
+    // Absolute Icon= path so the dock can resolve on first run before theme cache.
+    let icon_abs = icon_path.display().to_string();
+    let desktop = format!(
+        "[Desktop Entry]\n\
+Type=Application\n\
+Version=1.0\n\
+Name=Metis Mesh HQ\n\
+Comment=Offline emergency headquarters for MeshCore\n\
+Exec=\"{exe}\"\n\
+Icon={icon_abs}\n\
+Terminal=false\n\
+Categories=Network;HamRadio;\n\
+StartupNotify=true\n\
+StartupWMClass={LINUX_ICON_NAME}\n"
+    );
+    let desktop_path = desktop_dir.join(format!("{LINUX_ICON_NAME}.desktop"));
+    let _ = std::fs::write(&desktop_path, desktop);
+    let _ = std::process::Command::new("gtk-update-icon-cache")
+        .args(["-f", "-t"])
+        .arg(home.join(".local/share/icons/hicolor"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let _ = std::process::Command::new("update-desktop-database")
+        .arg(&desktop_dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+/// GTK window icon after the surface exists (complements the pre-install above).
+#[cfg(all(feature = "desktop", target_os = "linux"))]
+fn apply_linux_window_icon(gtk_window: &gtk::ApplicationWindow) {
+    use std::io::Cursor;
+
+    use gtk::gdk_pixbuf::Pixbuf;
+    use gtk::prelude::*;
+
+    gtk::glib::set_prgname(Some(LINUX_ICON_NAME));
+    gtk::gdk::set_program_class("Metis Mesh HQ");
+
+    if let Ok(pixbuf) = Pixbuf::from_read(Cursor::new(LINUX_ICON_PNG)) {
+        gtk_window.set_icon(Some(&pixbuf));
+        gtk::Window::set_default_icon(&pixbuf);
+    }
+    gtk_window.set_icon_name(Some(LINUX_ICON_NAME));
 }
 
 /// HQ local store: SQLite, secrets fallback, firmware, map packs, backups, QR.

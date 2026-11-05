@@ -2,30 +2,35 @@
 
 ## Unreleased
 
+## 0.1.4.0 — 2026-11-04
+
+Package version `0.1.4` (Cargo / About). Windows Details may show `0.1.4.0`.
+
 ### Desktop packaging
 
 - Application icon: mesh-head mark cropped from the EmergHQ / Metis brand logo (`assets/app_icon.png` / `.ico`); set on the desktop window
 - Linux: GTK pixbuf icon + user `.desktop` / hicolor install so Wayland docks show the mark (tao `with_icon` alone is not enough); install runs before the window maps so first launch is not a blank placeholder
 - Windows `.exe` Properties → Details: File description, Product name/version, Copyright via `winres` (`build.rs`)
 
-### Local JSON API
+### Local JSON API + Home Assistant
 
 - Opt-in Settings → Services → **Local API**: bind (default `127.0.0.1`), port `8787`, prefix `/api/v1`
 - Bearer token in `data/local-api.token` (`0600`); generate / rotate / copy / clear; required on every request
 - Read-only JSON: `/health`, `/status`, `/nodes`, `/nodes/{id}`, `/infra`, `/channels`, `/stats` (no secrets, no message bodies)
-- M4: explicit deny paths return `403`; Settings/Help list what is never exposed
-- M5: per-IP rate limit (default 120/min, failed-auth tighter); `Retry-After` on `429`; audit only on real setting changes; `/health` includes `api_version: 1`
-- M6: Help → Local API with curl examples and Home Assistant REST sensor YAML
-- M7: Opt-in Home Assistant MQTT discovery (separate from Weather MQTT): retained config + state every 10–300s for companion online/state, enrolled count, first claimed repeater battery/noise/probed_at; Settings Fill from Weather MQTT; Help Mosquitto + HA discovery note
+- Explicit deny paths return `403`; Settings/Help list what is never exposed
+- Per-IP rate limit (default 120/min, failed-auth tighter); `Retry-After` on `429`; audit only on real setting changes; `/health` includes `api_version: 1`
+- Help → Local API: curl examples and Home Assistant REST sensor YAML
+- Opt-in **Home Assistant MQTT discovery** (separate from Weather MQTT): retained config + state every 10–300s for companion online/state, enrolled count, first claimed repeater battery/noise/probed_at; Settings Fill from Weather MQTT; Help Mosquitto + HA discovery note
 
 ### Overview · Repeaters
 
 - Fleet dashboard: summary tiles, compact claim cards, **Details for** dropdown with KPIs + charts
-- L1: detail chart window chips **15m / 1h / 6h / 24h / 7d** (persisted `overview_repeater_chart_window`)
-- L2: Battery and Queue KPI modes **Chart / Gauge / Numeric** (persisted); new SVG `Gauge` widget
-- L4: star detail KPI tiles (Battery/Noise/RSSI/SNR/Queue); starred order persists as `overview_repeater_kpi_favorites`
-- L4: display-only hard gates + Hampel MAD filter on spark/RF/rate series; note when outliers are hidden; latest KPI values stay raw
+- Detail chart window chips **15m / 1h / 6h / 24h / 7d** (persisted `overview_repeater_chart_window`)
+- Battery and Queue KPI modes **Chart / Gauge / Numeric** (persisted); new SVG `Gauge` widget
+- Star detail KPI tiles (Battery/Noise/RSSI/SNR/Queue); starred order persists as `overview_repeater_kpi_favorites`
+- Display-only hard gates + Hampel MAD filter on spark/RF/rate series; note when outliers are hidden; latest KPI values stay raw
 - KPI sparklines use probe timestamps on hover (not `#N` sample index); Overview companion stats likewise use hour labels + units
+- Packet-rate and airtime charts: interval-end date/time on hover and axis; rate series stay time-aligned; skip airtime counter-jump spikes
 - Duplicate full Battery chart under repeater KPIs removed (tile Chart mode is the battery trend)
 - TX power shows a hint when missing from binary status (Infra radio CLI / prior value)
 

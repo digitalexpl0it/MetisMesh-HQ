@@ -27,6 +27,28 @@
 - Infra Radio/TX settings: Get TX fills the dBm field; Get radio updates the Radio line; Get/Set TX and Get radio show a throbber while waiting on the mesh reply
 - Infra admin gets: capture replies into Status metrics / Settings fields (intervals, lat/lon, clock, repeat, …) with a green result banner and button throbbers — not only the bottom CLI transcript
 - Popovers (Messages compose + / emoji, Map Settings / Filters): click outside the menu to dismiss
+- Messages rail: **Channels / DMs / Contacts** tabs with icons; Contacts **Roster** auto-fills from the node list; custom sections (with optional emoji icon) on Channels and Contacts; star/favorite pins contacts; **Add** on `meshcore://contact/add` chips and DM bubbles; click channel or contact opens the chat thread; rail section tables created on every DB open
+- Messages rail item menus: move-to-section lives under **settings** (gear) and **right-click**; Move submenu lists sections plus **Add section…** (create then auto-move)
+- Channel bubble **Favorite** favorites the sender contact (not the channel); Messages left/right panes are drag-resizable (width remembered)
+- Section emoji uses the compose emoji picker button; Default keep is a single menu button instead of six chips
+- Messages rail: clearer col-resize cursor on the pane splitter; per-tab fuzzy search filters Channels / DMs / Contacts
+- Messages bubble **Favorite** resolves sender keys more reliably and refreshes the rail (Contacts → Pinned / DMs Favorites)
+- Pane splitter uses the native desktop col-resize cursor and keeps drag capture on a always-mounted overlay
+- DMs tab has its own **Section** button and custom sections (no longer lists Channels sections like “Locals”); DMs builtins seeded under the `dms` tab
+- Channel-only senders (no pubkey yet) can still be Favorited as a Contacts → Pinned name bookmark; upgrades when an advert arrives
+- DMs search is tab-scoped again (DMs stuck in old Channels sections no longer disappear); search also matches roster contacts to start a chat
+- Emoji picker: type common words (coffee, signal, heart…) to filter — same search on every emoji button
+- Messages pane splitter: force col-resize via WebView CSS class + native EwResize (WebKit was keeping the arrow)
+- DMs rail search filters DM threads only (no roster dump); short queries match names, not every pubkey hex digit
+- Channels: **Default keep** is a top-right button beside Create / join; options open in a slide-down panel
+- Default keep slide-down lists durations inline (dropdown was clipped under the panel footer)
+- Create / join channel picker: icons + soft color wells per action
+- Rail context/settings menus host on a full-viewport shell (WebKit was clipping under the rail); Move to section flies out to the right again (flips up/left near edges)
+- Name-only favorites show “awaiting advert” and auto-upgrade when the roster/advert resolves that name
+- Splitter cursor: await WebView style inject + native `ColResize` (fire-and-forget eval never applied)
+- Message bubble actions: drop redundant Pin/Contacts (Favorite already saves to Contacts → Pinned)
+- Awaiting-advert pin feedback is a toast (no longer a sticky rail banner); contact/DM right-click adds **Fetch advert** (companion path fetch)
+- Favorite feedback is toast-only (no sticky line under the composer); contact/DM hover tips use short name + 8-char prefix (not the full pubkey)
 
 ## 0.1.4.0 — 2026-11-04
 

@@ -504,9 +504,58 @@ impl Db {
             "ALTER TABLE messages ADD COLUMN mentions_hq INTEGER NOT NULL DEFAULT 0",
             [],
         );
+        Self::ensure_messages_rail_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
+    }
+
+    /// Messages left-rail sections / favorites / pins. Must run on every open —
+    /// previously only restore called `apply_migrations`, so Chats rendered empty.
+    fn ensure_messages_rail_schema(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS messages_rail_sections (
+                id INTEGER PRIMARY KEY,
+                tab TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                collapsed INTEGER NOT NULL DEFAULT 0,
+                icon TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS messages_section_members (
+                item_kind TEXT NOT NULL,
+                item_key TEXT NOT NULL,
+                section_id INTEGER NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (item_kind, item_key)
+            );
+            CREATE TABLE IF NOT EXISTS messages_favorites (
+                item_kind TEXT NOT NULL,
+                item_key TEXT NOT NULL,
+                added_at INTEGER NOT NULL,
+                PRIMARY KEY (item_kind, item_key)
+            );
+            CREATE TABLE IF NOT EXISTS pinned_contacts (
+                pubkey TEXT PRIMARY KEY,
+                label TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                added_at INTEGER NOT NULL
+            );",
+        )?;
+        let _ = conn.execute(
+            "ALTER TABLE messages_rail_sections ADD COLUMN icon TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        // Older seeds used "Chat devices"; rename the builtin label in place.
+        let _ = conn.execute(
+            "UPDATE messages_rail_sections SET name = 'Roster'
+             WHERE tab = 'contacts' AND kind = 'chat_devices' AND name = 'Chat devices'",
+            [],
+        );
+        Self::seed_messages_rail_sections(conn)?;
+        Self::ensure_dms_rail_builtins(conn)?;
+        Self::cleanup_cross_tab_section_members(conn)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -676,6 +725,97 @@ impl Db {
         );
         let _ = conn.execute(
             "ALTER TABLE messages ADD COLUMN mentions_hq INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        Self::ensure_messages_rail_schema(conn)?;
+        Ok(())
+    }
+
+    fn seed_messages_rail_sections(conn: &Connection) -> Result<()> {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages_rail_sections",
+            [],
+            |r| r.get(0),
+        )?;
+        if count > 0 {
+            return Ok(());
+        }
+        let builtins = [
+            ("chats", "favorites", "Favorites", 0),
+            ("chats", "channels", "Channels", 10),
+            ("dms", "favorites", "Favorites", 0),
+            ("dms", "dms", "Direct messages", 10),
+            ("contacts", "pinned", "Pinned", 0),
+            ("contacts", "chat_devices", "Roster", 10),
+            ("contacts", "infra_nodes", "Repeaters & rooms", 20),
+        ];
+        for (tab, kind, name, order) in builtins {
+            conn.execute(
+                "INSERT INTO messages_rail_sections (tab, kind, name, sort_order, collapsed, icon)
+                 VALUES (?1, ?2, ?3, ?4, 0, '')",
+                params![tab, kind, name, order],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// DMs tab keeps its own Favorites / Direct messages builtins (and custom sections).
+    /// Older databases only seeded those under the Channels (`chats`) tab.
+    fn ensure_dms_rail_builtins(conn: &Connection) -> Result<()> {
+        let builtins = [
+            ("dms", "favorites", "Favorites", 0),
+            ("dms", "dms", "Direct messages", 10),
+        ];
+        for (tab, kind, name, order) in builtins {
+            let exists: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM messages_rail_sections
+                 WHERE tab = ?1 AND kind = ?2",
+                params![tab, kind],
+                |r| r.get(0),
+            )?;
+            if exists == 0 {
+                conn.execute(
+                    "INSERT INTO messages_rail_sections (tab, kind, name, sort_order, collapsed, icon)
+                     VALUES (?1, ?2, ?3, ?4, 0, '')",
+                    params![tab, kind, name, order],
+                )?;
+            }
+        }
+        // Drop the old Channels-tab "Direct messages" builtin — DMs live on their own tab now.
+        // Keep Favorites on chats (channel stars). Do not delete custom chats sections.
+        let _ = conn.execute(
+            "DELETE FROM messages_rail_sections
+             WHERE tab = 'chats' AND kind = 'dms'",
+            [],
+        );
+        Ok(())
+    }
+
+    /// DMs parked under Channels sections (or vice versa) vanish from their home
+    /// list because `moved` hid them. Drop those mismatched memberships.
+    fn cleanup_cross_tab_section_members(conn: &Connection) -> Result<()> {
+        let _ = conn.execute(
+            "DELETE FROM messages_section_members
+             WHERE item_kind = 'dm'
+               AND section_id IN (
+                 SELECT id FROM messages_rail_sections WHERE tab != 'dms'
+               )",
+            [],
+        );
+        let _ = conn.execute(
+            "DELETE FROM messages_section_members
+             WHERE item_kind = 'channel'
+               AND section_id IN (
+                 SELECT id FROM messages_rail_sections WHERE tab != 'chats'
+               )",
+            [],
+        );
+        let _ = conn.execute(
+            "DELETE FROM messages_section_members
+             WHERE item_kind = 'contact'
+               AND section_id IN (
+                 SELECT id FROM messages_rail_sections WHERE tab != 'contacts'
+               )",
             [],
         );
         Ok(())
@@ -2570,6 +2710,7 @@ impl Db {
         }
         drop(conn);
         let _ = self.promote_name_block_to_pubkey(pubkey, name);
+        let _ = self.promote_name_pin_to_pubkey(pubkey, name);
         Ok(())
     }
 
@@ -2889,6 +3030,410 @@ impl Db {
             .map(|t| t.unread_mentions)
             .sum();
         Ok(channels + dms)
+    }
+
+    /// Built-in + custom Messages rail sections for a tab (`chats` / `contacts`).
+    pub fn list_messages_rail_sections(&self, tab: &str) -> Result<Vec<MessagesRailSection>> {
+        let conn = self.lock();
+        Self::ensure_messages_rail_schema(&conn)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, tab, kind, name, sort_order, collapsed,
+                    COALESCE(NULLIF(TRIM(icon), ''), '')
+             FROM messages_rail_sections
+             WHERE tab = ?1
+             ORDER BY sort_order ASC, id ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![tab], |r| {
+                Ok(MessagesRailSection {
+                    id: r.get(0)?,
+                    tab: r.get(1)?,
+                    kind: r.get(2)?,
+                    name: r.get(3)?,
+                    sort_order: r.get(4)?,
+                    collapsed: r.get::<_, i64>(5)? != 0,
+                    icon: r.get(6)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn set_messages_section_collapsed(&self, id: i64, collapsed: bool) -> Result<()> {
+        self.lock().execute(
+            "UPDATE messages_rail_sections SET collapsed = ?2 WHERE id = ?1",
+            params![id, if collapsed { 1 } else { 0 }],
+        )?;
+        Ok(())
+    }
+
+    /// Set or clear a section's emoji icon (`""` clears).
+    pub fn set_messages_section_icon(&self, id: i64, icon: &str) -> Result<()> {
+        let icon = normalize_section_emoji(icon)?;
+        self.lock().execute(
+            "UPDATE messages_rail_sections SET icon = ?2 WHERE id = ?1",
+            params![id, icon],
+        )?;
+        Ok(())
+    }
+
+    /// Create a custom section on `chats`, `dms`, or `contacts`.
+    pub fn create_messages_custom_section(
+        &self,
+        tab: &str,
+        name: &str,
+        icon: &str,
+    ) -> Result<i64> {
+        let tab = tab.trim();
+        if !matches!(tab, "chats" | "dms" | "contacts") {
+            return Err(Error::Msg("Unknown rail tab.".into()));
+        }
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(Error::Msg("Section name required.".into()));
+        }
+        if name.len() > 40 {
+            return Err(Error::Msg("Section name is too long.".into()));
+        }
+        let icon = normalize_section_emoji(icon)?;
+        let conn = self.lock();
+        Self::ensure_messages_rail_schema(&conn)?;
+        let custom_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages_rail_sections
+                 WHERE tab = ?1 AND kind = 'custom'",
+                params![tab],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        // Favorites/Pinned=0, customs=1.., builtins=10+.
+        let order = (1 + custom_count).min(9);
+        conn.execute(
+            "INSERT INTO messages_rail_sections (tab, kind, name, sort_order, collapsed, icon)
+             VALUES (?1, 'custom', ?2, ?3, 0, ?4)",
+            params![tab, name, order, icon],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn delete_messages_custom_section(&self, id: i64) -> Result<()> {
+        let conn = self.lock();
+        let kind: String = conn
+            .query_row(
+                "SELECT kind FROM messages_rail_sections WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .map_err(|_| Error::Msg("Section not found.".into()))?;
+        if kind != "custom" {
+            return Err(Error::Msg("Only custom sections can be deleted.".into()));
+        }
+        conn.execute(
+            "DELETE FROM messages_section_members WHERE section_id = ?1",
+            params![id],
+        )?;
+        conn.execute(
+            "DELETE FROM messages_rail_sections WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Move a channel/DM/contact into a custom section, or `None` to return it to the default list.
+    pub fn set_messages_item_section(
+        &self,
+        item_kind: &str,
+        item_key: &str,
+        section_id: Option<i64>,
+    ) -> Result<()> {
+        let kind = item_kind.trim();
+        let key = item_key.trim();
+        if kind.is_empty() || key.is_empty() {
+            return Err(Error::Msg("Item required.".into()));
+        }
+        if !matches!(kind, "channel" | "dm" | "contact") {
+            return Err(Error::Msg(
+                "Only channels, DMs, and contacts can move between sections.".into(),
+            ));
+        }
+        let conn = self.lock();
+        conn.execute(
+            "DELETE FROM messages_section_members WHERE item_kind = ?1 AND item_key = ?2",
+            params![kind, key],
+        )?;
+        if let Some(sid) = section_id {
+            let (stab, skind): (String, String) = conn
+                .query_row(
+                    "SELECT tab, kind FROM messages_rail_sections WHERE id = ?1",
+                    params![sid],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map_err(|_| Error::Msg("Section not found.".into()))?;
+            if skind != "custom" {
+                return Err(Error::Msg("Items can only be moved into custom sections.".into()));
+            }
+            let expected_tab = match kind {
+                "channel" => "chats",
+                "dm" => "dms",
+                "contact" => "contacts",
+                _ => "",
+            };
+            if stab != expected_tab {
+                return Err(Error::Msg(
+                    "That section belongs to a different Messages tab.".into(),
+                ));
+            }
+            conn.execute(
+                "INSERT INTO messages_section_members (item_kind, item_key, section_id, sort_order)
+                 VALUES (?1, ?2, ?3, 0)",
+                params![kind, key, sid],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn list_messages_section_members(
+        &self,
+        section_id: i64,
+    ) -> Result<Vec<(String, String)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT item_kind, item_key FROM messages_section_members
+             WHERE section_id = ?1
+             ORDER BY sort_order ASC, item_key ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![section_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Keys currently parked in a custom section on `tab` (`chats` / `dms` / `contacts`).
+    /// Pass `None` for every tab (rare — prefer the tab-scoped form so DMs moved
+    /// into an old Channels section are not hidden on the DMs list).
+    pub fn messages_moved_item_keys(
+        &self,
+        tab: Option<&str>,
+    ) -> Result<std::collections::HashSet<(String, String)>> {
+        let conn = self.lock();
+        Self::ensure_messages_rail_schema(&conn)?;
+        let tab = tab.map(str::trim).filter(|t| !t.is_empty());
+        if let Some(tab) = tab {
+            let mut stmt = conn.prepare(
+                "SELECT m.item_kind, m.item_key
+                 FROM messages_section_members m
+                 INNER JOIN messages_rail_sections s ON s.id = m.section_id
+                 WHERE s.tab = ?1",
+            )?;
+            let rows = stmt
+                .query_map(params![tab], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows.into_iter().collect())
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT item_kind, item_key FROM messages_section_members",
+            )?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows.into_iter().collect())
+        }
+    }
+
+    /// Distinct stored pubkeys for channel/DM rows that used this display name / prefix.
+    pub fn pubkeys_for_sender_label(&self, label: &str) -> Result<Vec<String>> {
+        let label = label.trim();
+        if label.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT lower(sender_pubkey)
+             FROM messages
+             WHERE sender_pubkey IS NOT NULL
+               AND trim(sender_pubkey) != ''
+               AND length(trim(sender_pubkey)) = 64
+               AND (
+                 lower(trim(sender_prefix)) = lower(?1)
+                 OR lower(trim(text)) LIKE lower(?1) || ':%'
+               )
+             ORDER BY 1",
+        )?;
+        let rows = stmt
+            .query_map(params![label], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Walk pinned `name:…` bookmarks and upgrade any that now match a unique roster node.
+    /// Safe to call on every Messages rail refresh while the companion is connected.
+    pub fn promote_pending_name_pins(&self) -> Result<u64> {
+        let pending: Vec<(String, String)> = self
+            .list_pinned_contacts()?
+            .into_iter()
+            .filter(|row| row.pubkey.starts_with(NAME_BLOCK_PREFIX))
+            .map(|row| (row.pubkey, row.label))
+            .collect();
+        let mut upgraded = 0u64;
+        for (_nk, label) in pending {
+            let Some(node) = self.unique_node_by_display_name(&label)? else {
+                continue;
+            };
+            self.promote_name_pin_to_pubkey(&node.pubkey, &label)?;
+            upgraded = upgraded.saturating_add(1);
+        }
+        Ok(upgraded)
+    }
+
+    /// If a channel-only name pin (`name:…`) exists for this display name, rewrite it
+    /// to the real pubkey once the node appears on the roster.
+    pub fn promote_name_pin_to_pubkey(&self, pubkey: &str, name: &str) -> Result<()> {
+        let key = pubkey.trim().to_ascii_lowercase();
+        if key.len() != 64 || !key.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(());
+        }
+        let Some(nk) = name_block_key(name) else {
+            return Ok(());
+        };
+        let conn = self.lock();
+        Self::ensure_messages_rail_schema(&conn)?;
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pinned_contacts WHERE pubkey = ?1",
+            params![nk],
+            |r| r.get(0),
+        )?;
+        if exists == 0 {
+            return Ok(());
+        }
+        let label: String = conn
+            .query_row(
+                "SELECT label FROM pinned_contacts WHERE pubkey = ?1",
+                params![nk],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| name.trim().to_string());
+        conn.execute(
+            "DELETE FROM pinned_contacts WHERE pubkey = ?1",
+            params![nk],
+        )?;
+        conn.execute(
+            "INSERT INTO pinned_contacts (pubkey, label, notes, added_at)
+             VALUES (?1, ?2, '', ?3)
+             ON CONFLICT(pubkey) DO UPDATE SET label = excluded.label",
+            params![key, label, unix_now()],
+        )?;
+        let _ = conn.execute(
+            "UPDATE messages_favorites SET item_key = ?2
+             WHERE item_kind = 'dm' AND item_key = ?1",
+            params![nk, key],
+        );
+        Ok(())
+    }
+
+    pub fn set_messages_favorite(
+        &self,
+        item_kind: &str,
+        item_key: &str,
+        favorite: bool,
+    ) -> Result<()> {
+        let kind = item_kind.trim();
+        let key = item_key.trim();
+        if kind.is_empty() || key.is_empty() {
+            return Err(Error::Msg("Favorite target required.".into()));
+        }
+        let conn = self.lock();
+        if favorite {
+            conn.execute(
+                "INSERT OR REPLACE INTO messages_favorites (item_kind, item_key, added_at)
+                 VALUES (?1, ?2, ?3)",
+                params![kind, key, unix_now()],
+            )?;
+        } else {
+            conn.execute(
+                "DELETE FROM messages_favorites WHERE item_kind = ?1 AND item_key = ?2",
+                params![kind, key],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn list_messages_favorites(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.lock();
+        Self::ensure_messages_rail_schema(&conn)?;
+        let mut stmt = conn.prepare(
+            "SELECT item_kind, item_key FROM messages_favorites
+             ORDER BY added_at DESC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn list_pinned_contacts(&self) -> Result<Vec<PinnedContactRow>> {
+        let conn = self.lock();
+        Self::ensure_messages_rail_schema(&conn)?;
+        let mut stmt = conn.prepare(
+            "SELECT pubkey, label, notes, added_at FROM pinned_contacts
+             ORDER BY added_at DESC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(PinnedContactRow {
+                    pubkey: r.get(0)?,
+                    label: r.get(1)?,
+                    notes: r.get(2)?,
+                    added_at: r.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn pin_contact(&self, pubkey: &str, label: &str) -> Result<()> {
+        let key = pubkey.trim().to_ascii_lowercase();
+        let is_hex = key.len() == 64 && key.chars().all(|c| c.is_ascii_hexdigit());
+        let is_name = key.starts_with(NAME_BLOCK_PREFIX) && key.len() > NAME_BLOCK_PREFIX.len();
+        if !is_hex && !is_name {
+            return Err(Error::Msg(
+                "Enter a full 64-character hex public key.".into(),
+            ));
+        }
+        let label = label.trim();
+        let resolved = if !label.is_empty() {
+            label.to_string()
+        } else if is_hex {
+            self.get_node(&key)?
+                .map(|n| {
+                    if n.name.trim().is_empty() {
+                        n.prefix
+                    } else {
+                        n.name
+                    }
+                })
+                .unwrap_or_else(|| key.chars().take(12).collect())
+        } else {
+            key.trim_start_matches(NAME_BLOCK_PREFIX).to_string()
+        };
+        self.lock().execute(
+            "INSERT INTO pinned_contacts (pubkey, label, notes, added_at)
+             VALUES (?1, ?2, '', ?3)
+             ON CONFLICT(pubkey) DO UPDATE SET label = excluded.label",
+            params![key, resolved, unix_now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn unpin_contact(&self, pubkey: &str) -> Result<()> {
+        self.lock().execute(
+            "DELETE FROM pinned_contacts WHERE pubkey = ?1",
+            params![pubkey.trim().to_ascii_lowercase()],
+        )?;
+        Ok(())
     }
 
     pub fn count_unnoticed_nodes(&self) -> Result<i64> {
@@ -4934,6 +5479,26 @@ pub struct TrackedNodeRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessagesRailSection {
+    pub id: i64,
+    pub tab: String,
+    pub kind: String,
+    pub name: String,
+    pub sort_order: i64,
+    pub collapsed: bool,
+    /// Optional emoji shown beside the section title; empty = no icon.
+    pub icon: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedContactRow {
+    pub pubkey: String,
+    pub label: String,
+    pub notes: String,
+    pub added_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockedNodeRow {
     /// Real 32-byte hex pubkey, or `name:<alnum>` for channel display-name blocks.
     pub pubkey: String,
@@ -5123,6 +5688,21 @@ pub fn normalize_channel_name(raw: &str) -> Option<String> {
         return None;
     }
     Some(name.to_string())
+}
+
+/// Optional emoji for a Messages rail section. Empty clears. Rejects long / control text.
+fn normalize_section_emoji(raw: &str) -> Result<String> {
+    let icon = raw.trim();
+    if icon.is_empty() {
+        return Ok(String::new());
+    }
+    if icon.chars().count() > 4 {
+        return Err(Error::Msg("Use a short emoji (up to 4 characters).".into()));
+    }
+    if icon.chars().any(|c| c.is_control() || c == '\n' || c == '\r') {
+        return Err(Error::Msg("Invalid section icon.".into()));
+    }
+    Ok(icon.to_string())
 }
 
 /// Prefix for channel display-name blocks stored in `blocked_nodes.pubkey`.

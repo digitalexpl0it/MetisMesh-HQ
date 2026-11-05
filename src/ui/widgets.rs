@@ -1184,102 +1184,8 @@ pub fn BarMix(rows: Vec<BarMixRow>) -> Element {
     }
 }
 
-/// Common MeshCore / messaging emoji for the composer picker.
-///
-/// Not a full Unicode set — enough for reactions and field ops without drowning
-/// the popover. Each glyph still counts against the 160-byte mesh budget on send.
-const EMOJI_PICKER_ROWS: &[(&str, &[&str])] = &[
-    (
-        "Reactions",
-        &[
-            "👍", "👎", "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "💔", "💯",
-            "😂", "🤣", "😅", "😆", "😊", "😍", "🥰", "😘", "😎", "🤩", "😏", "😌",
-            "🎉", "🎊", "👏", "🙌", "🤝", "💪", "🔥", "✅", "✨", "⭐", "🌟", "💫",
-        ],
-    ),
-    (
-        "Faces",
-        &[
-            "😀", "😃", "😄", "😁", "🙂", "😉", "😋", "😛", "😜", "🤪", "😝", "🤑",
-            "🤗", "🤭", "🤫", "🤔", "🤐", "🤨", "😐", "😑", "😶", "🙄", "😬", "🤥",
-            "😔", "😪", "🤤", "😴", "😷", "🤒", "🤕", "🤢", "🤮", "🥵", "🥶", "🥴",
-            "😵", "🤯", "🤠", "🥳", "🥸", "😓", "😥", "😢", "😭", "😤", "😠", "😡",
-            "🤬", "😈", "👿", "💀", "☠️", "💩", "🤡", "👹", "👺", "👻", "👽", "🤖",
-            "😺", "😸", "😹", "😻", "😼", "😽", "🙀", "😿", "😾", "🙈", "🙉", "🙊",
-            "🫡", "🫠", "🥹", "😮‍💨", "😶‍🌫️", "😵‍💫",
-        ],
-    ),
-    (
-        "Hands",
-        &[
-            "👋", "🤚", "🖐", "✋", "🖖", "👌", "🤌", "🤏", "✌️", "🤞", "🤟", "🤘",
-            "🤙", "👈", "👉", "👆", "👇", "☝️", "🫵", "👍", "👎", "✊", "👊", "🤛",
-            "🤜", "👏", "🙌", "👐", "🤲", "🙏", "✍️", "💅", "🤳", "💪", "🦾", "🦿",
-        ],
-    ),
-    (
-        "Mesh",
-        &[
-            "📡", "📶", "📍", "📌", "🧭", "🗺️", "🛰️", "🚀", "✈️", "🚁", "🚗", "🛻",
-            "🔋", "🪫", "⚡", "🔌", "💡", "🔦", "📻", "📱", "💻", "🖥️", "⌨️", "🖱️",
-            "💬", "💭", "📢", "📣", "🔔", "🔕", "📞", "☎️", "📧", "📨", "📩", "📬",
-            "🔐", "🔑", "🗝️", "🔒", "🔓", "🛡️", "⚙️", "🔧", "🔨", "🛠️", "🧲", "🧪",
-        ],
-    ),
-    (
-        "Status",
-        &[
-            "⚠️", "🚨", "⛔", "🚫", "❌", "⭕️", "❓", "❗", "‼️", "⁉️", "🔴", "🟠",
-            "🟡", "🟢", "🔵", "🟣", "⚫", "⚪", "🟤", "✅", "☑️", "✔️", "➕", "➖",
-            "➗", "✖️", "🔙", "🔚", "🔛", "🔜", "🔝", "♻️", "🔃", "🔄", "⬆️", "⬇️",
-            "⬅️", "➡️", "↗️", "↘️", "↙️", "↖️", "↕️", "↔️", "↩️", "↪️", "⤴️", "⤵️",
-        ],
-    ),
-    (
-        "Weather",
-        &[
-            "☀️", "🌤️", "⛅", "🌥️", "☁️", "🌦️", "🌧️", "⛈️", "🌩️", "🌨️", "❄️", "☃️",
-            "⛄", "🌬️", "💨", "🌪️", "🌫️", "🌈", "☂️", "☔", "⚡", "🔥", "💧", "🌊",
-            "🌙", "🌚", "🌛", "🌜", "🌝", "🌞", "⭐", "🌟", "✨", "☄️", "🌌", "🌃",
-        ],
-    ),
-    (
-        "Nature",
-        &[
-            "🌲", "🌳", "🌴", "🌵", "🌾", "🌿", "☘️", "🍀", "🍁", "🍂", "🍃", "🌺",
-            "🌻", "🌹", "🥀", "🌷", "🌼", "🌸", "💐", "🌱", "🪴", "🪵", "🪨", "⛰️",
-            "🏔️", "🌋", "🏕️", "⛺", "🏞️", "🌅", "🌄", "🌉", "🏙️", "🏘️", "🏠", "🏡",
-            "🐶", "🐱", "🐭", "🐹", "🐰", "🦊", "🐻", "🐼", "🐨", "🐯", "🦁", "🐮",
-            "🐷", "🐸", "🐵", "🐔", "🐧", "🐦", "🐤", "🦆", "🦅", "🦉", "🦇", "🐺",
-            "🐗", "🐴", "🦄", "🐝", "🪱", "🐛", "🦋", "🐌", "🐞", "🐜", "🪰", "🪲",
-            "🪳", "🦟", "🦗", "🕷", "🦂", "🐢", "🐍", "🦎", "🦖", "🦕", "🐙", "🦑",
-            "🦐", "🦞", "🦀", "🐡", "🐠", "🐟", "🐬", "🐳", "🐋", "🦈", "🐊", "🐅",
-        ],
-    ),
-    (
-        "Food",
-        &[
-            "🍎", "🍐", "🍊", "🍋", "🍌", "🍉", "🍇", "🍓", "🫐", "🍈", "🍒", "🍑",
-            "🥭", "🍍", "🥥", "🥝", "🍅", "🍆", "🥑", "🥦", "🥬", "🥒", "🌶", "🫑",
-            "🌽", "🥕", "🫒", "🧄", "🧅", "🥔", "🍠", "🥐", "🥯", "🍞", "🥖", "🥨",
-            "🧀", "🥚", "🍳", "🧈", "🥞", "🧇", "🥓", "🥩", "🍗", "🍖", "🦴", "🌭",
-            "🍔", "🍟", "🍕", "🫓", "🥪", "🥙", "🧆", "🌮", "🌯", "🥗", "🥘", "🫕",
-            "🥫", "🍝", "🍜", "🍲", "🍛", "🍣", "🍱", "🥟", "🦪", "🍤", "🍙", "🍚",
-            "🍘", "🍥", "🥠", "🥮", "🍢", "🍡", "🍧", "🍨", "🍦", "🥧", "🧁", "🍰",
-            "🎂", "🍮", "🍭", "🍬", "🍫", "🍿", "🍩", "🍪", "🌰", "🥜", "🍯", "🥛",
-            "🍼", "☕", "🫖", "🍵", "🧃", "🥤", "🧋", "🍶", "🍺", "🍻", "🥂", "🍷",
-        ],
-    ),
-    (
-        "People",
-        &[
-            "👀", "👁️", "👅", "👄", "💋", "🩸", "💧", "💦", "💤", "💭", "💬", "🗯",
-            "👤", "👥", "🫂", "🗣️", "🧑", "👨", "👩", "🧔", "👴", "👵", "🧒", "👶",
-            "👷", "👮", "🕵️", "💂", "🥷", "🦸", "🦹", "🧙", "🧚", "🧛", "🧜", "🧝",
-            "🧑‍⚕️", "🧑‍🚒", "🧑‍✈️", "🧑‍💻", "🧑‍🔧", "🧑‍🌾", "🧑‍🍳", "🧑‍🏫",
-        ],
-    ),
-];
+/// Re-export shared catalog (keywords + sections) for the picker UI.
+use super::emoji_catalog::{emoji_query_matches, EMOJI_PICKER_ROWS};
 
 /// MeshCore plain-text budget (bytes, not Unicode scalars).
 pub const MESH_TEXT_MAX_BYTES: usize = 160;
@@ -1603,63 +1509,170 @@ pub fn ConversationAvatar(
 }
 
 /// Smile button that opens a compact emoji popover for message composers.
+///
+/// Used for compose bars, section icons, and any other emoji entry point —
+/// search keywords live in [`super::emoji_catalog`].
 #[component]
 pub fn EmojiPickerButton(
     #[props(default = false)] disabled: bool,
     /// Anchor the popover to the right when the trigger sits after the text box.
     #[props(default = false)]
     align_end: bool,
+    /// Open the panel below the trigger (dialogs / toolbars). Default opens upward.
+    #[props(default = false)]
+    drop_down: bool,
     on_pick: EventHandler<String>,
 ) -> Element {
     let mut open = use_signal(|| false);
-    let panel_class = if align_end {
-        "emoji-picker-panel emoji-picker-panel-end"
-    } else {
-        "emoji-picker-panel"
+    let mut query = use_signal(String::new);
+    let panel_class = match (align_end, drop_down) {
+        (true, true) => "emoji-picker-panel emoji-picker-panel-end emoji-picker-panel-down",
+        (true, false) => "emoji-picker-panel emoji-picker-panel-end",
+        (false, true) => "emoji-picker-panel emoji-picker-panel-down",
+        (false, false) => "emoji-picker-panel",
     };
+    let trigger_title = if drop_down {
+        "Choose emoji"
+    } else {
+        "Insert emoji"
+    };
+    let q = query();
+    let searching = !q.trim().is_empty();
+    let filtered: Vec<(&str, Vec<(&str, &str)>)> = EMOJI_PICKER_ROWS
+        .iter()
+        .filter_map(|(label, emojis)| {
+            let hits: Vec<_> = emojis
+                .iter()
+                .copied()
+                .filter(|(glyph, keywords)| emoji_query_matches(&q, label, glyph, keywords))
+                .collect();
+            if hits.is_empty() {
+                None
+            } else {
+                Some((*label, hits))
+            }
+        })
+        .collect();
+    let match_count: usize = filtered.iter().map(|(_, hits)| hits.len()).sum();
     rsx! {
         div { class: "emoji-picker-wrap",
             button {
                 r#type: "button",
                 class: "emoji-picker-trigger",
-                title: "Insert emoji",
+                title: "{trigger_title}",
                 disabled,
                 onclick: move |event: MouseEvent| {
                     event.prevent_default();
                     event.stop_propagation();
                     if !disabled {
-                        open.set(!open());
+                        let next = !open();
+                        open.set(next);
+                        if next {
+                            query.set(String::new());
+                        }
                     }
                 },
                 Icon { name: IconName::Emoji, size: 18 }
             }
             if open() {
                 PopoverDismissLayer {
-                    on_dismiss: move |_| open.set(false),
+                    on_dismiss: move |_| {
+                        open.set(false);
+                        query.set(String::new());
+                    },
                 }
                 div {
                     class: "{panel_class}",
                     role: "dialog",
                     "aria-label": "Emoji picker",
                     onclick: move |event: MouseEvent| event.stop_propagation(),
-                    for (label, emojis) in EMOJI_PICKER_ROWS {
-                        p { class: "emoji-picker-label", "{*label}" }
-                        div { class: "emoji-picker-grid",
-                            for emoji in *emojis {
-                                button {
-                                    r#type: "button",
-                                    class: "emoji-picker-cell",
-                                    title: "{*emoji}",
-                                    onclick: {
-                                        let glyph = (*emoji).to_string();
-                                        move |event: MouseEvent| {
-                                            event.prevent_default();
-                                            event.stop_propagation();
-                                            on_pick.call(glyph.clone());
-                                            open.set(false);
+                    div { class: "emoji-picker-search",
+                        Icon { name: IconName::Scan, size: 13 }
+                        input {
+                            class: "emoji-picker-search-input",
+                            r#type: "search",
+                            value: "{q}",
+                            placeholder: "Search coffee, signal, heart…",
+                            "aria-label": "Search emoji",
+                            autofocus: true,
+                            oninput: move |e: FormEvent| query.set(e.value()),
+                            onclick: move |event: MouseEvent| event.stop_propagation(),
+                        }
+                        if searching {
+                            button {
+                                r#type: "button",
+                                class: "emoji-picker-search-clear",
+                                title: "Clear search",
+                                onclick: move |event: MouseEvent| {
+                                    event.prevent_default();
+                                    event.stop_propagation();
+                                    query.set(String::new());
+                                },
+                                Icon { name: IconName::Close, size: 11 }
+                            }
+                        }
+                    }
+                    if searching {
+                        p { class: "emoji-picker-label",
+                            if match_count == 0 {
+                                "No matches"
+                            } else {
+                                "Matches"
+                            }
+                        }
+                        if match_count == 0 {
+                            p { class: "emoji-picker-empty", "Try another word — coffee, signal, rain…" }
+                        } else {
+                            div { class: "emoji-picker-grid",
+                                for (_label, hits) in filtered.iter() {
+                                    for (emoji, keywords) in hits.iter() {
+                                        {
+                                            let glyph = (*emoji).to_string();
+                                            let tip = (*keywords).to_string();
+                                            rsx! {
+                                                button {
+                                                    r#type: "button",
+                                                    class: "emoji-picker-cell",
+                                                    title: "{tip}",
+                                                    onclick: move |event: MouseEvent| {
+                                                        event.prevent_default();
+                                                        event.stop_propagation();
+                                                        on_pick.call(glyph.clone());
+                                                        open.set(false);
+                                                        query.set(String::new());
+                                                    },
+                                                    "{glyph}"
+                                                }
+                                            }
                                         }
-                                    },
-                                    "{*emoji}"
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        for (label, hits) in filtered.iter() {
+                            p { class: "emoji-picker-label", "{*label}" }
+                            div { class: "emoji-picker-grid",
+                                for (emoji, keywords) in hits.iter() {
+                                    {
+                                        let glyph = (*emoji).to_string();
+                                        let tip = (*keywords).to_string();
+                                        rsx! {
+                                            button {
+                                                r#type: "button",
+                                                class: "emoji-picker-cell",
+                                                title: "{tip}",
+                                                onclick: move |event: MouseEvent| {
+                                                    event.prevent_default();
+                                                    event.stop_propagation();
+                                                    on_pick.call(glyph.clone());
+                                                    open.set(false);
+                                                    query.set(String::new());
+                                                },
+                                                "{glyph}"
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

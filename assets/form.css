@@ -1020,6 +1020,60 @@ button.overview-stat:hover {
   cursor: not-allowed;
 }
 
+.emoji-picker-search {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0 0 0.45rem;
+  padding: 0.3rem 0.45rem;
+  border: 1px solid #ffffff14;
+  border-radius: 0.4rem;
+  background: rgba(0, 0, 0, 0.28);
+  color: #9aa3af;
+}
+
+.emoji-picker-search-input {
+  min-width: 0;
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 0.1rem 0;
+  border: 0;
+  background: transparent;
+  color: #e4e4e7;
+  font-size: 0.78rem;
+  outline: none;
+}
+
+.emoji-picker-search-input::placeholder {
+  color: #6b7280;
+}
+
+.emoji-picker-search-clear {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0.15rem;
+  border: 0;
+  border-radius: 0.25rem;
+  background: transparent;
+  color: #9aa3af;
+  cursor: pointer;
+}
+
+.emoji-picker-search-clear:hover {
+  color: #f4f4f5;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.emoji-picker-empty {
+  margin: 0.35rem 0 0;
+  padding: 0.25rem 0.15rem;
+  font-size: 0.75rem;
+  color: #9aa3af;
+}
+
 .emoji-picker-panel {
   position: absolute;
   bottom: calc(100% + 0.4rem);
@@ -1039,6 +1093,11 @@ button.overview-stat:hover {
 .emoji-picker-panel-end {
   left: auto;
   right: 0;
+}
+
+.emoji-picker-panel-down {
+  top: calc(100% + 0.4rem);
+  bottom: auto;
 }
 
 .compose-plus-panel {
@@ -1095,6 +1154,66 @@ button.overview-stat:hover {
   color: #e4e4e7;
   text-align: left;
   cursor: pointer;
+}
+
+.channel-desk-option {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 0.7rem;
+  border: 1px solid transparent;
+  border-radius: 0.45rem;
+  border-bottom-color: transparent;
+  border-bottom: 1px solid transparent;
+  margin-bottom: 0.15rem;
+  padding: 0.65rem 0.75rem;
+}
+
+.channel-desk-option:last-child {
+  margin-bottom: 0;
+}
+
+.channel-desk-option:hover {
+  border-color: #ffffff14;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.channel-desk-option-icon {
+  display: inline-flex;
+  height: 2rem;
+  width: 2rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.45rem;
+}
+
+.channel-desk-option-icon-create {
+  color: #86efac;
+  background: rgba(61, 214, 140, 0.14);
+}
+
+.channel-desk-option-icon-private {
+  color: #fcd34d;
+  background: rgba(251, 191, 36, 0.14);
+}
+
+.channel-desk-option-icon-public {
+  color: #7dd3fc;
+  background: rgba(56, 189, 248, 0.14);
+}
+
+.channel-desk-option-icon-hash {
+  color: #c4b5fd;
+  background: rgba(167, 139, 250, 0.16);
+}
+
+.channel-desk-option-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 0.15rem;
 }
 
 .dm-contact-option:last-child {
@@ -2581,7 +2700,7 @@ option {
   .messages-shell {
     flex-direction: row;
     align-items: stretch;
-    gap: 0.85rem;
+    gap: 0;
   }
 }
 
@@ -2589,7 +2708,7 @@ option {
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: 0.55rem;
   min-width: 0;
   max-height: 11rem;
   overflow-x: auto;
@@ -2600,12 +2719,426 @@ option {
   background: rgba(16, 20, 24, 0.72);
 }
 
+.messages-split-handle {
+  display: none;
+}
+
+.messages-split-drag-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  cursor: col-resize !important;
+  user-select: none;
+  touch-action: none;
+}
+
+.messages-split-drag-layer-idle {
+  pointer-events: none;
+  cursor: auto;
+}
+
+.messages-shell-resizing,
+.messages-shell-resizing *,
+html.hq-col-resize,
+html.hq-col-resize *,
+html.hq-col-resize body {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+.messages-rail-tabs {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.1rem;
+  border-radius: 0.4rem;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.messages-rail-search {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.45rem;
+  border: 1px solid #ffffff14;
+  border-radius: 0.4rem;
+  background: rgba(0, 0, 0, 0.22);
+  color: #9aa3af;
+}
+
+.messages-rail-search-input {
+  min-width: 0;
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 0.15rem 0;
+  border: 0;
+  background: transparent;
+  color: #e4e4e7;
+  font-size: 0.78rem;
+  outline: none;
+}
+
+.messages-rail-search-input::placeholder {
+  color: #6b7280;
+}
+
+.messages-rail-search-clear {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0.15rem;
+  border: 0;
+  border-radius: 0.25rem;
+  background: transparent;
+  color: #9aa3af;
+  cursor: pointer;
+}
+
+.messages-rail-search-clear:hover {
+  color: #f4f4f5;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.messages-rail-tab {
+  display: inline-flex;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0.35rem 0.4rem;
+  border: 0;
+  border-radius: 0.3rem;
+  background: transparent;
+  color: #9aa3af;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.messages-rail-section-emoji {
+  flex-shrink: 0;
+  font-size: 0.85rem;
+  line-height: 1;
+}
+
+.section-emoji-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.section-emoji-preview {
+  display: inline-flex;
+  min-width: 1.75rem;
+  justify-content: center;
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+.section-emoji-preview-muted {
+  opacity: 0.55;
+}
+
+.keep-menu-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.keep-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid #ffffff14;
+  border-radius: 0.4rem;
+  background: rgba(255, 255, 255, 0.04);
+  color: #e4e4e7;
+  font-size: 0.82rem;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.keep-menu-trigger:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.keep-menu-panel {
+  position: absolute;
+  top: calc(100% + 0.3rem);
+  left: 0;
+  z-index: 45;
+  min-width: 9.5rem;
+  padding: 0.3rem;
+  border-radius: 0.5rem;
+  border: 1px solid #ffffff14;
+  background: #151a20;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+}
+
+/* In-flow list for slide-downs / tight panels that clip absolute menus. */
+.keep-menu-panel-inline {
+  position: static;
+  top: auto;
+  left: auto;
+  z-index: auto;
+  width: 100%;
+  min-width: 0;
+  box-shadow: none;
+}
+
+.keep-menu-item {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0.45rem 0.6rem;
+  border: 0;
+  border-radius: 0.35rem;
+  background: transparent;
+  color: #e4e4e7;
+  font-size: 0.8rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.keep-menu-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.keep-menu-item-active {
+  background: rgba(61, 214, 140, 0.14);
+  color: #e8fff3;
+}
+
+.messages-rail-item-settings {
+  position: relative;
+  flex-shrink: 0;
+}
+
+/* Full-viewport host so WebKit cannot clip the menu under .messages-rail overflow. */
+.rail-item-menu-shell {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  pointer-events: none;
+}
+
+.rail-item-menu-dismiss {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  pointer-events: auto;
+  background: transparent;
+}
+
+.rail-item-menu {
+  /* Above the messages splitter (z~90) so the green grip cannot cover the menu. */
+  position: fixed;
+  z-index: 201;
+  min-width: 11.5rem;
+  max-width: min(18rem, calc(100vw - 1rem));
+  padding: 0.3rem;
+  border-radius: 0.5rem;
+  border: 1px solid #ffffff14;
+  background: #151a20;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+}
+
+.rail-item-menu-context {
+  position: fixed;
+  z-index: 201;
+}
+
+.rail-item-menu-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0.45rem 0.55rem;
+  border: 0;
+  border-radius: 0.35rem;
+  background: transparent;
+  color: #e4e4e7;
+  font-size: 0.78rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rail-item-menu-item:hover,
+.rail-item-menu-item-active {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.rail-item-menu-item-danger {
+  color: #fca5a5;
+}
+
+.rail-item-menu-item-danger:hover {
+  background: rgba(248, 113, 113, 0.12);
+}
+
+.rail-item-menu-item-accent {
+  color: #86efac;
+}
+
+.rail-item-menu-caret {
+  margin-left: auto;
+  display: inline-flex;
+  opacity: 0.7;
+}
+
+.rail-item-menu-flyout-wrap {
+  position: relative;
+}
+
+.rail-item-menu-submenu {
+  /* Fly out to the right (viewport shell keeps this above the splitter). */
+  position: absolute;
+  top: 0;
+  left: calc(100% + 0.25rem);
+  z-index: 202;
+  min-width: 11rem;
+  max-height: min(14rem, 70vh);
+  overflow-y: auto;
+  padding: 0.3rem;
+  border-radius: 0.5rem;
+  border: 1px solid #ffffff14;
+  background: #151a20;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+}
+
+/* Near the bottom of the window: grow upward so the list is not clipped. */
+.rail-item-menu-submenu-up {
+  top: auto;
+  bottom: 0;
+}
+
+/* Near the right edge: fly out to the left instead. */
+.rail-item-menu-submenu-left {
+  left: auto;
+  right: calc(100% + 0.25rem);
+}
+
+.messages-rail-tab-active {
+  background: rgba(61, 214, 140, 0.16);
+  color: #e8fff3;
+}
+
+.messages-rail-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.messages-rail-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0.25rem 0.45rem;
+  border: 1px solid #ffffff14;
+  border-radius: 0.35rem;
+  background: transparent;
+  color: #9aa3af;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.messages-rail-tool:hover {
+  color: #f4f4f5;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.messages-rail-section-head {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.messages-rail-chevron {
+  display: inline-flex;
+  opacity: 0.75;
+}
+
+.messages-rail-kind {
+  flex-shrink: 0;
+  font-size: 0.62rem;
+  color: #9aa3af;
+}
+
+.messages-rail-item-action-fav-on {
+  color: #fbbf24 !important;
+  opacity: 1 !important;
+}
+
+.messages-rail-item-action-fav-on svg {
+  fill: currentColor;
+}
+
 @media (min-width: 56rem) {
   .messages-rail {
-    width: 15rem;
+    width: var(--messages-rail-width, 15rem);
+    min-width: 11rem;
+    max-width: 30rem;
     max-height: none;
     overflow-x: hidden;
     overflow-y: auto;
+  }
+
+  .messages-split-handle {
+    display: flex;
+    flex: 0 0 0.85rem;
+    width: 0.85rem;
+    margin: 0;
+    align-items: stretch;
+    justify-content: center;
+    border-radius: 999px;
+    background: transparent;
+    cursor: col-resize !important;
+    touch-action: none;
+    position: relative;
+    z-index: 90;
+  }
+
+  /* Invisible wider hit target so the resize cursor is easy to catch. */
+  .messages-split-handle::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -0.55rem;
+    right: -0.55rem;
+    cursor: col-resize !important;
+  }
+
+  .messages-split-handle:hover,
+  .messages-split-handle:hover::before {
+    cursor: col-resize !important;
+  }
+
+  .messages-split-handle-grip {
+    display: block;
+    align-self: center;
+    width: 0.22rem;
+    height: 42%;
+    min-height: 3rem;
+    border-radius: 999px;
+    background: #ffffff34;
+    pointer-events: none;
+  }
+
+  .messages-split-handle:hover .messages-split-handle-grip,
+  .messages-shell-resizing .messages-split-handle-grip,
+  html.hq-col-resize .messages-split-handle-grip {
+    background: rgba(61, 214, 140, 0.85);
   }
 }
 
@@ -2618,25 +3151,34 @@ option {
 
 @media (max-width: 55.98rem) {
   .messages-rail-section {
-    flex-direction: row;
-    flex-wrap: nowrap;
-    align-items: center;
-    gap: 0.4rem;
-  }
-
-  .messages-rail-section-title {
-    display: none;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.3rem;
+    min-width: 12rem;
   }
 }
 
 .messages-rail-section-title {
-  margin: 0 0 0.15rem;
-  padding: 0 0.25rem;
+  display: inline-flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0.15rem 0.25rem;
+  border: 0;
+  background: transparent;
   font-size: 0.65rem;
   font-weight: 600;
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: #9aa3af;
+  text-align: left;
+  cursor: pointer;
+}
+
+.messages-rail-section-title:hover {
+  color: #e4e4e7;
 }
 
 .messages-rail-list {

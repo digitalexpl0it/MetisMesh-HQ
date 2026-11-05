@@ -29,6 +29,69 @@ pub fn contact_add_uri(name: &str, pubkey_hex: &str, contact_type: u8) -> String
     )
 }
 
+/// Parse a `meshcore://contact/add?…` URI into `(name, pubkey, type)`.
+/// Returns `None` for binary adverts or malformed links.
+pub fn parse_contact_add_uri(uri: &str) -> Option<(String, String, u8)> {
+    let uri = uri.trim();
+    let rest = uri
+        .strip_prefix("meshcore://contact/add?")
+        .or_else(|| uri.strip_prefix("MESHCORE://contact/add?"))?;
+    let mut name = String::new();
+    let mut pubkey = String::new();
+    let mut ty: u8 = 1;
+    for pair in rest.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        let key = parts.next().unwrap_or("");
+        let value = urldecode_component(parts.next().unwrap_or(""));
+        match key {
+            "name" => name = value,
+            "public_key" => pubkey = value.trim().to_ascii_lowercase(),
+            "type" => {
+                ty = value.parse::<u8>().unwrap_or(1).clamp(1, 4);
+            }
+            _ => {}
+        }
+    }
+    if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    if name.trim().is_empty() {
+        name = pubkey.chars().take(12).collect();
+    }
+    Some((name, pubkey, ty))
+}
+
+fn urldecode_component(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let h = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+                if let Some(h) = h {
+                    if let Ok(v) = u8::from_str_radix(h, 16) {
+                        out.push(v);
+                        i += 3;
+                        continue;
+                    }
+                }
+                out.push(bytes[i]);
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Public URL for a stored QR file name (`{pubkey}.svg`).
 pub fn qr_public_url(qr_file: &str) -> Option<String> {
     let name = sanitize_qr_filename(qr_file)?;
@@ -225,6 +288,17 @@ mod tests {
         assert!(uri.contains("public_key=aabb"));
         assert!(uri.contains("type=2"));
         assert!(uri.contains("name=Rim%20Of%20World"));
+    }
+
+    #[test]
+    fn parse_round_trip() {
+        let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let uri = contact_add_uri("Rim Of World", key, 2);
+        let (name, pubkey, ty) = parse_contact_add_uri(&uri).expect("parse");
+        assert_eq!(name, "Rim Of World");
+        assert_eq!(pubkey, key);
+        assert_eq!(ty, 2);
+        assert!(parse_contact_add_uri("meshcore://aabbcc").is_none());
     }
 
     #[test]

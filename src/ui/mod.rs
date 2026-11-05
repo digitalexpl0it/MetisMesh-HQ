@@ -1,9 +1,11 @@
 mod cli_page;
+mod emoji_catalog;
 mod help_page;
 mod icons;
 mod infra_page;
 mod map_host;
 mod map_page;
+mod messages_rail;
 mod overview_repeaters;
 mod tracker_page;
 mod weather_page;
@@ -45,8 +47,8 @@ use widgets::{
     format_position_share, heard_icon_class, heard_within_week, insert_mesh_snippet, Badge, BarMix,
     BarMixRow, BatteryChart, BatteryPill, BatterySample, Button, ButtonKind, Card, ChartSeries,
     ComposePlusAction, ComposePlusButton, ConversationAvatar, Dialog, EmojiPickerButton, LineChart,
-    MeshTextCount, PageHeading, PinSlideDown, SelectInput, SlideDownPanel, Sparkline, TextInput,
-    Throbber, ToastHost, ToggleSwitch, MESH_TEXT_MAX_BYTES,
+    MeshTextCount, PageHeading, PinSlideDown, PopoverDismissLayer, SelectInput, SlideDownPanel,
+    Sparkline, TextInput, Throbber, ToastHost, ToggleSwitch, MESH_TEXT_MAX_BYTES,
 };
 
 /// Show a transient toast (and log it). Prefer this over inline amber labels.
@@ -3162,7 +3164,7 @@ fn RosterPage() -> Element {
     }
 }
 
-fn fuzzy_score(query: &str, fields: &[&str]) -> Option<i32> {
+pub(crate) fn fuzzy_score(query: &str, fields: &[&str]) -> Option<i32> {
     let query = query.trim().to_lowercase();
     if query.is_empty() {
         return Some(0);
@@ -4026,155 +4028,60 @@ fn BlockResolveFailDialog(target: Signal<Option<String>>) -> Element {
     }
 }
 
-#[component]
-fn MessagesRail(
-    channels: Vec<ChannelRow>,
-    dm_threads: Vec<DmThreadRow>,
-    selected_channel: Option<String>,
-    selected_dm: Option<String>,
-    on_select_channel: EventHandler<String>,
-    on_select_dm: EventHandler<String>,
-    on_delete_channel: EventHandler<String>,
-    on_clear_dm: EventHandler<(String, String)>,
-    on_channel_appearance: EventHandler<String>,
-) -> Element {
-    rsx! {
-        nav { class: "messages-rail", aria_label: "Conversations",
-            div { class: "messages-rail-section",
-                p { class: "messages-rail-section-title", "Channels" }
-                div { class: "messages-rail-list",
-                    if channels.is_empty() {
-                        p { class: "messages-rail-empty", "No channels yet." }
-                    }
-                    for channel in channels.iter() {
-                        {
-                            let name = channel.name.clone();
-                            let active = selected_channel.as_ref() == Some(&name);
-                            let can_delete = !name.eq_ignore_ascii_case("Public")
-                                && !state().db.is_reserved_private(&name);
-                            let unread = channel.unread_count;
-                            let has_look = channel.has_appearance_override;
-                            let select_name = name.clone();
-                            let delete_name = name.clone();
-                            let appear_name = name.clone();
-                            rsx! {
-                                div {
-                                    key: "ch-{name}",
-                                    class: if active {
-                                        "messages-rail-item messages-rail-item-active"
-                                    } else {
-                                        "messages-rail-item"
-                                    },
-                                    button {
-                                        r#type: "button",
-                                        class: "messages-rail-item-main",
-                                        onclick: move |_| on_select_channel.call(select_name.clone()),
-                                        ConversationAvatar {
-                                            label: name.clone(),
-                                            seed: name.clone(),
-                                        }
-                                        span { class: "messages-rail-item-label", "{name}" }
-                                        if has_look {
-                                            span {
-                                                class: "text-[0.6rem] uppercase tracking-wide text-muted-foreground",
-                                                title: "Custom appearance",
-                                                "Aa"
-                                            }
-                                        }
-                                        if unread > 0 {
-                                            span { class: "{unread_badge_class(channel.unread_mentions)}",
-                                                if unread > 99 { "99+" } else { "{unread}" }
-                                            }
-                                        }
-                                    }
-                                    button {
-                                        r#type: "button",
-                                        class: "messages-rail-item-action",
-                                        title: "Channel appearance",
-                                        onclick: move |event: MouseEvent| {
-                                            event.prevent_default();
-                                            event.stop_propagation();
-                                            on_channel_appearance.call(appear_name.clone());
-                                        },
-                                        Icon { name: IconName::Settings, size: 12 }
-                                    }
-                                    if can_delete {
-                                        button {
-                                            r#type: "button",
-                                            class: "messages-rail-item-action",
-                                            title: "Delete channel",
-                                            onclick: move |event: MouseEvent| {
-                                                event.prevent_default();
-                                                event.stop_propagation();
-                                                on_delete_channel.call(delete_name.clone());
-                                            },
-                                            Icon { name: IconName::Trash, size: 12 }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            div { class: "messages-rail-section",
-                p { class: "messages-rail-section-title", "Direct messages" }
-                div { class: "messages-rail-list",
-                    if dm_threads.is_empty() {
-                        p { class: "messages-rail-empty", "No direct threads yet." }
-                    }
-                    for thread in dm_threads.iter() {
-                        {
-                            let pubkey = thread.pubkey.clone();
-                            let label = thread.name.clone();
-                            let active = selected_dm.as_ref() == Some(&pubkey);
-                            let unread = thread.unread_count;
-                            let mention_tone = thread.unread_mentions;
-                            let select_key = pubkey.clone();
-                            let clear_key = pubkey.clone();
-                            let clear_label = label.clone();
-                            rsx! {
-                                div {
-                                    key: "dm-{pubkey}",
-                                    class: if active {
-                                        "messages-rail-item messages-rail-item-active"
-                                    } else {
-                                        "messages-rail-item"
-                                    },
-                                    button {
-                                        r#type: "button",
-                                        class: "messages-rail-item-main",
-                                        onclick: move |_| on_select_dm.call(select_key.clone()),
-                                        ConversationAvatar {
-                                            label: label.clone(),
-                                            seed: pubkey.clone(),
-                                        }
-                                        span { class: "messages-rail-item-label", "{label}" }
-                                        if unread > 0 {
-                                            span { class: "{unread_badge_class(mention_tone)}",
-                                                if unread > 99 { "99+" } else { "{unread}" }
-                                            }
-                                        }
-                                    }
-                                    button {
-                                        r#type: "button",
-                                        class: "messages-rail-item-action",
-                                        title: "Clear conversation",
-                                        onclick: move |event: MouseEvent| {
-                                            event.prevent_default();
-                                            event.stop_propagation();
-                                            on_clear_dm.call((clear_key.clone(), clear_label.clone()));
-                                        },
-                                        Icon { name: IconName::Trash, size: 12 }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+fn messages_rail_width_px() -> f64 {
+    state()
+        .db
+        .setting("messages_rail_width_px")
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(240.0)
+        .clamp(176.0, 480.0)
+}
+
+fn persist_messages_rail_width(px: f64) {
+    let px = px.round().clamp(176.0, 480.0);
+    let _ = state()
+        .db
+        .set_setting("messages_rail_width_px", &format!("{px:.0}"));
+}
+
+fn set_messages_split_cursor(active: bool) {
+    // WebKitGTK often ignores element CSS cursors. Hit the window API and force a
+    // document-wide style (eval must be polled/awaited or the script never runs).
+    #[cfg(feature = "desktop")]
+    {
+        use dioxus::desktop::tao::window::CursorIcon;
+        let icon = if active {
+            CursorIcon::ColResize
+        } else {
+            CursorIcon::Default
+        };
+        dioxus::desktop::window().set_cursor_icon(icon);
     }
+    let script = if active {
+        r#"(() => {
+          document.documentElement.classList.add('hq-col-resize');
+          document.body && (document.body.style.cursor = 'col-resize');
+          let s = document.getElementById('hq-col-resize-style');
+          if (!s) {
+            s = document.createElement('style');
+            s.id = 'hq-col-resize-style';
+            document.head.appendChild(s);
+          }
+          s.textContent = 'html.hq-col-resize,html.hq-col-resize body,html.hq-col-resize *{cursor:col-resize!important;}';
+        })()"#
+    } else {
+        r#"(() => {
+          document.documentElement.classList.remove('hq-col-resize');
+          if (document.body) document.body.style.cursor = '';
+          const s = document.getElementById('hq-col-resize-style');
+          if (s) s.textContent = '';
+        })()"#
+    };
+    spawn(async move {
+        let _ = document::eval(script).await;
+    });
 }
 
 #[component]
@@ -4184,6 +4091,7 @@ fn MessagesThreadShell(
     selected_channel: Option<String>,
     selected_dm: Option<String>,
     linked: bool,
+    rail_epoch: Signal<u64>,
     on_select_channel: EventHandler<String>,
     on_select_dm: EventHandler<String>,
     on_after_delete_channel: EventHandler<String>,
@@ -4192,9 +4100,42 @@ fn MessagesThreadShell(
     children: Element,
 ) -> Element {
     let mut confirm = use_signal(|| None::<MessagesRailConfirm>);
+    let mut rail_width = use_signal(messages_rail_width_px);
+    let mut split_drag = use_signal(|| None::<(f64, f64)>); // (start_x, start_width)
+    let shell_style = format!("--messages-rail-width: {:.0}px;", rail_width());
+    let dragging = split_drag().is_some();
+    let shell_class = if dragging {
+        "messages-shell hq-page-fill messages-shell-resizing"
+    } else {
+        "messages-shell hq-page-fill"
+    };
     rsx! {
-        div { class: "messages-shell hq-page-fill",
-            MessagesRail {
+        div {
+            class: "{shell_class}",
+            style: "{shell_style}",
+            onpointermove: move |event: PointerEvent| {
+                let Some((start_x, start_w)) = split_drag() else {
+                    return;
+                };
+                let pt = event.data().client_coordinates();
+                let next = (start_w + (pt.x - start_x)).clamp(176.0, 480.0);
+                rail_width.set(next);
+            },
+            onpointerup: move |_| {
+                if split_drag().is_some() {
+                    persist_messages_rail_width(rail_width());
+                    split_drag.set(None);
+                    set_messages_split_cursor(false);
+                }
+            },
+            onpointercancel: move |_| {
+                if split_drag().is_some() {
+                    persist_messages_rail_width(rail_width());
+                    split_drag.set(None);
+                    set_messages_split_cursor(false);
+                }
+            },
+            messages_rail::MessagesRail {
                 channels: channels,
                 dm_threads: dm_threads,
                 selected_channel: selected_channel.clone(),
@@ -4208,9 +4149,85 @@ fn MessagesThreadShell(
                     confirm.set(Some(MessagesRailConfirm::ClearDm { pubkey, name }));
                 },
                 on_channel_appearance: move |name| on_channel_appearance.call(name),
+                rail_epoch,
+            }
+            div {
+                class: "messages-split-handle",
+                style: "cursor: col-resize;",
+                title: "Drag to resize",
+                onmousemove: move |_| {
+                    if split_drag().is_none() {
+                        set_messages_split_cursor(true);
+                    }
+                },
+                role: "separator",
+                "aria-orientation": "vertical",
+                "aria-label": "Resize conversations list",
+                onmouseenter: move |_| {
+                    if split_drag().is_none() {
+                        set_messages_split_cursor(true);
+                    }
+                },
+                onmouseleave: move |_| {
+                    if split_drag().is_none() {
+                        set_messages_split_cursor(false);
+                    }
+                },
+                onpointerenter: move |_| {
+                    if split_drag().is_none() {
+                        set_messages_split_cursor(true);
+                    }
+                },
+                onpointerleave: move |_| {
+                    if split_drag().is_none() {
+                        set_messages_split_cursor(false);
+                    }
+                },
+                onpointerdown: move |event: PointerEvent| {
+                    event.prevent_default();
+                    event.stop_propagation();
+                    let pt = event.data().client_coordinates();
+                    split_drag.set(Some((pt.x, rail_width())));
+                    set_messages_split_cursor(true);
+                },
+                // Visible grip so the hit target is obvious (not only a CSS ::after).
+                span {
+                    class: "messages-split-handle-grip",
+                    "aria-hidden": "true",
+                }
             }
             div { class: "messages-convo",
                 {children}
+            }
+            // Always mounted so the first drag frame is not lost waiting for a re-render.
+            div {
+                class: if dragging {
+                    "messages-split-drag-layer"
+                } else {
+                    "messages-split-drag-layer messages-split-drag-layer-idle"
+                },
+                onpointermove: move |event: PointerEvent| {
+                    let Some((start_x, start_w)) = split_drag() else {
+                        return;
+                    };
+                    let pt = event.data().client_coordinates();
+                    let next = (start_w + (pt.x - start_x)).clamp(176.0, 480.0);
+                    rail_width.set(next);
+                },
+                onpointerup: move |_| {
+                    if split_drag().is_some() {
+                        persist_messages_rail_width(rail_width());
+                        split_drag.set(None);
+                        set_messages_split_cursor(false);
+                    }
+                },
+                onpointercancel: move |_| {
+                    if split_drag().is_some() {
+                        persist_messages_rail_width(rail_width());
+                        split_drag.set(None);
+                        set_messages_split_cursor(false);
+                    }
+                },
             }
             Dialog {
                 open: confirm().is_some(),
@@ -4318,6 +4335,7 @@ fn MessagesPage() -> Element {
     let mut selected_dm = use_signal(|| None::<String>);
     let mut draft = use_signal(String::new);
     let mut channel_desk_open = use_signal(|| false);
+    let mut keep_desk_open = use_signal(|| false);
     let mut channel_desk_mode = use_signal(|| ChannelDeskMode::Pick);
     let mut create_name = use_signal(String::new);
     let mut create_visibility = use_signal(|| "private".to_string());
@@ -4331,6 +4349,7 @@ fn MessagesPage() -> Element {
     let mut reply_target = use_signal(|| None::<MessageReplyTarget>);
     let mut refresh = use_signal(|| 0u64);
     let mut refresh_started = use_signal(|| false);
+    let mut rail_epoch = use_signal(|| 0u64);
     let mut last_send_seq = use_signal(|| 0u64);
     let mut read_session = use_signal(|| None::<ChannelReadSession>);
     let mut new_dm_open = use_signal(|| false);
@@ -4489,6 +4508,7 @@ fn MessagesPage() -> Element {
                 selected_channel: None,
                 selected_dm: Some(dm_pubkey.clone()),
                 linked,
+                rail_epoch,
                 on_select_channel: move |name: String| {
                     selected_dm.set(None);
                     selected_channel.set(Some(name));
@@ -4699,6 +4719,41 @@ fn MessagesPage() -> Element {
                                                 MessageBody {
                                                     text: message.text.clone(),
                                                     outgoing,
+                                                }
+                                                if !outgoing {
+                                                    div { class: "message-actions",
+                                                        button {
+                                                            class: "message-action-btn",
+                                                            title: "Favorite this contact",
+                                                            onclick: {
+                                                                let pk = dm_pubkey.clone();
+                                                                let nm = title.clone();
+                                                                move |_| {
+                                                                    match messages_rail::toggle_contact_favorite(
+                                                                        &pk, &nm,
+                                                                    ) {
+                                                                        Ok((on, name_only)) => {
+                                                                            let msg = if on && name_only {
+                                                                                "Saved to Contacts → Pinned (no public key yet — upgrades when they advert)."
+                                                                            } else if on {
+                                                                                "Contact added to Favorites."
+                                                                            } else {
+                                                                                "Contact removed from Favorites."
+                                                                            };
+                                                                            status_note(msg);
+                                                                            rail_epoch.with_mut(|n| {
+                                                                                *n = n.wrapping_add(1)
+                                                                            });
+                                                                            refresh.set(refresh() + 1);
+                                                                        }
+                                                                        Err(err) => status_note(err),
+                                                                    }
+                                                                }
+                                                            },
+                                                            Icon { name: IconName::Star, size: 12 }
+                                                            "Favorite"
+                                                        }
+                                                    }
                                                 }
                                             }
                                             div { class: "message-meta-foot",
@@ -4970,6 +5025,7 @@ fn MessagesPage() -> Element {
                 selected_channel: Some(channel.name.clone()),
                 selected_dm: None,
                 linked,
+                rail_epoch,
                 on_select_channel: move |name: String| {
                     selected_dm.set(None);
                     selected_channel.set(Some(name));
@@ -5310,6 +5366,38 @@ fn MessagesPage() -> Element {
                                                             let known = known_pk.clone();
                                                             rsx! {
                                                                 button {
+                                                                    class: "message-action-btn",
+                                                                    title: "Favorite this contact",
+                                                                    onclick: {
+                                                                        let resolve_name = resolve_name.clone();
+                                                                        let known = known.clone();
+                                                                        move |_| {
+                                                                            match messages_rail::toggle_contact_favorite_from_bubble(
+                                                                                known.as_deref(),
+                                                                                &resolve_name,
+                                                                            ) {
+                                                                                Ok((on, name_only)) => {
+                                                                                    let msg = if on && name_only {
+                                                                                        "Saved to Contacts → Pinned (channel name only — upgrades when they advert)."
+                                                                                    } else if on {
+                                                                                        "Contact added to Favorites (Contacts → Pinned)."
+                                                                                    } else {
+                                                                                        "Contact removed from Favorites."
+                                                                                    };
+                                                                                    status_note(msg);
+                                                                                    rail_epoch.with_mut(|n| {
+                                                                                        *n = n.wrapping_add(1)
+                                                                                    });
+                                                                                    refresh.set(refresh() + 1);
+                                                                                }
+                                                                                Err(err) => status_note(err),
+                                                                            }
+                                                                        }
+                                                                    },
+                                                                    Icon { name: IconName::Star, size: 12 }
+                                                                    "Favorite"
+                                                                }
+                                                                button {
                                                                     class: "message-action-btn message-action-btn-block",
                                                                     title: if already_blocked {
                                                                         "Already blocked"
@@ -5635,55 +5723,61 @@ fn MessagesPage() -> Element {
                 }
             }
             if on_channels_tab {
-            Card { title: "Default keep".to_string(), icon: Some(IconName::Clock),
-                p { class: "mb-3 text-sm text-muted-foreground",
-                    "System default for channels and DMs. Each channel can override this on its card or while open. Roster, secrets, and audit stay. Global pane colors live under Settings → Messages appearance."
+            div { class: "flex flex-wrap items-center justify-between gap-3",
+                p { class: "text-sm text-muted-foreground",
+                    "Open a channel, or create / join a new one. Retention lives under Default keep."
                 }
-                div { class: "flex flex-wrap gap-2",
-                    RetentionChoice { label: "1 hour", value: "1h", current: message_keep(), onpick: move |value: String| {
-                        let _ = state().db.set_message_keep(&value);
-                        message_keep.set(value);
-                        let _ = state().db.apply_message_keep();
-                        keep_applied_at.set(crate::db::unix_now());
-                    } }
-                    RetentionChoice { label: "6 hours", value: "6h", current: message_keep(), onpick: move |value: String| {
-                        let _ = state().db.set_message_keep(&value);
-                        message_keep.set(value);
-                        let _ = state().db.apply_message_keep();
-                        keep_applied_at.set(crate::db::unix_now());
-                    } }
-                    RetentionChoice { label: "24 hours", value: "24h", current: message_keep(), onpick: move |value: String| {
-                        let _ = state().db.set_message_keep(&value);
-                        message_keep.set(value);
-                        let _ = state().db.apply_message_keep();
-                        keep_applied_at.set(crate::db::unix_now());
-                    } }
-                    RetentionChoice { label: "1 week", value: "7d", current: message_keep(), onpick: move |value: String| {
-                        let _ = state().db.set_message_keep(&value);
-                        message_keep.set(value);
-                        let _ = state().db.apply_message_keep();
-                        keep_applied_at.set(crate::db::unix_now());
-                    } }
-                    RetentionChoice { label: "30 days", value: "30d", current: message_keep(), onpick: move |value: String| {
-                        let _ = state().db.set_message_keep(&value);
-                        message_keep.set(value);
-                        let _ = state().db.apply_message_keep();
-                        keep_applied_at.set(crate::db::unix_now());
-                    } }
-                    RetentionChoice { label: "Forever", value: "forever", current: message_keep(), onpick: move |value: String| {
-                        let _ = state().db.set_message_keep(&value);
-                        message_keep.set(value);
-                    } }
+                div { class: "flex flex-wrap items-center gap-2",
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        onclick: move |_| {
+                            channel_desk_open.set(false);
+                            keep_desk_open.set(true);
+                        },
+                        Icon { name: IconName::Clock, size: 14 }
+                        "Default keep"
+                    }
+                    Button {
+                        onclick: move |_| {
+                            keep_desk_open.set(false);
+                            channel_desk_mode.set(ChannelDeskMode::Pick);
+                            channel_desk_open.set(true);
+                        },
+                        Icon { name: IconName::Messages, size: 14 }
+                        "Create / join channel"
+                    }
                 }
             }
-            div { class: "flex flex-wrap items-center gap-2",
-                Button {
-                    onclick: move |_| {
-                        channel_desk_mode.set(ChannelDeskMode::Pick);
-                        channel_desk_open.set(true);
-                    },
-                    Icon { name: IconName::Messages, size: 14 }
-                    "Create / join channel"
+            SlideDownPanel {
+                open: keep_desk_open(),
+                title: "Default keep".to_string(),
+                subtitle: "System default for channels and DMs. Each channel can override this on its card or while open.".to_string(),
+                icon: Some(IconName::Clock),
+                on_close: move |_| keep_desk_open.set(false),
+                footer: rsx! {
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        onclick: move |_| keep_desk_open.set(false),
+                        "Close"
+                    }
+                },
+                div { class: "flex flex-col gap-3",
+                    p { class: "text-sm text-muted-foreground",
+                        "Roster, secrets, and audit stay. Global pane colors live under Settings → Messages appearance."
+                    }
+                    MessageKeepButton {
+                        current: message_keep(),
+                        // Slide-down clips absolute menus — render choices inline.
+                        inline: true,
+                        onpick: move |value: String| {
+                            let _ = state().db.set_message_keep(&value);
+                            message_keep.set(value.clone());
+                            if value != "forever" {
+                                let _ = state().db.apply_message_keep();
+                                keep_applied_at.set(crate::db::unix_now());
+                            }
+                        },
+                    }
                 }
             }
             SlideDownPanel {
@@ -5719,38 +5813,58 @@ fn MessagesPage() -> Element {
                         div { class: "flex flex-col gap-2",
                             button {
                                 r#type: "button",
-                                class: "dm-contact-option",
+                                class: "dm-contact-option channel-desk-option",
                                 onclick: move |_| channel_desk_mode.set(ChannelDeskMode::Create),
-                                span { class: "font-medium", "Create channel" }
-                                span { class: "text-[0.7rem] text-muted-foreground",
-                                    "New private or public channel on this HQ"
+                                span { class: "channel-desk-option-icon channel-desk-option-icon-create",
+                                    Icon { name: IconName::Plus, size: 16 }
+                                }
+                                span { class: "channel-desk-option-copy",
+                                    span { class: "font-medium", "Create channel" }
+                                    span { class: "text-[0.7rem] text-muted-foreground",
+                                        "New private or public channel on this HQ"
+                                    }
                                 }
                             }
                             button {
                                 r#type: "button",
-                                class: "dm-contact-option",
+                                class: "dm-contact-option channel-desk-option",
                                 onclick: move |_| channel_desk_mode.set(ChannelDeskMode::JoinPrivate),
-                                span { class: "font-medium", "Join private channel" }
-                                span { class: "text-[0.7rem] text-muted-foreground",
-                                    "Name + 32-character hex secret"
+                                span { class: "channel-desk-option-icon channel-desk-option-icon-private",
+                                    Icon { name: IconName::Key, size: 16 }
+                                }
+                                span { class: "channel-desk-option-copy",
+                                    span { class: "font-medium", "Join private channel" }
+                                    span { class: "text-[0.7rem] text-muted-foreground",
+                                        "Name + 32-character hex secret"
+                                    }
                                 }
                             }
                             button {
                                 r#type: "button",
-                                class: "dm-contact-option",
+                                class: "dm-contact-option channel-desk-option",
                                 onclick: move |_| channel_desk_mode.set(ChannelDeskMode::JoinPublic),
-                                span { class: "font-medium", "Restore Public" }
-                                span { class: "text-[0.7rem] text-muted-foreground",
-                                    "Put Public back on companion slot 0"
+                                span { class: "channel-desk-option-icon channel-desk-option-icon-public",
+                                    Icon { name: IconName::Radio, size: 16 }
+                                }
+                                span { class: "channel-desk-option-copy",
+                                    span { class: "font-medium", "Restore Public" }
+                                    span { class: "text-[0.7rem] text-muted-foreground",
+                                        "Put Public back on companion slot 0"
+                                    }
                                 }
                             }
                             button {
                                 r#type: "button",
-                                class: "dm-contact-option",
+                                class: "dm-contact-option channel-desk-option",
                                 onclick: move |_| channel_desk_mode.set(ChannelDeskMode::JoinHash),
-                                span { class: "font-medium", "Join hash / hashtag channel" }
-                                span { class: "text-[0.7rem] text-muted-foreground",
-                                    "Secret derived from the channel name"
+                                span { class: "channel-desk-option-icon channel-desk-option-icon-hash",
+                                    Icon { name: IconName::Signal, size: 16 }
+                                }
+                                span { class: "channel-desk-option-copy",
+                                    span { class: "font-medium", "Join hash / hashtag channel" }
+                                    span { class: "text-[0.7rem] text-muted-foreground",
+                                        "Secret derived from the channel name"
+                                    }
                                 }
                             }
                         }
@@ -6684,6 +6798,7 @@ fn MessageBody(text: String, #[props(default)] outgoing: bool) -> Element {
                         TextPart::MeshLink(url) => {
                             let url_copy = url.clone();
                             let label = shorten_mesh_link(&url);
+                            let contact = crate::contact_qr::parse_contact_add_uri(&url);
                             rsx! {
                                 div {
                                     key: "{idx}",
@@ -6692,6 +6807,29 @@ fn MessageBody(text: String, #[props(default)] outgoing: bool) -> Element {
                                     code {
                                         class: "min-w-0 flex-1 break-all font-mono text-[0.7rem] leading-snug text-foreground/90",
                                         "{label}"
+                                    }
+                                    if let Some((name, pubkey, _ty)) = contact {
+                                        button {
+                                            class: "{mesh_btn}",
+                                            title: "Add this contact to Contacts",
+                                            onclick: move |_| {
+                                                match messages_rail::pin_contact_from_message(
+                                                    &pubkey,
+                                                    &name,
+                                                ) {
+                                                    Ok(_) => crate::toast::push(
+                                                        crate::toast::ToastKind::Success,
+                                                        format!("Added {name} to Contacts"),
+                                                    ),
+                                                    Err(err) => crate::toast::push(
+                                                        crate::toast::ToastKind::Error,
+                                                        err,
+                                                    ),
+                                                }
+                                            },
+                                            Icon { name: IconName::Users, size: 12 }
+                                            "Add"
+                                        }
                                     }
                                     button {
                                         class: "{mesh_btn}",
@@ -9852,36 +9990,17 @@ fn SettingsPage(
                 p { class: "mb-3 text-sm text-muted-foreground",
                     "Default keep for channels and DMs (Channels page can override per channel). Messages auto-trim; use Purge to also clear old routes, locations, and telemetry. Roster, secrets, and audit stay."
                 }
-                div { class: "mb-3 flex flex-wrap gap-2",
-                    RetentionChoice { label: "1 hour", value: "1h", current: message_keep(), onpick: move |value: String| {
-                        let _ = state().db.set_message_keep(&value);
-                        message_keep.set(value);
-                        let _ = state().db.apply_message_keep();
-                    } }
-                    RetentionChoice { label: "6 hours", value: "6h", current: message_keep(), onpick: move |value: String| {
-                        let _ = state().db.set_message_keep(&value);
-                        message_keep.set(value);
-                        let _ = state().db.apply_message_keep();
-                    } }
-                    RetentionChoice { label: "24 hours", value: "24h", current: message_keep(), onpick: move |value: String| {
-                        let _ = state().db.set_message_keep(&value);
-                        message_keep.set(value);
-                        let _ = state().db.apply_message_keep();
-                    } }
-                    RetentionChoice { label: "1 week", value: "7d", current: message_keep(), onpick: move |value: String| {
-                        let _ = state().db.set_message_keep(&value);
-                        message_keep.set(value);
-                        let _ = state().db.apply_message_keep();
-                    } }
-                    RetentionChoice { label: "30 days", value: "30d", current: message_keep(), onpick: move |value: String| {
-                        let _ = state().db.set_message_keep(&value);
-                        message_keep.set(value);
-                        let _ = state().db.apply_message_keep();
-                    } }
-                    RetentionChoice { label: "Forever", value: "forever", current: message_keep(), onpick: move |value: String| {
-                        let _ = state().db.set_message_keep(&value);
-                        message_keep.set(value);
-                    } }
+                div { class: "mb-3",
+                    MessageKeepButton {
+                        current: message_keep(),
+                        onpick: move |value: String| {
+                            let _ = state().db.set_message_keep(&value);
+                            message_keep.set(value.clone());
+                            if value != "forever" {
+                                let _ = state().db.apply_message_keep();
+                            }
+                        },
+                    }
                 }
                 div { class: "flex gap-2",
                     Button {
@@ -13528,6 +13647,99 @@ fn RetentionChoice(
             kind: if active { ButtonKind::Primary } else { ButtonKind::Ghost },
             onclick: move |_| onpick.call(value.to_string()),
             "{label}"
+        }
+    }
+}
+
+const MESSAGE_KEEP_OPTIONS: &[(&str, &str)] = &[
+    ("1h", "1 hour"),
+    ("6h", "6 hours"),
+    ("24h", "24 hours"),
+    ("7d", "1 week"),
+    ("30d", "30 days"),
+    ("forever", "Forever"),
+];
+
+fn message_keep_label(value: &str) -> &'static str {
+    MESSAGE_KEEP_OPTIONS
+        .iter()
+        .find(|(v, _)| *v == value)
+        .map(|(_, label)| *label)
+        .unwrap_or("Forever")
+}
+
+/// Keep-duration picker. Default is a compact dropdown; `inline` lists choices
+/// in-flow (needed inside slide-downs that clip absolute menus).
+#[component]
+fn MessageKeepButton(
+    current: String,
+    #[props(default = false)] inline: bool,
+    onpick: EventHandler<String>,
+) -> Element {
+    let mut open = use_signal(|| false);
+    let label = message_keep_label(&current);
+    let choices = rsx! {
+        for (value, option_label) in MESSAGE_KEEP_OPTIONS {
+            {
+                let value = (*value).to_string();
+                let active = current == value;
+                rsx! {
+                    button {
+                        r#type: "button",
+                        class: if active {
+                            "keep-menu-item keep-menu-item-active"
+                        } else {
+                            "keep-menu-item"
+                        },
+                        role: "menuitemradio",
+                        "aria-checked": if active { "true" } else { "false" },
+                        onclick: move |_| {
+                            onpick.call(value.clone());
+                            open.set(false);
+                        },
+                        "{*option_label}"
+                    }
+                }
+            }
+        }
+    };
+    if inline {
+        return rsx! {
+            div {
+                class: "keep-menu-panel keep-menu-panel-inline",
+                role: "menu",
+                "aria-label": "Default keep",
+                {choices}
+            }
+        };
+    }
+    rsx! {
+        div { class: "keep-menu-wrap",
+            button {
+                r#type: "button",
+                class: "keep-menu-trigger",
+                title: "Default message keep",
+                onclick: move |event: MouseEvent| {
+                    event.prevent_default();
+                    event.stop_propagation();
+                    open.set(!open());
+                },
+                Icon { name: IconName::Clock, size: 14 }
+                span { "{label}" }
+                Icon { name: IconName::ChevronDown, size: 12 }
+            }
+            if open() {
+                PopoverDismissLayer {
+                    on_dismiss: move |_| open.set(false),
+                }
+                div {
+                    class: "keep-menu-panel",
+                    role: "menu",
+                    "aria-label": "Default keep",
+                    onclick: move |event: MouseEvent| event.stop_propagation(),
+                    {choices}
+                }
+            }
         }
     }
 }

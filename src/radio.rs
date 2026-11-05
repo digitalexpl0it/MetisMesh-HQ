@@ -4953,15 +4953,15 @@ async fn handle_event(
                     .or_else(|| db.unique_node_by_name(name).ok().flatten())
             });
             let sender_pubkey = resolved.as_ref().map(|n| n.pubkey.clone());
+            if let (Some(name), Some(pubkey)) = (sender_name.as_deref(), sender_pubkey.as_deref()) {
+                let _ = db.promote_name_block_to_pubkey(pubkey, name);
+                let _ = db.promote_name_pin_to_pubkey(pubkey, name);
+            }
             if db
                 .is_channel_sender_blocked(sender_name.as_deref(), sender_pubkey.as_deref())
                 .unwrap_or(false)
             {
-                // Name-only blocks promote onto a resolved pubkey so later DMs drop too.
-                if let (Some(name), Some(pubkey)) = (sender_name.as_deref(), sender_pubkey.as_deref())
-                {
-                    let _ = db.promote_name_block_to_pubkey(pubkey, name);
-                }
+                // Name-only blocks / pins already promoted above when resolvable.
                 hq_log!(
                     debug,
                     "dropping channel RX from blocked sender {:?}",

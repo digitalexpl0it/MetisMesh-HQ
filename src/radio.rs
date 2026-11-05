@@ -48,6 +48,12 @@ pub struct AdvertPathFetch {
     pub hop_count: u32,
 }
 
+/// Operator contact refresh: sync companion contact row, path cache, status, telemetry.
+#[derive(Debug, Clone)]
+pub struct ContactRefreshResult {
+    pub summary: String,
+}
+
 /// Lets background fetches (weather/quake) enqueue a METIS-INFO channel reply.
 /// Routes to whichever companion is primary at send time, so promotion needs no rewiring.
 static RADIO_POOL: OnceLock<Arc<PoolShared>> = OnceLock::new();
@@ -320,6 +326,11 @@ pub enum RadioCmd {
         pubkey_hex: String,
         reply: oneshot::Sender<Result<AdvertPathFetch, String>>,
     },
+    /// Refresh one contact: companion contact sync + path + status + telemetry (airtime).
+    RefreshContact {
+        pubkey_hex: String,
+        reply: oneshot::Sender<Result<ContactRefreshResult, String>>,
+    },
     /// Binary status request for one claimed infra pubkey.
     ProbeInfraStatus {
         pubkey_hex: String,
@@ -370,6 +381,9 @@ fn no_primary_reason(cmd: &RadioCmd) -> &'static str {
         RadioCmd::FetchAdvertPath { .. } => {
             "Connect a primary companion radio before tracing a path."
         }
+        RadioCmd::RefreshContact { .. } => {
+            "Connect a primary companion radio before refreshing a contact."
+        }
         RadioCmd::SignBytes { .. } | RadioCmd::ExportPrivateKey { .. } => {
             "Connect a primary companion radio before authorizing map uploads."
         }
@@ -419,6 +433,9 @@ fn reject_cmd(cmd: RadioCmd, status: &Mutex<RadioStatus>, reason: &str) {
             let _ = reply.send(Err(reason.into()));
         }
         RadioCmd::FetchAdvertPath { reply, .. } => {
+            let _ = reply.send(Err(reason.into()));
+        }
+        RadioCmd::RefreshContact { reply, .. } => {
             let _ = reply.send(Err(reason.into()));
         }
         RadioCmd::SignBytes { reply, .. } => {
@@ -1419,6 +1436,19 @@ impl RadioHandle {
     ) -> oneshot::Receiver<Result<AdvertPathFetch, String>> {
         let (tx, rx) = oneshot::channel();
         self.pool.route_to_primary(RadioCmd::FetchAdvertPath {
+            pubkey_hex,
+            reply: tx,
+        });
+        rx
+    }
+
+    /// Sync contact fields from the companion, then request path / status / telemetry.
+    pub fn refresh_contact(
+        &self,
+        pubkey_hex: String,
+    ) -> oneshot::Receiver<Result<ContactRefreshResult, String>> {
+        let (tx, rx) = oneshot::channel();
+        self.pool.route_to_primary(RadioCmd::RefreshContact {
             pubkey_hex,
             reply: tx,
         });
@@ -4275,6 +4305,35 @@ async fn run_session(
                             let _ = reply.send(outcome);
                         });
                     }
+                    Some(RadioCmd::RefreshContact { pubkey_hex, reply }) => {
+                        let meshcore = meshcore.clone();
+                        let db = Arc::clone(db);
+                        let status = Arc::clone(status);
+                        let radio_id = radio;
+                        tokio::spawn(async move {
+                            let outcome = run_contact_refresh(
+                                db.as_ref(),
+                                &meshcore,
+                                status.as_ref(),
+                                radio_id,
+                                &pubkey_hex,
+                            )
+                            .await;
+                            match &outcome {
+                                Ok(result) => {
+                                    write_status(
+                                        status.as_ref(),
+                                        "connected",
+                                        result.summary.clone(),
+                                    );
+                                }
+                                Err(err) => {
+                                    write_status(status.as_ref(), "connected", err.clone());
+                                }
+                            }
+                            let _ = reply.send(outcome);
+                        });
+                    }
                     Some(RadioCmd::ProbeInfraStatus { pubkey_hex, reply }) => {
                         let meshcore = meshcore.clone();
                         let status = Arc::clone(status);
@@ -5737,6 +5796,201 @@ async fn run_operator_path_fetch(
 ) -> Result<AdvertPathFetch, String> {
     trace_rate_allows(pubkey_hex)?;
     fetch_advert_path(db, meshcore, pubkey_hex, None, "operator").await
+}
+
+const CONTACT_REFRESH_STATUS_TIMEOUT: Duration = Duration::from_secs(15);
+const CONTACT_REFRESH_TELEM_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Operator “Refresh contact”: pull companion contact row, path cache, then OTA status/telemetry.
+async fn run_contact_refresh(
+    db: &Db,
+    meshcore: &MeshCore,
+    status: &Mutex<RadioStatus>,
+    radio_id: i64,
+    pubkey_hex: &str,
+) -> Result<ContactRefreshResult, String> {
+    let key_hex = pubkey_hex.trim().to_ascii_lowercase();
+    if key_hex.len() != 64 || !key_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("Contact key must be 64 hex characters.".into());
+    }
+    trace_rate_allows(&key_hex)?;
+    let key = parse_pubkey_full(&key_hex)?;
+
+    write_status(
+        status,
+        "connected",
+        format!(
+            "Refreshing contact {}…",
+            &key_hex.chars().take(8).collect::<String>()
+        ),
+    );
+
+    // 1) Sync companion contact table so name / lat / lon / out_path match last heard advert.
+    // Do not pass `status` into sync_contacts — that flips sync_phase to Contacts and
+    // disables Messages compose until Ready is restored (easy to leave stuck).
+    {
+        let commands = match tokio::time::timeout(
+            Duration::from_secs(8),
+            meshcore.commands().lock(),
+        )
+        .await
+        {
+            Ok(guard) => guard,
+            Err(_) => {
+                write_sync(status, SyncPhase::Ready, "Companion ready", None);
+                return Err("Contact refresh skipped — radio busy.".into());
+            }
+        };
+        if let Err(err) = sync_contacts(
+            db,
+            &commands,
+            meshcore.dispatcher(),
+            None,
+            radio_id,
+        )
+        .await
+        {
+            hq_log!(debug, "contact refresh sync: {err}");
+        }
+    }
+    tokio::task::yield_now().await;
+
+    let node = db.get_node(&key_hex).ok().flatten();
+    let label = node
+        .as_ref()
+        .map(|n| {
+            let name = n.name.trim();
+            if name.is_empty() {
+                key_hex.chars().take(8).collect::<String>()
+            } else {
+                name.to_string()
+            }
+        })
+        .unwrap_or_else(|| key_hex.chars().take(8).collect());
+
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(ref n) = node {
+        if let (Some(lat), Some(lon)) = (n.lat, n.lon) {
+            if lat.abs() > 0.000_01 || lon.abs() > 0.000_01 {
+                parts.push(format!("GPS {lat:.4},{lon:.4}"));
+            }
+        }
+        if let Some(adv) = n.last_advert.filter(|t| *t > 0) {
+            parts.push(format!("last advert {adv}"));
+        }
+    }
+
+    // 2) Path from companion advert-path cache / contact out_path (local — no mesh TX).
+    match fetch_advert_path(db, meshcore, &key_hex, None, "operator").await {
+        Ok(fetch) => {
+            let hops = if fetch.hop_count == 0 && fetch.source == "direct" {
+                "direct".into()
+            } else {
+                format!("{} hop(s)", fetch.hop_count)
+            };
+            parts.push(format!("path {hops} ({})", fetch.source));
+        }
+        Err(_) => parts.push("no path yet".into()),
+    }
+    tokio::task::yield_now().await;
+
+    // 3) Over-the-air status request (battery / RF / uptime when the node answers).
+    let prior_tx = db
+        .get_infra_status_latest(&key_hex)
+        .ok()
+        .flatten()
+        .and_then(|r| r.tx_power_dbm);
+    {
+        let commands = match tokio::time::timeout(
+            Duration::from_secs(8),
+            meshcore.commands().lock(),
+        )
+        .await
+        {
+            Ok(guard) => guard,
+            Err(_) => {
+                parts.push("status skipped (radio busy)".into());
+                write_sync(status, SyncPhase::Ready, "Companion ready", None);
+                return Ok(ContactRefreshResult {
+                    summary: format!("{label}: {}", parts.join(" · ")),
+                });
+            }
+        };
+        match commands
+            .request_status_with_timeout(
+                Destination::Bytes(key.to_vec()),
+                CONTACT_REFRESH_STATUS_TIMEOUT,
+            )
+            .await
+        {
+            Ok(info) => {
+                persist_infra_status_probe(db, &key_hex, &info, prior_tx);
+                parts.push(format!(
+                    "status {} mV · RSSI {} · SNR {:.1}",
+                    info.battery_mv, info.last_rssi, info.snr
+                ));
+            }
+            Err(_) => parts.push("status: no reply".into()),
+        }
+    }
+    tokio::task::yield_now().await;
+
+    // 4) Over-the-air telemetry (CayenneLPP when supported).
+    {
+        let commands = match tokio::time::timeout(
+            Duration::from_secs(8),
+            meshcore.commands().lock(),
+        )
+        .await
+        {
+            Ok(guard) => guard,
+            Err(_) => {
+                parts.push("telemetry skipped (radio busy)".into());
+                write_sync(status, SyncPhase::Ready, "Companion ready", None);
+                return Ok(ContactRefreshResult {
+                    summary: format!("{label}: {}", parts.join(" · ")),
+                });
+            }
+        };
+        match commands
+            .request_telemetry_with_timeout(
+                Destination::Bytes(key.to_vec()),
+                CONTACT_REFRESH_TELEM_TIMEOUT,
+            )
+            .await
+        {
+            Ok(bytes) => {
+                let _ = db.audit(
+                    "contact_telemetry",
+                    &key_hex,
+                    &format!("{} bytes", bytes.len()),
+                );
+                // Keep a coarse sample so Overview can show activity; Cayenne decode is later.
+                let _ = db.insert_telemetry_sample(
+                    "contact_telem",
+                    bytes.len() as f64,
+                    0.0,
+                );
+                parts.push(format!("telemetry {} bytes", bytes.len()));
+            }
+            Err(_) => parts.push("telemetry: no reply".into()),
+        }
+    }
+
+    let summary = format!("{label}: {}", parts.join(" · "));
+    let _ = db.audit("contact_refresh", &key_hex, &summary);
+    // Always restore Ready so Messages compose stays usable after a refresh.
+    write_sync(status, SyncPhase::Ready, "Companion ready", None);
+    let companion_name = {
+        let guard = status.lock().unwrap_or_else(|err| err.into_inner());
+        if guard.connected_name.is_empty() {
+            "companion".into()
+        } else {
+            guard.connected_name.clone()
+        }
+    };
+    write_status(status, "connected", connected_detail(status, &companion_name));
+    Ok(ContactRefreshResult { summary })
 }
 
 async fn remember_route(db: &Db, meshcore: &MeshCore, pubkey_hex: &str, message_id: i64) {

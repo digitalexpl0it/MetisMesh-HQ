@@ -4406,14 +4406,12 @@ fn MessagesPage() -> Element {
     let dm_unread_total: i64 = dm_threads.iter().map(|t| t.unread_count).sum();
     let channel_mention_total: i64 = channels.iter().map(|c| c.unread_mentions).sum();
     let dm_mention_total: i64 = dm_threads.iter().map(|t| t.unread_mentions).sum();
-    // Only enable Send once the live session loop is up (sync_phase Ready).
-    // Mid-sync used to report state=connected while the command lock was held,
-    // so Send did nothing.
-    let linked = radio.state == "connected"
-        && matches!(
-            radio.sync_phase,
-            crate::radio::SyncPhase::Ready | crate::radio::SyncPhase::Idle
-        );
+    // Bootstrap keeps state as "connecting" until the session loop is Ready, so
+    // compose stays off during the first contact dump. Do not also require
+    // sync_phase Ready here — a background contact sync (or a stuck Contacts
+    // phase after Refresh) would disable Send while the companion is live.
+    let linked = radio.state == "connected";
+    let syncing = radio.sync_phase.is_active();
 
     // Restore scroll after prepending older messages.
     if let Some(prev_height) = scroll_preserve_height() {
@@ -4868,7 +4866,11 @@ fn MessagesPage() -> Element {
                             MeshTextCount { text: draft() }
                             if !linked {
                                 p { class: "text-xs text-muted-foreground",
-                                    "Connect a companion to send direct messages."
+                                    if syncing {
+                                        "Companion is still syncing — compose unlocks when Connected."
+                                    } else {
+                                        "Connect a companion to send direct messages."
+                                    }
                                 }
                             }
                         }
@@ -5606,7 +5608,15 @@ fn MessagesPage() -> Element {
                         }
                         div { class: "mt-2 flex flex-wrap items-center justify-between gap-2",
                             MeshTextCount { text: draft() }
-                            if !note().is_empty() {
+                            if !linked {
+                                p { class: "text-xs text-muted-foreground",
+                                    if syncing {
+                                        "Companion is still syncing — compose unlocks when Connected."
+                                    } else {
+                                        "Connect a companion to send on this channel."
+                                    }
+                                }
+                            } else if !note().is_empty() {
                                 p {
                                     class: if note().starts_with("Send failed") || note().starts_with("Not sent") {
                                         "text-xs text-red-300"
@@ -6525,7 +6535,11 @@ fn MessagesPage() -> Element {
                                 }
                                 if !linked {
                                     p { class: "text-xs text-muted-foreground",
-                                        "Connect a companion to send direct messages."
+                                        if syncing {
+                                            "Companion is still syncing — compose unlocks when Connected."
+                                        } else {
+                                            "Connect a companion to send direct messages."
+                                        }
                                     }
                                 }
                                 if !note().is_empty() {

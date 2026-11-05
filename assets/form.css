@@ -511,9 +511,8 @@ button.overview-stat:hover {
 .slide-down-shell {
   position: fixed;
   inset: 0;
-  /* Above page content, but panels are often nested under .hq-main (z-index 0),
-     so they still paint under .hq-topbar — clear that chrome with top padding. */
-  z-index: 40;
+  /* Above Messages splitter (z~90) and welcome (80). PIN slide stays higher. */
+  z-index: 110;
   display: flex;
   justify-content: center;
   align-items: flex-start;
@@ -2053,9 +2052,9 @@ option {
   background: rgba(61, 214, 140, 0.22);
 }
 
-/* Bluetooth PIN slide-down — must sit above .welcome-overlay (80). */
+/* Bluetooth PIN slide-down — above Details slide-downs (110) and welcome (80). */
 .pin-slide-shell {
-  z-index: 100;
+  z-index: 120;
 }
 
 /* First-run welcome wizard */

@@ -47,7 +47,10 @@
 - Name-only favorites show “awaiting advert” and auto-upgrade when the roster/advert resolves that name
 - Splitter cursor: await WebView style inject + native `ColResize` (fire-and-forget eval never applied)
 - Message bubble actions: drop redundant Pin/Contacts (Favorite already saves to Contacts → Pinned)
-- Awaiting-advert pin feedback is a toast (no longer a sticky rail banner); contact/DM right-click adds **Fetch advert** (companion path fetch)
+- Awaiting-advert pin feedback is a toast (no longer a sticky rail banner); contact/DM right-click **Refresh contact** syncs the companion row, path cache, then requests status + telemetry over the air
+- Messages rail right-click / gear: **Details** opens a slide-down for channel or contact/DM (identity, GPS, path, last status, RF, recent messages; Refresh contact on devices)
+- Slide-down panels sit above the Messages splitter (green grip was painting through Details)
+- Messages compose no longer stays disabled after contact refresh (sync_phase was left on Contacts); Send unlocks whenever companion state is Connected
 - Favorite feedback is toast-only (no sticky line under the composer); contact/DM hover tips use short name + 8-char prefix (not the full pubkey)
 
 ## 0.1.4.0 — 2026-11-04

@@ -3,11 +3,12 @@
 use dioxus::prelude::*;
 
 use crate::db::{unix_now, ChannelRow, DmThreadRow, MessagesRailSection, NodeRow};
+use crate::timefmt;
 
 use super::icons::{Icon, IconName};
 use super::state;
 use super::widgets::{
-    Button, ButtonKind, ConversationAvatar, Dialog, EmojiPickerButton, TextInput,
+    Button, ButtonKind, ConversationAvatar, Dialog, EmojiPickerButton, SlideDownPanel, TextInput,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -29,6 +30,13 @@ enum RailDialog {
         current: String,
     },
     AddContact,
+}
+
+/// Slide-down details for a rail row (channel name, or contact/DM pubkey / `name:` key).
+#[derive(Clone, PartialEq, Eq)]
+enum RailDetails {
+    Channel(String),
+    Contact(String),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -128,6 +136,8 @@ pub fn MessagesRail(
 ) -> Element {
     let mut tab = use_signal(|| RailTab::Channels);
     let mut dialog = use_signal(|| None::<RailDialog>);
+    let mut details = use_signal(|| None::<RailDetails>);
+    let mut details_tick = use_signal(|| 0u64);
     let mut section_name = use_signal(String::new);
     let mut section_emoji = use_signal(String::new);
     let mut contact_key = use_signal(String::new);
@@ -421,6 +431,7 @@ pub fn MessagesRail(
                                         active,
                                         favorite: true,
                                         sections: chat_custom_sections.clone(),
+                                        details,
                                         on_add_section: move |(kind, key)| {
                                             section_name.set(String::new());
                                             section_emoji.set(String::new());
@@ -513,6 +524,7 @@ pub fn MessagesRail(
                                                             active,
                                                             favorite: fav,
                                                             sections: chat_custom_sections.clone(),
+                                                            details,
                                                             on_add_section: move |(kind, key)| {
                                                                 section_name.set(String::new());
                                                                 section_emoji.set(String::new());
@@ -576,6 +588,7 @@ pub fn MessagesRail(
                                         active,
                                         favorite: fav,
                                         sections: chat_custom_sections.clone(),
+                                        details,
                                         on_add_section: move |(kind, key)| {
                                             section_name.set(String::new());
                                             section_emoji.set(String::new());
@@ -657,6 +670,7 @@ pub fn MessagesRail(
                                         active,
                                         favorite: true,
                                         sections: dm_custom_sections.clone(),
+                                        details,
                                         on_add_section: move |(kind, key)| {
                                             section_name.set(String::new());
                                             section_emoji.set(String::new());
@@ -747,6 +761,7 @@ pub fn MessagesRail(
                                                             active,
                                                             favorite: fav,
                                                             sections: dm_custom_sections.clone(),
+                                                            details,
                                                             on_add_section: move |(kind, key)| {
                                                                 section_name.set(String::new());
                                                                 section_emoji.set(String::new());
@@ -817,6 +832,7 @@ pub fn MessagesRail(
                                         active,
                                         favorite: fav,
                                         sections: dm_custom_sections.clone(),
+                                        details,
                                         on_add_section: move |(kind, key)| {
                                             section_name.set(String::new());
                                             section_emoji.set(String::new());
@@ -915,6 +931,7 @@ pub fn MessagesRail(
                                         active,
                                         pinned: true,
                                         sections: contact_custom_sections.clone(),
+                                        details,
                                         on_add_section: move |(kind, key)| {
                                             section_name.set(String::new());
                                             section_emoji.set(String::new());
@@ -1025,6 +1042,7 @@ pub fn MessagesRail(
                                                         active,
                                                         pinned: pinned_on,
                                                         sections: contact_custom_sections.clone(),
+                                                        details,
                                                         on_add_section: move |(kind, key)| {
                                                             section_name.set(String::new());
                                                             section_emoji.set(String::new());
@@ -1054,6 +1072,7 @@ pub fn MessagesRail(
                                                         active,
                                                         pinned: true,
                                                         sections: contact_custom_sections.clone(),
+                                                        details,
                                                         on_add_section: move |(kind, key)| {
                                                             section_name.set(String::new());
                                                             section_emoji.set(String::new());
@@ -1114,6 +1133,7 @@ pub fn MessagesRail(
                                         active,
                                         pinned: pinned_on,
                                         sections: contact_custom_sections.clone(),
+                                        details,
                                         on_add_section: move |(kind, key)| {
                                             section_name.set(String::new());
                                             section_emoji.set(String::new());
@@ -1168,6 +1188,7 @@ pub fn MessagesRail(
                                         active,
                                         pinned: pinned_on,
                                         sections: contact_custom_sections.clone(),
+                                        details,
                                         on_add_section: move |(kind, key)| {
                                             section_name.set(String::new());
                                             section_emoji.set(String::new());
@@ -1390,6 +1411,389 @@ pub fn MessagesRail(
                 }
             }
         }
+        RailDetailsSlide {
+            target: details(),
+            tick: details_tick(),
+            on_close: move |_| details.set(None),
+            on_refreshed: move |_| {
+                details_tick.with_mut(|n| *n = n.wrapping_add(1));
+                bump();
+            },
+        }
+    }
+}
+
+fn rail_format_time(seconds: Option<i64>) -> String {
+    let Some(seconds) = seconds else {
+        return "—".into();
+    };
+    timefmt::format_stamp(&state().db, seconds)
+}
+
+fn contact_type_label(contact_type: u8) -> &'static str {
+    match contact_type {
+        2 => "Repeater",
+        3 => "Room server",
+        4 => "Sensor",
+        1 => "Chat",
+        _ => "Unknown",
+    }
+}
+
+#[component]
+fn RailDetailField(label: String, children: Element) -> Element {
+    rsx! {
+        div { class: "min-w-0",
+            p { class: "mb-0.5 text-[0.65rem] uppercase tracking-[0.14em] text-muted-foreground", "{label}" }
+            div { class: "text-sm text-foreground", {children} }
+        }
+    }
+}
+
+#[component]
+fn RailDetailsSlide(
+    target: Option<RailDetails>,
+    tick: u64,
+    on_close: EventHandler<()>,
+    on_refreshed: EventHandler<()>,
+) -> Element {
+    let _ = tick;
+    let open = target.is_some();
+    let (title, subtitle, icon) = match target.as_ref() {
+        Some(RailDetails::Channel(name)) => (
+            name.clone(),
+            "Channel details stored on this HQ.".to_string(),
+            IconName::Radio,
+        ),
+        Some(RailDetails::Contact(key)) if key.starts_with("name:") => (
+            key.trim_start_matches("name:").to_string(),
+            "Name-only pin — waiting for a radio advert.".to_string(),
+            IconName::Users,
+        ),
+        Some(RailDetails::Contact(_)) => (
+            "Contact".into(),
+            "Everything HQ has stored for this radio.".to_string(),
+            IconName::Users,
+        ),
+        None => (String::new(), String::new(), IconName::Help),
+    };
+
+    let channel = match target.as_ref() {
+        Some(RailDetails::Channel(name)) => state()
+            .db
+            .list_channels()
+            .ok()
+            .and_then(|rows| rows.into_iter().find(|c| &c.name == name)),
+        _ => None,
+    };
+    let contact_key = match target.as_ref() {
+        Some(RailDetails::Contact(key)) => Some(key.clone()),
+        _ => None,
+    };
+    let node = contact_key
+        .as_ref()
+        .filter(|k| !k.starts_with("name:"))
+        .and_then(|k| state().db.get_node(k).ok().flatten());
+    let title = if let Some(ref n) = node {
+        let label = node_label(n);
+        if label.is_empty() {
+            title
+        } else {
+            label
+        }
+    } else {
+        title
+    };
+    let path = contact_key
+        .as_ref()
+        .and_then(|k| state().db.latest_path_for_pubkey(k).ok().flatten());
+    let status = contact_key
+        .as_ref()
+        .and_then(|k| state().db.get_infra_status_latest(k).ok().flatten());
+    let rf = contact_key
+        .as_ref()
+        .and_then(|k| state().db.rf_samples_for_pubkey(k, 6).ok())
+        .unwrap_or_default();
+    let messages = contact_key
+        .as_ref()
+        .filter(|k| !k.starts_with("name:"))
+        .and_then(|k| state().db.messages_for_pubkey(k, 6).ok())
+        .unwrap_or_default();
+    let dm_thread = contact_key.as_ref().and_then(|k| {
+        state()
+            .db
+            .list_dm_threads()
+            .ok()
+            .and_then(|rows| rows.into_iter().find(|t| &t.pubkey == k))
+    });
+    let raw_pretty = contact_key
+        .as_ref()
+        .and_then(|k| state().db.node_raw_json(k).ok().flatten())
+        .and_then(|raw| {
+            serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .and_then(|v| serde_json::to_string_pretty(&v).ok())
+        });
+    let refresh_key = contact_key
+        .clone()
+        .filter(|k| !k.starts_with("name:") && k.len() == 64);
+    let name_only = contact_key
+        .as_ref()
+        .is_some_and(|k| k.starts_with("name:"));
+
+    rsx! {
+        SlideDownPanel {
+            open,
+            title: title.clone(),
+            subtitle: subtitle.clone(),
+            icon: Some(icon),
+            on_close: move |_| on_close.call(()),
+            if let Some(ch) = channel.as_ref() {
+                div { class: "flex flex-col gap-4 text-sm",
+                    div { class: "grid gap-3 sm:grid-cols-2",
+                        RailDetailField { label: "Slot".to_string(), "{ch.slot}" }
+                        RailDetailField { label: "Visibility".to_string(), "{ch.visibility}" }
+                        RailDetailField { label: "Role".to_string(), "{ch.role}" }
+                        RailDetailField { label: "Active".to_string(),
+                            if ch.active { "Yes" } else { "No" }
+                        }
+                        RailDetailField { label: "Messages".to_string(), "{ch.message_count}" }
+                        RailDetailField { label: "Unread".to_string(), "{ch.unread_count}" }
+                        RailDetailField { label: "Last message".to_string(),
+                            "{rail_format_time(ch.last_message_at)}"
+                        }
+                        RailDetailField { label: "Keep".to_string(),
+                            { ch.message_keep.clone().unwrap_or_else(|| "default".into()) }
+                        }
+                        RailDetailField { label: "Region".to_string(),
+                            { ch.region.clone().unwrap_or_else(|| "—".into()) }
+                        }
+                        RailDetailField { label: "Appearance".to_string(),
+                            if ch.has_appearance_override { "Custom" } else { "Default" }
+                        }
+                    }
+                    if let Some(preview) = ch.last_text.as_ref() {
+                        div { class: "rounded-md border border-border bg-background/60 p-3",
+                            p { class: "mb-2 text-xs uppercase tracking-[0.16em] text-muted-foreground",
+                                "Last text"
+                            }
+                            p { class: "text-xs break-words text-muted-foreground", "{preview}" }
+                        }
+                    }
+                }
+            } else if name_only {
+                div { class: "flex flex-col gap-3 text-sm",
+                    p { class: "text-muted-foreground",
+                        "This pin is name-only (from channel chat). HQ has no public key yet, so status, path, and telemetry cannot be requested. It upgrades automatically when the companion hears their advert, or when you Add their key."
+                    }
+                    RailDetailField { label: "Bookmark".to_string(),
+                        span { class: "break-all font-mono text-xs",
+                            { contact_key.clone().unwrap_or_default() }
+                        }
+                    }
+                }
+            } else if let Some(node) = node.as_ref() {
+                div { class: "flex flex-col gap-4 text-sm",
+                    div { class: "flex flex-wrap gap-2",
+                        if let Some(key) = refresh_key.clone() {
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| {
+                                    if state().radio.snapshot().state != "connected" {
+                                        crate::toast::push(
+                                            crate::toast::ToastKind::Warn,
+                                            "Connect a companion before refreshing.",
+                                        );
+                                        return;
+                                    }
+                                    crate::toast::push(
+                                        crate::toast::ToastKind::Info,
+                                        "Refreshing contact…",
+                                    );
+                                    let rx = state().radio.refresh_contact(key.clone());
+                                    spawn(async move {
+                                        match rx.await.unwrap_or_else(|_| Err("Radio task ended.".into())) {
+                                            Ok(refresh) => {
+                                                crate::toast::push(
+                                                    crate::toast::ToastKind::Success,
+                                                    refresh.summary,
+                                                );
+                                                on_refreshed.call(());
+                                            }
+                                            Err(err) => crate::toast::push(
+                                                crate::toast::ToastKind::Error,
+                                                err,
+                                            ),
+                                        }
+                                    });
+                                },
+                                Icon { name: IconName::Signal, size: 14 }
+                                "Refresh contact"
+                            }
+                        }
+                    }
+                    div { class: "grid gap-3 sm:grid-cols-2",
+                        RailDetailField { label: "Type".to_string(),
+                            "{contact_type_label(node.contact_type)}"
+                        }
+                        RailDetailField { label: "Enrollment".to_string(),
+                            "{node.enrollment.label()}"
+                        }
+                        RailDetailField { label: "Prefix".to_string(),
+                            span { class: "font-mono text-xs", "{node.prefix}" }
+                        }
+                        RailDetailField { label: "Last heard".to_string(),
+                            "{rail_format_time(node.last_heard)}"
+                        }
+                        RailDetailField { label: "Last advert".to_string(),
+                            "{rail_format_time(node.last_advert)}"
+                        }
+                        RailDetailField { label: "Path length".to_string(),
+                            if node.path_len >= 0 { "{node.path_len}" } else { "—" }
+                        }
+                    }
+                    div { class: "rounded-md border border-border bg-background/60 p-3",
+                        p { class: "mb-2 text-xs uppercase tracking-[0.16em] text-muted-foreground",
+                            "Identity"
+                        }
+                        p { class: "break-all font-mono text-xs leading-relaxed", "{node.pubkey}" }
+                        if let Some(req) = node.requested_name.as_ref() {
+                            if !req.is_empty() {
+                                p { class: "mt-2 text-xs text-muted-foreground",
+                                    "Requested name: {req}"
+                                }
+                            }
+                        }
+                    }
+                    div { class: "rounded-md border border-border bg-background/60 p-3",
+                        p { class: "mb-2 text-xs uppercase tracking-[0.16em] text-muted-foreground",
+                            "Location"
+                        }
+                        if let (Some(lat), Some(lon)) = (node.lat, node.lon) {
+                            p { class: "font-mono text-xs", "{lat:.6}, {lon:.6}" }
+                        } else {
+                            p { class: "text-muted-foreground", "No GPS fix stored (or 0,0 ignored)." }
+                        }
+                    }
+                    div { class: "rounded-md border border-border bg-background/60 p-3",
+                        p { class: "mb-2 text-xs uppercase tracking-[0.16em] text-muted-foreground",
+                            "Path"
+                        }
+                        if let Some(p) = path.as_ref() {
+                            p { class: "text-xs",
+                                "Source {p.source} · hash size {p.hash_size} · {rail_format_time(Some(p.created_at))}"
+                            }
+                            if !p.path.is_empty() {
+                                p { class: "mt-1 break-all font-mono text-[0.7rem] text-muted-foreground",
+                                    "{hex::encode(&p.path)}"
+                                }
+                            }
+                        } else if !node.hop_bytes.is_empty() {
+                            p { class: "break-all font-mono text-[0.7rem] text-muted-foreground",
+                                "{hex::encode(&node.hop_bytes)}"
+                            }
+                        } else {
+                            p { class: "text-muted-foreground", "No path stored yet." }
+                        }
+                    }
+                    div { class: "rounded-md border border-border bg-background/60 p-3",
+                        p { class: "mb-2 text-xs uppercase tracking-[0.16em] text-muted-foreground",
+                            "Last status probe"
+                        }
+                        if let Some(s) = status.as_ref() {
+                            ul { class: "space-y-1 text-xs text-muted-foreground",
+                                li { "Probed {rail_format_time(Some(s.probed_at))}" }
+                                li { class: "tabular-nums text-foreground",
+                                    "Battery {s.battery_mv} mV · noise {s.noise_floor} · RSSI {s.last_rssi} · SNR {s.snr:.1}"
+                                }
+                                li { class: "tabular-nums text-foreground",
+                                    "Uptime {s.uptime_s}s · RX {s.nb_recv} · TX {s.nb_sent}"
+                                }
+                            }
+                        } else {
+                            p { class: "text-muted-foreground",
+                                "No status sample yet. Use Refresh contact (uses airtime)."
+                            }
+                        }
+                    }
+                    div { class: "rounded-md border border-border bg-background/60 p-3",
+                        p { class: "mb-2 text-xs uppercase tracking-[0.16em] text-muted-foreground",
+                            "RF samples"
+                        }
+                        if rf.is_empty() {
+                            p { class: "text-muted-foreground", "No noise / RSSI / SNR samples yet." }
+                        } else {
+                            ul { class: "space-y-1 text-xs",
+                                for (noise, rssi, snr, at) in rf.iter() {
+                                    li { class: "flex flex-wrap gap-x-3 text-muted-foreground",
+                                        span { "{rail_format_time(Some(*at))}" }
+                                        span { class: "tabular-nums text-foreground", "noise {noise}" }
+                                        span { class: "tabular-nums text-foreground", "rssi {rssi}" }
+                                        span { class: "tabular-nums text-foreground", "snr {snr:.1}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(thread) = dm_thread.as_ref() {
+                        div { class: "rounded-md border border-border bg-background/60 p-3",
+                            p { class: "mb-2 text-xs uppercase tracking-[0.16em] text-muted-foreground",
+                                "Direct messages"
+                            }
+                            p { class: "text-xs text-muted-foreground",
+                                "{thread.message_count} message(s) · unread {thread.unread_count} · last {rail_format_time(thread.last_message_at)}"
+                            }
+                        }
+                    }
+                    div { class: "rounded-md border border-border bg-background/60 p-3",
+                        p { class: "mb-2 text-xs uppercase tracking-[0.16em] text-muted-foreground",
+                            "Recent messages"
+                        }
+                        if messages.is_empty() {
+                            p { class: "text-muted-foreground", "No messages attributed to this pubkey yet." }
+                        } else {
+                            ul { class: "space-y-2",
+                                for msg in messages.iter() {
+                                    li { class: "rounded border border-border/70 bg-card/40 px-2.5 py-2",
+                                        div { class: "flex flex-wrap gap-2 text-[0.7rem] text-muted-foreground",
+                                            span { "{rail_format_time(Some(msg.received_at))}" }
+                                            span { class: "uppercase", "{msg.direction}" }
+                                            if let Some(hops) = msg.hop_count {
+                                                span { "{hops} hop(s)" }
+                                            }
+                                        }
+                                        p { class: "mt-1 text-xs break-words",
+                                            {
+                                                let t = msg.text.clone();
+                                                if t.chars().count() > 160 {
+                                                    format!("{}…", t.chars().take(160).collect::<String>())
+                                                } else {
+                                                    t
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(raw) = raw_pretty.as_ref() {
+                        details { class: "rounded-md border border-border bg-background/60 p-3",
+                            summary { class: "cursor-pointer text-xs uppercase tracking-[0.16em] text-muted-foreground",
+                                "Raw contact snapshot (JSON)"
+                            }
+                            pre { class: "mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all font-mono text-[0.7rem] text-muted-foreground",
+                                "{raw}"
+                            }
+                        }
+                    }
+                }
+            } else if contact_key.is_some() {
+                p { class: "text-sm text-muted-foreground",
+                    "No roster row for this key yet. Refresh after the companion hears them, or Add the public key."
+                }
+            }
+        }
     }
 }
 
@@ -1470,6 +1874,7 @@ fn RailItemMenuPanel(
     on_delete: EventHandler<()>,
     on_clear: EventHandler<()>,
     on_add_section: EventHandler<(String, String)>,
+    on_details: EventHandler<()>,
 ) -> Element {
     let mut move_open = use_signal(|| false);
     let fav_kind = item_kind.clone();
@@ -1537,12 +1942,24 @@ fn RailItemMenuPanel(
                     Icon { name: IconName::Star, size: 12 }
                     if favorite { "Remove favorite" } else { "Add to favorites" }
                 }
+            button {
+                r#type: "button",
+                class: "rail-item-menu-item",
+                role: "menuitem",
+                title: "Open details for this item",
+                onclick: move |_| {
+                    on_details.call(());
+                    on_close.call(());
+                },
+                Icon { name: IconName::Help, size: 12 }
+                "Details"
+            }
             if show_fetch_path {
                 button {
                     r#type: "button",
                     class: "rail-item-menu-item",
                     role: "menuitem",
-                    title: "Ask the companion for this contact's advert path (uses airtime)",
+                    title: "Sync companion contact, fetch path, then request status and telemetry (uses airtime)",
                     onclick: move |_| {
                         on_close.call(());
                         if fetch_key.starts_with("name:") {
@@ -1555,34 +1972,25 @@ fn RailItemMenuPanel(
                         if state().radio.snapshot().state != "connected" {
                             crate::toast::push(
                                 crate::toast::ToastKind::Warn,
-                                "Connect a companion before fetching a path.",
+                                "Connect a companion before refreshing a contact.",
                             );
                             return;
                         }
                         crate::toast::push(
                             crate::toast::ToastKind::Info,
-                            "Fetching advert path…",
+                            "Refreshing contact (path, status, telemetry)…",
                         );
                         let key = fetch_key.clone();
-                        let rx = state().radio.fetch_advert_path(key.clone());
+                        let rx = state().radio.refresh_contact(key);
                         spawn(async move {
                             let result = rx
                                 .await
                                 .unwrap_or_else(|_| Err("Radio task ended.".into()));
                             match result {
-                                Ok(fetch) => {
-                                    let hops = if fetch.hop_count == 0
-                                        && fetch.source == "direct"
-                                    {
-                                        "direct (0 hops)".into()
-                                    } else {
-                                        format!("{} hop(s)", fetch.hop_count)
-                                    };
-                                    crate::toast::push(
-                                        crate::toast::ToastKind::Success,
-                                        format!("Path updated · {hops} ({})", fetch.source),
-                                    );
-                                }
+                                Ok(refresh) => crate::toast::push(
+                                    crate::toast::ToastKind::Success,
+                                    refresh.summary,
+                                ),
                                 Err(err) => crate::toast::push(
                                     crate::toast::ToastKind::Error,
                                     err,
@@ -1591,7 +1999,7 @@ fn RailItemMenuPanel(
                         });
                     },
                     Icon { name: IconName::Signal, size: 12 }
-                    "Fetch advert"
+                    "Refresh contact"
                 }
             }
             div { class: "rail-item-menu-flyout-wrap",
@@ -1716,6 +2124,7 @@ fn ChannelRailItem(
     active: bool,
     favorite: bool,
     sections: Vec<MessagesRailSection>,
+    details: Signal<Option<RailDetails>>,
     on_select: EventHandler<String>,
     on_appearance: EventHandler<String>,
     on_delete: EventHandler<String>,
@@ -1732,6 +2141,7 @@ fn ChannelRailItem(
     let appear_name = name.clone();
     let fav_name = name.clone();
     let menu_key = name.clone();
+    let details_key = name.clone();
     let mut menu = use_signal(|| None::<RailItemMenuAnchor>);
     rsx! {
         div {
@@ -1821,6 +2231,9 @@ fn ChannelRailItem(
                         on_delete: move |_| on_delete.call(delete_name.clone()),
                         on_clear: move |_| {},
                         on_add_section: move |pair| on_add_section.call(pair),
+                        on_details: move |_| {
+                            details.set(Some(RailDetails::Channel(details_key.clone())));
+                        },
                     }
                 }
             }
@@ -1834,6 +2247,7 @@ fn DmRailItem(
     active: bool,
     favorite: bool,
     sections: Vec<MessagesRailSection>,
+    details: Signal<Option<RailDetails>>,
     on_select: EventHandler<String>,
     on_clear: EventHandler<(String, String)>,
     on_changed: EventHandler<()>,
@@ -1848,6 +2262,7 @@ fn DmRailItem(
     let clear_label = label.clone();
     let fav_key = pubkey.clone();
     let menu_key = pubkey.clone();
+    let details_key = pubkey.clone();
     let hover_title = rail_item_hover_title(&label, &pubkey, "");
     let mut menu = use_signal(|| None::<RailItemMenuAnchor>);
     rsx! {
@@ -1932,6 +2347,9 @@ fn DmRailItem(
                         on_delete: move |_| {},
                         on_clear: move |_| on_clear.call((clear_key.clone(), clear_label.clone())),
                         on_add_section: move |pair| on_add_section.call(pair),
+                        on_details: move |_| {
+                            details.set(Some(RailDetails::Contact(details_key.clone())));
+                        },
                     }
                 }
             }
@@ -1947,6 +2365,7 @@ fn ContactNodeItem(
     active: bool,
     pinned: bool,
     sections: Vec<MessagesRailSection>,
+    details: Signal<Option<RailDetails>>,
     on_select: EventHandler<String>,
     on_changed: EventHandler<()>,
     on_add_section: EventHandler<(String, String)>,
@@ -1955,6 +2374,7 @@ fn ContactNodeItem(
     let pin_key = pubkey.clone();
     let pin_label = label.clone();
     let menu_key = pubkey.clone();
+    let details_key = pubkey.clone();
     let mut menu = use_signal(|| None::<RailItemMenuAnchor>);
     let kind_note = match contact_type {
         2 => "Repeater",
@@ -2053,6 +2473,9 @@ fn ContactNodeItem(
                         on_delete: move |_| {},
                         on_clear: move |_| {},
                         on_add_section: move |pair| on_add_section.call(pair),
+                        on_details: move |_| {
+                            details.set(Some(RailDetails::Contact(details_key.clone())));
+                        },
                     }
                 }
             }

@@ -2874,6 +2874,19 @@ pub fn resolve_contact_pubkey(
     ))
 }
 
+/// Resolve a channel-bubble sender to a full 64-char pubkey for opening a DM.
+/// Name-only bookmarks are rejected — DMs need a real key on the companion.
+pub fn resolve_dm_pubkey(known: Option<&str>, display_name: &str) -> Result<String, String> {
+    let (key, _) = resolve_contact_pubkey(known, display_name)?;
+    if !is_hex_pubkey(&key) {
+        return Err(
+            "No public key for this sender yet — wait for their advert, or Add their key from Contacts."
+                .into(),
+        );
+    }
+    Ok(key)
+}
+
 fn is_hex_pubkey(key: &str) -> bool {
     key.len() == 64 && key.chars().all(|c| c.is_ascii_hexdigit())
 }

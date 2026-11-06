@@ -4987,6 +4987,14 @@ fn MessagesPage() -> Element {
                     session.scrolled = true;
                     read_session.set(Some(session));
                 }
+                // Only auto-clear when the thread cannot scroll the break away
+                // (short unread that already fits on screen).
+                if show_banner {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    if channel_unread_is_caught_up().await {
+                        dismiss_channel_new_banner(read_session, refresh);
+                    }
+                }
             });
         } else if let Some(mut session) = read_session() {
             let unread = channel.unread_count.max(0) as usize;
@@ -5450,35 +5458,32 @@ fn MessagesPage() -> Element {
                                                                         let resolve_name = resolve_name.clone();
                                                                         let known = known.clone();
                                                                         move |_| {
-                                                                            let pubkey = known
-                                                                                .clone()
-                                                                                .filter(|pk| {
-                                                                                    !pk.is_empty()
-                                                                                        && !pk.starts_with("name:")
-                                                                                })
-                                                                                .or_else(|| {
-                                                                                    state()
-                                                                                        .db
-                                                                                        .unique_node_by_display_name(
-                                                                                            &resolve_name,
-                                                                                        )
-                                                                                        .ok()
-                                                                                        .flatten()
-                                                                                        .map(|n| n.pubkey)
-                                                                                });
-                                                                            let Some(pubkey) = pubkey else {
-                                                                                status_note(
-                                                                                    "No public key for this sender yet — wait for their advert, or Add their key from Contacts.",
-                                                                                );
-                                                                                return;
-                                                                            };
-                                                                            selected_channel.set(None);
-                                                                            reply_target.set(None);
-                                                                            read_session.set(None);
-                                                                            msg_window.set(None);
-                                                                            draft.set(String::new());
-                                                                            note.set(String::new());
-                                                                            selected_dm.set(Some(pubkey));
+                                                                            match messages_rail::resolve_dm_pubkey(
+                                                                                known.as_deref(),
+                                                                                &resolve_name,
+                                                                            ) {
+                                                                                Ok(pubkey) => {
+                                                                                    reply_target.set(None);
+                                                                                    read_session.set(None);
+                                                                                    msg_window.set(None);
+                                                                                    draft.set(String::new());
+                                                                                    note.set(String::new());
+                                                                                    // Set DM first so the next paint lands on the
+                                                                                    // DM branch (it is checked before channel).
+                                                                                    selected_dm.set(Some(pubkey));
+                                                                                    selected_channel.set(None);
+                                                                                    rail_epoch.with_mut(|n| {
+                                                                                        *n = n.wrapping_add(1)
+                                                                                    });
+                                                                                    refresh.set(refresh() + 1);
+                                                                                }
+                                                                                Err(err) => {
+                                                                                    crate::toast::push(
+                                                                                        crate::toast::ToastKind::Warn,
+                                                                                        err,
+                                                                                    );
+                                                                                }
+                                                                            }
                                                                         }
                                                                     },
                                                                     Icon { name: IconName::Messages, size: 12 }
@@ -6742,22 +6747,27 @@ struct ChannelReadSession {
 
 async fn channel_unread_is_caught_up() -> bool {
     // Eval code runs as an async function body; the value must be returned.
-    // When the New messages divider is present, only clear after it has been
-    // scrolled into / past the upper third — do not treat "near bottom" alone
-    // as caught up (that wiped the banner + badge as soon as unread fit on screen).
+    // Clear the New messages break once it reaches the top of the pane (scrolled
+    // past), not an arbitrary mid-viewport fraction. If the whole thread fits
+    // with no room to scroll the break away, treat visible unread as caught up.
     let result = document::eval(
         r#"return (() => {
           const scroller = document.getElementById('channel-scroller');
           if (!scroller) return false;
-          const marker = document.getElementById('new-messages-marker');
-          if (marker) {
-            const s = scroller.getBoundingClientRect();
-            const m = marker.getBoundingClientRect();
-            return m.bottom < s.top + s.height * 0.35;
-          }
           const remaining =
             scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
-          return remaining < 56;
+          const marker = document.getElementById('new-messages-marker');
+          if (!marker) return remaining < 56;
+          const s = scroller.getBoundingClientRect();
+          const m = marker.getBoundingClientRect();
+          // Break has hit / cleared the top edge of the scroll pane.
+          if (m.bottom <= s.top + 24) return true;
+          const maxScroll = scroller.scrollHeight - scroller.clientHeight;
+          if (maxScroll < 32) {
+            // Nothing to scroll — new rows are already on screen.
+            return m.bottom > s.top && m.top < s.bottom;
+          }
+          return false;
         })();"#,
     )
     .await;

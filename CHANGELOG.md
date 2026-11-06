@@ -58,7 +58,8 @@
 - **Refresh contact** shows a throbber beside the rail name (and on the Details button) until path/status/telemetry finish
 - Channel **New messages** divider + unread badge stay until you scroll past the break — including when the channel is already open and live traffic arrives (no longer auto-cleared just because unread fit on screen)
 - New messages divider still appears when last-read is older than the loaded window (badge with no break was dropping the cursor outside the last 20 rows)
-- Channel bubble action **DM** opens a direct thread with that sender (needs a resolved public key; otherwise prompts to wait for advert / Add key)
+- New messages break clears once it reaches the top of the pane (not an arbitrary mid-screen band); short threads that fit on screen still clear without a fake scroll
+- Channel bubble action **DM** opens a direct thread with that sender (same key resolver as Favorite — prefix / roster / prior messages; toast when no pubkey yet)
 
 ## 0.1.4.0 — 2026-11-04
 

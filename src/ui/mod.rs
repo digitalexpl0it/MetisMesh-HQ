@@ -4988,10 +4988,11 @@ fn MessagesPage() -> Element {
                     read_session.set(Some(session));
                 }
                 // Only auto-clear when the thread cannot scroll the break away
-                // (short unread that already fits on screen).
+                // (short unread that already fits on screen). Do not treat
+                // "landed near bottom" alone as caught up on open.
                 if show_banner {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    if channel_unread_is_caught_up().await {
+                    if channel_unread_is_caught_up(false).await {
                         dismiss_channel_new_banner(read_session, refresh);
                     }
                 }
@@ -5187,7 +5188,9 @@ fn MessagesPage() -> Element {
                         onscroll: move |_| {
                             if read_session().as_ref().is_some_and(|session| session.show_banner) {
                                 spawn(async move {
-                                    if channel_unread_is_caught_up().await {
+                                    // Scroll past the break, or hit the bottom with
+                                    // nowhere left to scroll — both clear the divider.
+                                    if channel_unread_is_caught_up(true).await {
                                         dismiss_channel_new_banner(read_session, refresh);
                                     }
                                 });
@@ -5458,32 +5461,19 @@ fn MessagesPage() -> Element {
                                                                         let resolve_name = resolve_name.clone();
                                                                         let known = known.clone();
                                                                         move |_| {
-                                                                            match messages_rail::resolve_dm_pubkey(
+                                                                            open_dm_from_channel_bubble(
                                                                                 known.as_deref(),
                                                                                 &resolve_name,
-                                                                            ) {
-                                                                                Ok(pubkey) => {
-                                                                                    reply_target.set(None);
-                                                                                    read_session.set(None);
-                                                                                    msg_window.set(None);
-                                                                                    draft.set(String::new());
-                                                                                    note.set(String::new());
-                                                                                    // Set DM first so the next paint lands on the
-                                                                                    // DM branch (it is checked before channel).
-                                                                                    selected_dm.set(Some(pubkey));
-                                                                                    selected_channel.set(None);
-                                                                                    rail_epoch.with_mut(|n| {
-                                                                                        *n = n.wrapping_add(1)
-                                                                                    });
-                                                                                    refresh.set(refresh() + 1);
-                                                                                }
-                                                                                Err(err) => {
-                                                                                    crate::toast::push(
-                                                                                        crate::toast::ToastKind::Warn,
-                                                                                        err,
-                                                                                    );
-                                                                                }
-                                                                            }
+                                                                                selected_channel,
+                                                                                selected_dm,
+                                                                                reply_target,
+                                                                                read_session,
+                                                                                msg_window,
+                                                                                draft,
+                                                                                note,
+                                                                                rail_epoch,
+                                                                                refresh,
+                                                                            );
                                                                         }
                                                                     },
                                                                     Icon { name: IconName::Messages, size: 12 }
@@ -6745,13 +6735,15 @@ struct ChannelReadSession {
     scrolled: bool,
 }
 
-async fn channel_unread_is_caught_up() -> bool {
+/// `allow_bottom`: when true (operator scroll), also clear once the pane is at
+/// the bottom with nowhere left to scroll. When false (channel open settle),
+/// only clear for a non-scrollable short thread or after the break hits the top
+/// — otherwise opening with unread that fits would wipe the divider immediately.
+async fn channel_unread_is_caught_up(allow_bottom: bool) -> bool {
     // Eval code runs as an async function body; the value must be returned.
-    // Clear the New messages break once it reaches the top of the pane (scrolled
-    // past), not an arbitrary mid-viewport fraction. If the whole thread fits
-    // with no room to scroll the break away, treat visible unread as caught up.
-    let result = document::eval(
-        r#"return (() => {
+    let result = document::eval(&format!(
+        r#"return (() => {{
+          const allowBottom = {allow_bottom};
           const scroller = document.getElementById('channel-scroller');
           if (!scroller) return false;
           const remaining =
@@ -6762,14 +6754,16 @@ async fn channel_unread_is_caught_up() -> bool {
           const m = marker.getBoundingClientRect();
           // Break has hit / cleared the top edge of the scroll pane.
           if (m.bottom <= s.top + 24) return true;
+          // Operator scrolled to the end — nothing left below the break.
+          if (allowBottom && remaining < 56) return true;
           const maxScroll = scroller.scrollHeight - scroller.clientHeight;
-          if (maxScroll < 32) {
+          if (maxScroll < 32) {{
             // Nothing to scroll — new rows are already on screen.
             return m.bottom > s.top && m.top < s.bottom;
-          }
+          }}
           return false;
-        })();"#,
-    )
+        }})();"#
+    ))
     .await;
     result.ok().and_then(|value| value.as_bool()) == Some(true)
 }
@@ -6789,6 +6783,121 @@ fn dismiss_channel_new_banner(
     session.new_count = 0;
     read_session.set(Some(session));
     refresh.set(refresh() + 1);
+}
+
+fn open_dm_thread_for_pubkey(
+    pubkey: String,
+    mut selected_channel: Signal<Option<String>>,
+    mut selected_dm: Signal<Option<String>>,
+    mut reply_target: Signal<Option<MessageReplyTarget>>,
+    mut read_session: Signal<Option<ChannelReadSession>>,
+    mut msg_window: Signal<Option<MsgWindowState>>,
+    mut draft: Signal<String>,
+    mut note: Signal<String>,
+    mut rail_epoch: Signal<u64>,
+    mut refresh: Signal<u64>,
+) {
+    reply_target.set(None);
+    read_session.set(None);
+    msg_window.set(None);
+    draft.set(String::new());
+    note.set(String::new());
+    // Set DM first so the next paint lands on the DM branch (checked before channel).
+    selected_dm.set(Some(pubkey));
+    selected_channel.set(None);
+    rail_epoch.with_mut(|n| *n = n.wrapping_add(1));
+    refresh.set(refresh() + 1);
+}
+
+/// Open a DM from a channel bubble. If the roster has no key yet, quietly sync
+/// companion contacts once and retry (covers renames after last sync).
+fn open_dm_from_channel_bubble(
+    known: Option<&str>,
+    display_name: &str,
+    selected_channel: Signal<Option<String>>,
+    selected_dm: Signal<Option<String>>,
+    reply_target: Signal<Option<MessageReplyTarget>>,
+    read_session: Signal<Option<ChannelReadSession>>,
+    msg_window: Signal<Option<MsgWindowState>>,
+    draft: Signal<String>,
+    note: Signal<String>,
+    rail_epoch: Signal<u64>,
+    refresh: Signal<u64>,
+) {
+    let label = display_name.trim().to_string();
+    let known_owned = known.map(str::to_string);
+    match messages_rail::resolve_dm_pubkey(known_owned.as_deref(), &label) {
+        Ok(pubkey) => {
+            open_dm_thread_for_pubkey(
+                pubkey,
+                selected_channel,
+                selected_dm,
+                reply_target,
+                read_session,
+                msg_window,
+                draft,
+                note,
+                rail_epoch,
+                refresh,
+            );
+        }
+        Err(err) if messages_rail::dm_resolve_worth_contact_sync(&err) => {
+            if state().radio.snapshot().state != "connected" {
+                crate::toast::push(crate::toast::ToastKind::Warn, err);
+                return;
+            }
+            let who = if label.is_empty() {
+                "this sender".into()
+            } else {
+                label.clone()
+            };
+            status_note(format!(
+                "Looking up {who} on companion contacts…"
+            ));
+            let rx = state().radio.sync_contacts();
+            spawn(async move {
+                let sync_result = rx
+                    .await
+                    .unwrap_or_else(|_| Err("Radio task ended.".into()));
+                match sync_result {
+                    Ok(_n) => match messages_rail::resolve_dm_pubkey(
+                        known_owned.as_deref(),
+                        &label,
+                    ) {
+                        Ok(pubkey) => {
+                            open_dm_thread_for_pubkey(
+                                pubkey,
+                                selected_channel,
+                                selected_dm,
+                                reply_target,
+                                read_session,
+                                msg_window,
+                                draft,
+                                note,
+                                rail_epoch,
+                                refresh,
+                            );
+                            crate::toast::push(
+                                crate::toast::ToastKind::Success,
+                                format!("Opened DM with {who}."),
+                            );
+                        }
+                        Err(err) => crate::toast::push(
+                            crate::toast::ToastKind::Warn,
+                            err,
+                        ),
+                    },
+                    Err(err) => crate::toast::push(
+                        crate::toast::ToastKind::Error,
+                        format!("Contact sync failed: {err}"),
+                    ),
+                }
+            });
+        }
+        Err(err) => {
+            crate::toast::push(crate::toast::ToastKind::Warn, err);
+        }
+    }
 }
 
 fn truncate_chars(input: &str, max_chars: usize) -> String {

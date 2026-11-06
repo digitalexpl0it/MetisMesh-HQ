@@ -331,6 +331,10 @@ pub enum RadioCmd {
         pubkey_hex: String,
         reply: oneshot::Sender<Result<ContactRefreshResult, String>>,
     },
+    /// Quiet incremental `get_contacts` (does not flip Messages compose to Contacts phase).
+    SyncContacts {
+        reply: oneshot::Sender<Result<u32, String>>,
+    },
     /// Binary status request for one claimed infra pubkey.
     ProbeInfraStatus {
         pubkey_hex: String,
@@ -384,6 +388,9 @@ fn no_primary_reason(cmd: &RadioCmd) -> &'static str {
         RadioCmd::RefreshContact { .. } => {
             "Connect a primary companion radio before refreshing a contact."
         }
+        RadioCmd::SyncContacts { .. } => {
+            "Connect a primary companion radio before syncing contacts."
+        }
         RadioCmd::SignBytes { .. } | RadioCmd::ExportPrivateKey { .. } => {
             "Connect a primary companion radio before authorizing map uploads."
         }
@@ -436,6 +443,9 @@ fn reject_cmd(cmd: RadioCmd, status: &Mutex<RadioStatus>, reason: &str) {
             let _ = reply.send(Err(reason.into()));
         }
         RadioCmd::RefreshContact { reply, .. } => {
+            let _ = reply.send(Err(reason.into()));
+        }
+        RadioCmd::SyncContacts { reply } => {
             let _ = reply.send(Err(reason.into()));
         }
         RadioCmd::SignBytes { reply, .. } => {
@@ -1452,6 +1462,15 @@ impl RadioHandle {
             pubkey_hex,
             reply: tx,
         });
+        rx
+    }
+
+    /// Quiet companion contact sync. Returns how many contact rows were applied.
+    /// Does not flip Messages compose into the Contacts sync phase.
+    pub fn sync_contacts(&self) -> oneshot::Receiver<Result<u32, String>> {
+        let (tx, rx) = oneshot::channel();
+        self.pool
+            .route_to_primary(RadioCmd::SyncContacts { reply: tx });
         rx
     }
 
@@ -4334,6 +4353,16 @@ async fn run_session(
                             let _ = reply.send(outcome);
                         });
                     }
+                    Some(RadioCmd::SyncContacts { reply }) => {
+                        let meshcore = meshcore.clone();
+                        let db = Arc::clone(db);
+                        let radio_id = radio;
+                        tokio::spawn(async move {
+                            let outcome =
+                                run_quiet_contact_sync(db.as_ref(), &meshcore, radio_id).await;
+                            let _ = reply.send(outcome);
+                        });
+                    }
                     Some(RadioCmd::ProbeInfraStatus { pubkey_hex, reply }) => {
                         let meshcore = meshcore.clone();
                         let status = Arc::clone(status);
@@ -4565,7 +4594,7 @@ async fn run_session(
                         )
                         .await;
                         match sync {
-                            Ok(Ok(())) => {
+                            Ok(Ok(_n)) => {
                                 need_contact_retry = false;
                                 last_advert_sync = Instant::now();
                                 write_sync(status, SyncPhase::Ready, "Companion ready", None);
@@ -4610,7 +4639,7 @@ async fn sync_contacts(
     dispatcher: &meshcore_rs::events::EventDispatcher,
     status: Option<&Mutex<RadioStatus>>,
     radio_id: i64,
-) -> Result<(), String> {
+) -> Result<u32, String> {
     let since: u32 = db
         .contacts_since_for_radio(radio_id)
         .map_err(|err| err.to_string())?;
@@ -4703,6 +4732,10 @@ async fn sync_contacts(
             );
         }
     }
+    // Channel bubbles only carry a display name — attach roster keys once names uniquely match.
+    if let Err(err) = db.backfill_channel_sender_pubkeys() {
+        hq_log!(debug, "channel sender pubkey backfill: {err}");
+    }
     if let Some(status) = status {
         write_sync(
             status,
@@ -4722,7 +4755,7 @@ async fn sync_contacts(
     let marker = newest.max(since).max(1);
     db.set_contacts_since_for_radio(radio_id, marker)
         .map_err(|err| err.to_string())?;
-    Ok(())
+    Ok(total)
 }
 
 fn is_link_error(err: &str) -> bool {
@@ -5800,6 +5833,24 @@ async fn run_operator_path_fetch(
 
 const CONTACT_REFRESH_STATUS_TIMEOUT: Duration = Duration::from_secs(15);
 const CONTACT_REFRESH_TELEM_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Incremental get_contacts without flipping UI sync_phase to Contacts.
+async fn run_quiet_contact_sync(
+    db: &Db,
+    meshcore: &MeshCore,
+    radio_id: i64,
+) -> Result<u32, String> {
+    let commands = match tokio::time::timeout(
+        Duration::from_secs(8),
+        meshcore.commands().lock(),
+    )
+    .await
+    {
+        Ok(guard) => guard,
+        Err(_) => return Err("Contact sync skipped — radio busy.".into()),
+    };
+    sync_contacts(db, &commands, meshcore.dispatcher(), None, radio_id).await
+}
 
 /// Operator “Refresh contact”: pull companion contact row, path cache, then OTA status/telemetry.
 async fn run_contact_refresh(

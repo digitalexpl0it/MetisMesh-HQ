@@ -59,7 +59,9 @@
 - Channel **New messages** divider + unread badge stay until you scroll past the break — including when the channel is already open and live traffic arrives (no longer auto-cleared just because unread fit on screen)
 - New messages divider still appears when last-read is older than the loaded window (badge with no break was dropping the cursor outside the last 20 rows)
 - New messages break clears once it reaches the top of the pane (not an arbitrary mid-screen band); short threads that fit on screen still clear without a fake scroll
+- New messages break also clears when you scroll to the bottom and cannot scroll further (open settle still ignores “already at bottom” so unread that fits is not wiped immediately)
 - Channel bubble action **DM** opens a direct thread with that sender (same key resolver as Favorite — prefix / roster / prior messages; toast when no pubkey yet)
+- Bubble **DM**: clearer ambiguous-vs-missing key errors; if missing, quietly sync companion contacts and retry (covers renames); contact sync backfills `sender_pubkey` on recent name-only channel rows when the roster uniquely matches
 
 ## 0.1.4.0 — 2026-11-04
 

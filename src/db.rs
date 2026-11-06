@@ -3672,7 +3672,43 @@ impl Db {
         self.set_setting(&format!("contacts_since_{radio_id}"), &since.to_string())
     }
 
-    /// Resolve a channel/display name to exactly one known node (no guessing).
+    /// All roster nodes whose name / requested_name matches (exact, then alnum).
+    /// Empty when none; more than one means the label is ambiguous.
+    pub fn nodes_matching_display_name(&self, name: &str) -> Result<Vec<NodeRow>> {
+        let needle = name.trim();
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+        let nodes = self.list_nodes()?;
+        let exact: Vec<_> = nodes
+            .iter()
+            .filter(|n| {
+                n.name.eq_ignore_ascii_case(needle)
+                    || n.requested_name
+                        .as_deref()
+                        .is_some_and(|r| r.eq_ignore_ascii_case(needle))
+            })
+            .cloned()
+            .collect();
+        if !exact.is_empty() {
+            return Ok(exact);
+        }
+        let alnum = ascii_alnum_key(needle);
+        if alnum.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(nodes
+            .into_iter()
+            .filter(|n| {
+                ascii_alnum_key(&n.name) == alnum
+                    || n.requested_name
+                        .as_deref()
+                        .is_some_and(|r| ascii_alnum_key(r) == alnum)
+            })
+            .collect())
+    }
+
+    /// Resolve a channel/display name to exactly one known node (exact name only).
     pub fn unique_node_by_name(&self, name: &str) -> Result<Option<NodeRow>> {
         let needle = name.trim();
         if needle.is_empty() {
@@ -3698,28 +3734,59 @@ impl Db {
     /// Like [`Self::unique_node_by_name`], but also matches after stripping emoji /
     /// punctuation (`PlumbHunter🤠` ↔ `PlumbHunter`). Still requires exactly one hit.
     pub fn unique_node_by_display_name(&self, name: &str) -> Result<Option<NodeRow>> {
-        if let Some(node) = self.unique_node_by_name(name)? {
-            return Ok(Some(node));
-        }
-        let needle = ascii_alnum_key(name);
-        if needle.is_empty() {
-            return Ok(None);
-        }
-        let matches: Vec<_> = self
-            .list_nodes()?
-            .into_iter()
-            .filter(|n| {
-                ascii_alnum_key(&n.name) == needle
-                    || n.requested_name
-                        .as_deref()
-                        .is_some_and(|r| ascii_alnum_key(r) == needle)
-            })
-            .collect();
+        let matches = self.nodes_matching_display_name(name)?;
         Ok(if matches.len() == 1 {
             Some(matches.into_iter().next().unwrap())
         } else {
             None
         })
+    }
+
+    /// After contact sync: attach roster pubkeys to recent channel rows that only
+    /// have a display-name prefix (rename-safe once the name uniquely matches).
+    pub fn backfill_channel_sender_pubkeys(&self) -> Result<u64> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT trim(sender_prefix)
+             FROM messages
+             WHERE kind = 'channel'
+               AND (sender_pubkey IS NULL OR trim(sender_pubkey) = '')
+               AND trim(COALESCE(sender_prefix, '')) != ''
+               AND length(trim(sender_prefix)) <= 48
+             LIMIT 200",
+        )?;
+        let labels: Vec<String> = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+        drop(conn);
+
+        let mut updated = 0u64;
+        for label in labels {
+            if looks_like_channel_slot_label(&label) {
+                continue;
+            }
+            let Some(node) = self.unique_node_by_display_name(&label)? else {
+                continue;
+            };
+            let key = node.pubkey.trim().to_ascii_lowercase();
+            if key.len() != 64 || !key.chars().all(|c| c.is_ascii_hexdigit()) {
+                continue;
+            }
+            let n = self.lock().execute(
+                "UPDATE messages
+                 SET sender_pubkey = ?1
+                 WHERE kind = 'channel'
+                   AND (sender_pubkey IS NULL OR trim(sender_pubkey) = '')
+                   AND (
+                     lower(trim(sender_prefix)) = lower(?2)
+                     OR lower(trim(text)) LIKE lower(?2) || ':%'
+                   )",
+                params![key, label],
+            )?;
+            updated = updated.saturating_add(n as u64);
+        }
+        Ok(updated)
     }
 
     pub fn insert_message(
@@ -5715,6 +5782,18 @@ fn ascii_alnum_key(value: &str) -> String {
         .filter(|c| c.is_ascii_alphanumeric())
         .flat_map(|c| c.to_lowercase())
         .collect()
+}
+
+/// Channel slot labels like `ch0` / `CH12` are not person names.
+fn looks_like_channel_slot_label(value: &str) -> bool {
+    let trimmed = value.trim();
+    let Some(rest) = trimmed
+        .strip_prefix("ch")
+        .or_else(|| trimmed.strip_prefix("CH"))
+    else {
+        return false;
+    };
+    !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit())
 }
 
 /// Stable key for channel-name blocks (`name:ryinescondido`).

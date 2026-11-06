@@ -2875,16 +2875,86 @@ pub fn resolve_contact_pubkey(
 }
 
 /// Resolve a channel-bubble sender to a full 64-char pubkey for opening a DM.
-/// Name-only bookmarks are rejected — DMs need a real key on the companion.
+/// Never returns a `name:…` bookmark — DMs need a real key on the companion.
+/// Errors distinguish ambiguous roster names from a missing key.
 pub fn resolve_dm_pubkey(known: Option<&str>, display_name: &str) -> Result<String, String> {
-    let (key, _) = resolve_contact_pubkey(known, display_name)?;
-    if !is_hex_pubkey(&key) {
-        return Err(
-            "No public key for this sender yet — wait for their advert, or Add their key from Contacts."
-                .into(),
-        );
+    let label = display_name.trim();
+    if let Some(raw) = known.map(str::trim).filter(|s| !s.is_empty()) {
+        let key = raw.to_ascii_lowercase();
+        if is_hex_pubkey(&key) {
+            return Ok(key);
+        }
+        let matches: Vec<_> = state()
+            .db
+            .list_nodes()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|n| {
+                n.pubkey.to_ascii_lowercase().starts_with(&key)
+                    || n.prefix.to_ascii_lowercase() == key
+            })
+            .collect();
+        if matches.len() == 1 {
+            return Ok(matches[0].pubkey.clone());
+        }
+        if matches.len() > 1 {
+            return Err(format!(
+                "Ambiguous key prefix for “{label}” — {} roster contacts match.",
+                matches.len()
+            ));
+        }
     }
-    Ok(key)
+    if !label.is_empty() {
+        let matches = state()
+            .db
+            .nodes_matching_display_name(label)
+            .map_err(|e| e.to_string())?;
+        if matches.len() == 1 {
+            return Ok(matches[0].pubkey.clone());
+        }
+        if matches.len() > 1 {
+            return Err(format!(
+                "Ambiguous name “{label}” — {} roster contacts match. Open Contacts and pick one, or Add their key.",
+                matches.len()
+            ));
+        }
+        let dm_hits: Vec<_> = state()
+            .db
+            .list_dm_threads()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|t| t.name.eq_ignore_ascii_case(label))
+            .collect();
+        if dm_hits.len() == 1 {
+            let key = dm_hits[0].pubkey.trim().to_ascii_lowercase();
+            if is_hex_pubkey(&key) {
+                return Ok(key);
+            }
+        }
+        let from_msgs = state()
+            .db
+            .pubkeys_for_sender_label(label)
+            .map_err(|e| e.to_string())?;
+        if from_msgs.len() == 1 && is_hex_pubkey(&from_msgs[0]) {
+            return Ok(from_msgs[0].clone());
+        }
+        if from_msgs.len() > 1 {
+            return Err(format!(
+                "Ambiguous name “{label}” — prior messages used {} different keys.",
+                from_msgs.len()
+            ));
+        }
+        return Err(format!(
+            "No public key for “{label}” on the roster yet. Syncing contacts may help if they renamed; otherwise Add their key from Contacts."
+        ));
+    }
+    Err("Could not resolve a public key for this sender.".into())
+}
+
+/// True when a DM resolve failure is worth a quiet companion contact sync + retry.
+pub fn dm_resolve_worth_contact_sync(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("no public key") || lower.contains("could not resolve")
 }
 
 fn is_hex_pubkey(key: &str) -> bool {

@@ -3402,7 +3402,6 @@ enum ComposePlusDialog {
     ShareChannel,
     ShareContact,
     ShareMapLocation,
-    QuickDm,
 }
 
 /// Create / join channel slide-down steps.
@@ -3422,7 +3421,6 @@ fn apply_compose_plus_action(
     mut plus_dialog: Signal<Option<ComposePlusDialog>>,
     mut plus_pick_query: Signal<String>,
     mut plus_pick_value: Signal<String>,
-    mut plus_quick_body: Signal<String>,
     current_channel: Option<String>,
 ) {
     match action {
@@ -3446,26 +3444,17 @@ fn apply_compose_plus_action(
         ComposePlusAction::ShareChannel => {
             plus_pick_query.set(String::new());
             plus_pick_value.set(current_channel.unwrap_or_default());
-            plus_quick_body.set(String::new());
             plus_dialog.set(Some(ComposePlusDialog::ShareChannel));
         }
         ComposePlusAction::ShareContact => {
             plus_pick_query.set(String::new());
             plus_pick_value.set(String::new());
-            plus_quick_body.set(String::new());
             plus_dialog.set(Some(ComposePlusDialog::ShareContact));
         }
         ComposePlusAction::ShareMapLocation => {
             plus_pick_query.set(String::new());
             plus_pick_value.set(String::new());
-            plus_quick_body.set(String::new());
             plus_dialog.set(Some(ComposePlusDialog::ShareMapLocation));
-        }
-        ComposePlusAction::QuickDm => {
-            plus_pick_query.set(String::new());
-            plus_pick_value.set(String::new());
-            plus_quick_body.set(String::new());
-            plus_dialog.set(Some(ComposePlusDialog::QuickDm));
         }
     }
 }
@@ -3521,17 +3510,12 @@ fn ComposePlusDialogs(
     dialog: Signal<Option<ComposePlusDialog>>,
     pick_query: Signal<String>,
     pick_value: Signal<String>,
-    quick_body: Signal<String>,
     draft: Signal<String>,
     note: Signal<String>,
-    mut refresh: Signal<u64>,
-    mut selected_channel: Signal<Option<String>>,
-    mut selected_dm: Signal<Option<String>>,
 ) -> Element {
     let mut dialog = dialog;
     let mut pick_query = pick_query;
     let mut pick_value = pick_value;
-    let mut quick_body = quick_body;
     let mut draft = draft;
     let mut note = note;
     let open = dialog();
@@ -3539,7 +3523,6 @@ fn ComposePlusDialogs(
         Some(ComposePlusDialog::ShareChannel) => "Share channel",
         Some(ComposePlusDialog::ShareContact) => "Share contact",
         Some(ComposePlusDialog::ShareMapLocation) => "Share location from map",
-        Some(ComposePlusDialog::QuickDm) => "Quick message (DM)",
         None => "",
     };
     let channels = state().db.list_channels().unwrap_or_default();
@@ -3610,7 +3593,6 @@ fn ComposePlusDialogs(
                 dialog.set(None);
                 pick_query.set(String::new());
                 pick_value.set(String::new());
-                quick_body.set(String::new());
             },
             div { class: "flex flex-col gap-3",
                 match open {
@@ -3807,101 +3789,6 @@ fn ComposePlusDialogs(
                                     }
                                 },
                                 "Insert"
-                            }
-                        }
-                    },
-                    Some(ComposePlusDialog::QuickDm) => rsx! {
-                        p { class: "text-sm text-muted-foreground",
-                            "Queue a direct message without leaving this channel. Opens the DM thread after send."
-                        }
-                        TextInput {
-                            value: pick_query(),
-                            placeholder: "Search roster…",
-                            oninput: move |event: FormEvent| pick_query.set(event.value()),
-                        }
-                        div { class: "dm-contact-results",
-                            {
-                                let needle = pick_query();
-                                let mut ranked: Vec<(i32, String, String)> = contact_choices
-                                    .iter()
-                                    .filter_map(|(pubkey, label, _)| {
-                                        let short = pubkey.chars().take(12).collect::<String>();
-                                        let score = fuzzy_score(
-                                            &needle,
-                                            &[label.as_str(), pubkey.as_str(), short.as_str()],
-                                        )?;
-                                        Some((score, pubkey.clone(), label.clone()))
-                                    })
-                                    .collect();
-                                ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
-                                ranked.truncate(40);
-                                rsx! {
-                                    if ranked.is_empty() {
-                                        p { class: "px-3 py-2 text-sm text-muted-foreground", "No contacts match." }
-                                    }
-                                    for (_score, pubkey, label) in ranked {
-                                        {
-                                            let active = pick_value() == pubkey;
-                                            let key = pubkey.clone();
-                                            rsx! {
-                                                button {
-                                                    r#type: "button",
-                                                    class: if active {
-                                                        "dm-contact-option dm-contact-option-active"
-                                                    } else {
-                                                        "dm-contact-option"
-                                                    },
-                                                    onclick: move |_| pick_value.set(key.clone()),
-                                                    span { class: "font-medium", "{label}" }
-                                                    span { class: "font-mono text-[0.7rem] text-muted-foreground",
-                                                        "{pubkey.chars().take(12).collect::<String>()}…"
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        TextInput {
-                            value: quick_body(),
-                            placeholder: "Direct message…",
-                            oninput: move |event: FormEvent| {
-                                quick_body.set(clamp_mesh_text(event.value()));
-                            },
-                        }
-                        MeshTextCount { text: quick_body() }
-                        div { class: "flex justify-end gap-2",
-                            Button {
-                                kind: ButtonKind::Ghost,
-                                onclick: move |_| dialog.set(None),
-                                "Cancel"
-                            }
-                            Button {
-                                disabled: pick_value().trim().is_empty()
-                                    || quick_body().trim().is_empty(),
-                                onclick: move |_| {
-                                    let peer = pick_value();
-                                    let body = quick_body().trim().to_string();
-                                    if peer.is_empty() || body.is_empty() {
-                                        return;
-                                    }
-                                    match state().db.queue_text(&peer, &body, &body) {
-                                        Ok(_) => {
-                                            dialog.set(None);
-                                            pick_query.set(String::new());
-                                            pick_value.set(String::new());
-                                            quick_body.set(String::new());
-                                            selected_channel.set(None);
-                                            selected_dm.set(Some(peer));
-                                            refresh.set(refresh() + 1);
-                                            status_note("Direct message queued for the companion.");
-                                        }
-                                        Err(err) => note.set(err.to_string()),
-                                    }
-                                },
-                                Icon { name: IconName::Messages, size: 14 }
-                                "Send DM"
                             }
                         }
                     },
@@ -4376,7 +4263,6 @@ fn MessagesPage() -> Element {
     let plus_dialog = use_signal(|| None::<ComposePlusDialog>);
     let plus_pick_query = use_signal(String::new);
     let plus_pick_value = use_signal(String::new);
-    let plus_quick_body = use_signal(String::new);
     let mut appearance_edit = use_signal(|| None::<AppearanceEditTarget>);
     let mut msg_window = use_signal(|| None::<MsgWindowState>);
     let mut loading_older = use_signal(|| false);
@@ -4611,12 +4497,8 @@ fn MessagesPage() -> Element {
                     dialog: plus_dialog,
                     pick_query: plus_pick_query,
                     pick_value: plus_pick_value,
-                    quick_body: plus_quick_body,
                     draft,
                     note,
-                    refresh,
-                    selected_channel,
-                    selected_dm,
                 }
                 div { class: "flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border bg-card",
                     div {
@@ -4812,7 +4694,6 @@ fn MessagesPage() -> Element {
                         div { class: "flex gap-2",
                             ComposePlusButton {
                                 disabled: !linked,
-                                show_quick_dm: false,
                                 on_action: move |action| {
                                     apply_compose_plus_action(
                                         action,
@@ -4821,7 +4702,6 @@ fn MessagesPage() -> Element {
                                         plus_dialog,
                                         plus_pick_query,
                                         plus_pick_value,
-                                        plus_quick_body,
                                         None,
                                     );
                                 },
@@ -5460,31 +5340,6 @@ fn MessagesPage() -> Element {
                                                             let known = known_pk.clone();
                                                             rsx! {
                                                                 button {
-                                                                    class: "message-action-btn message-action-btn-dm",
-                                                                    title: "Open a direct message with this contact",
-                                                                    onclick: {
-                                                                        let resolve_name = resolve_name.clone();
-                                                                        let known = known.clone();
-                                                                        move |_| {
-                                                                            open_dm_from_channel_bubble(
-                                                                                known.as_deref(),
-                                                                                &resolve_name,
-                                                                                selected_channel,
-                                                                                selected_dm,
-                                                                                reply_target,
-                                                                                read_session,
-                                                                                msg_window,
-                                                                                draft,
-                                                                                note,
-                                                                                rail_epoch,
-                                                                                refresh,
-                                                                            );
-                                                                        }
-                                                                    },
-                                                                    Icon { name: IconName::Messages, size: 12 }
-                                                                    "DM"
-                                                                }
-                                                                button {
                                                                     class: "message-action-btn",
                                                                     title: "Favorite this contact",
                                                                     onclick: {
@@ -5654,7 +5509,6 @@ fn MessagesPage() -> Element {
                             class: "flex gap-2",
                             ComposePlusButton {
                                 disabled: !linked || sending(),
-                                show_quick_dm: true,
                                 on_action: {
                                     let channel_name = selected_name.clone();
                                     move |action| {
@@ -5665,7 +5519,6 @@ fn MessagesPage() -> Element {
                                             plus_dialog,
                                             plus_pick_query,
                                             plus_pick_value,
-                                            plus_quick_body,
                                             Some(channel_name.clone()),
                                         );
                                     }
@@ -5759,12 +5612,8 @@ fn MessagesPage() -> Element {
                     dialog: plus_dialog,
                     pick_query: plus_pick_query,
                     pick_value: plus_pick_value,
-                    quick_body: plus_quick_body,
                     draft,
                     note,
-                    refresh,
-                    selected_channel,
-                    selected_dm,
                 }
             }
         };
@@ -6788,121 +6637,6 @@ fn dismiss_channel_new_banner(
     session.new_count = 0;
     read_session.set(Some(session));
     refresh.set(refresh() + 1);
-}
-
-fn open_dm_thread_for_pubkey(
-    pubkey: String,
-    mut selected_channel: Signal<Option<String>>,
-    mut selected_dm: Signal<Option<String>>,
-    mut reply_target: Signal<Option<MessageReplyTarget>>,
-    mut read_session: Signal<Option<ChannelReadSession>>,
-    mut msg_window: Signal<Option<MsgWindowState>>,
-    mut draft: Signal<String>,
-    mut note: Signal<String>,
-    mut rail_epoch: Signal<u64>,
-    mut refresh: Signal<u64>,
-) {
-    reply_target.set(None);
-    read_session.set(None);
-    msg_window.set(None);
-    draft.set(String::new());
-    note.set(String::new());
-    // Set DM first so the next paint lands on the DM branch (checked before channel).
-    selected_dm.set(Some(pubkey));
-    selected_channel.set(None);
-    rail_epoch.with_mut(|n| *n = n.wrapping_add(1));
-    refresh.set(refresh() + 1);
-}
-
-/// Open a DM from a channel bubble. If the roster has no key yet, quietly sync
-/// companion contacts once and retry (covers renames after last sync).
-fn open_dm_from_channel_bubble(
-    known: Option<&str>,
-    display_name: &str,
-    selected_channel: Signal<Option<String>>,
-    selected_dm: Signal<Option<String>>,
-    reply_target: Signal<Option<MessageReplyTarget>>,
-    read_session: Signal<Option<ChannelReadSession>>,
-    msg_window: Signal<Option<MsgWindowState>>,
-    draft: Signal<String>,
-    note: Signal<String>,
-    rail_epoch: Signal<u64>,
-    refresh: Signal<u64>,
-) {
-    let label = display_name.trim().to_string();
-    let known_owned = known.map(str::to_string);
-    match messages_rail::resolve_dm_pubkey(known_owned.as_deref(), &label) {
-        Ok(pubkey) => {
-            open_dm_thread_for_pubkey(
-                pubkey,
-                selected_channel,
-                selected_dm,
-                reply_target,
-                read_session,
-                msg_window,
-                draft,
-                note,
-                rail_epoch,
-                refresh,
-            );
-        }
-        Err(err) if messages_rail::dm_resolve_worth_contact_sync(&err) => {
-            if state().radio.snapshot().state != "connected" {
-                crate::toast::push(crate::toast::ToastKind::Warn, err);
-                return;
-            }
-            let who = if label.is_empty() {
-                "this sender".into()
-            } else {
-                label.clone()
-            };
-            status_note(format!(
-                "Looking up {who} on companion contacts…"
-            ));
-            let rx = state().radio.sync_contacts();
-            spawn(async move {
-                let sync_result = rx
-                    .await
-                    .unwrap_or_else(|_| Err("Radio task ended.".into()));
-                match sync_result {
-                    Ok(_n) => match messages_rail::resolve_dm_pubkey(
-                        known_owned.as_deref(),
-                        &label,
-                    ) {
-                        Ok(pubkey) => {
-                            open_dm_thread_for_pubkey(
-                                pubkey,
-                                selected_channel,
-                                selected_dm,
-                                reply_target,
-                                read_session,
-                                msg_window,
-                                draft,
-                                note,
-                                rail_epoch,
-                                refresh,
-                            );
-                            crate::toast::push(
-                                crate::toast::ToastKind::Success,
-                                format!("Opened DM with {who}."),
-                            );
-                        }
-                        Err(err) => crate::toast::push(
-                            crate::toast::ToastKind::Warn,
-                            err,
-                        ),
-                    },
-                    Err(err) => crate::toast::push(
-                        crate::toast::ToastKind::Error,
-                        format!("Contact sync failed: {err}"),
-                    ),
-                }
-            });
-        }
-        Err(err) => {
-            crate::toast::push(crate::toast::ToastKind::Warn, err);
-        }
-    }
 }
 
 fn truncate_chars(input: &str, max_chars: usize) -> String {

@@ -558,6 +558,7 @@ pub fn MessagesRail(
                                             }));
                                         },
                                         on_select: move |n| on_select_channel.call(n),
+                                        on_select_dm: move |pk| on_select_dm.call(pk),
                                         on_appearance: move |n| on_channel_appearance.call(n),
                                         on_delete: move |n| on_delete_channel.call(n),
                                         on_changed: move |_| bump(),
@@ -653,6 +654,7 @@ pub fn MessagesRail(
                                                                 }));
                                                             },
                                                             on_select: move |n| on_select_channel.call(n),
+                                                            on_select_dm: move |pk| on_select_dm.call(pk),
                                                             on_appearance: move |n| on_channel_appearance.call(n),
                                                             on_delete: move |n| on_delete_channel.call(n),
                                                             on_changed: move |_| bump(),
@@ -719,6 +721,7 @@ pub fn MessagesRail(
                                             }));
                                         },
                                         on_select: move |n| on_select_channel.call(n),
+                                        on_select_dm: move |pk| on_select_dm.call(pk),
                                         on_appearance: move |n| on_channel_appearance.call(n),
                                         on_delete: move |n| on_delete_channel.call(n),
                                         on_changed: move |_| bump(),
@@ -1083,14 +1086,7 @@ pub fn MessagesRail(
                                             }));
                                         },
                                         on_select: move |k: String| {
-                                            if k.starts_with("name:") {
-                                                crate::toast::push(
-                                                    crate::toast::ToastKind::Warn,
-                                                    "Still awaiting their radio advert — channel chat has no public key. Once the companion hears them (or you Add their key), this pin upgrades automatically.",
-                                                );
-                                            } else {
-                                                on_select_dm.call(k);
-                                            }
+                                            open_dm_if_pubkey(k, on_select_dm);
                                         },
                                         on_changed: move |_| bump(),
                                         on_block: move |(key, label)| {
@@ -1199,7 +1195,7 @@ pub fn MessagesRail(
                                                                 move_item: Some((kind, key)),
                                                             }));
                                                         },
-                                                        on_select: move |k| on_select_dm.call(k),
+                                                        on_select: move |k| open_dm_if_pubkey(k, on_select_dm),
                                                         on_changed: move |_| bump(),
                                                         on_block: move |(key, label)| {
                                                             dialog.set(Some(RailDialog::BlockConfirm { key, label }));
@@ -1235,7 +1231,7 @@ pub fn MessagesRail(
                                                                 move_item: Some((kind, key)),
                                                             }));
                                                         },
-                                                        on_select: move |k| on_select_dm.call(k),
+                                                        on_select: move |k| open_dm_if_pubkey(k, on_select_dm),
                                                         on_changed: move |_| bump(),
                                                         on_block: move |(key, label)| {
                                                             dialog.set(Some(RailDialog::BlockConfirm { key, label }));
@@ -1302,7 +1298,7 @@ pub fn MessagesRail(
                                                 move_item: Some((kind, key)),
                                             }));
                                         },
-                                        on_select: move |k| on_select_dm.call(k),
+                                        on_select: move |k| open_dm_if_pubkey(k, on_select_dm),
                                         on_changed: move |_| bump(),
                                         on_block: move |(key, label)| {
                                             dialog.set(Some(RailDialog::BlockConfirm { key, label }));
@@ -1363,7 +1359,7 @@ pub fn MessagesRail(
                                                 move_item: Some((kind, key)),
                                             }));
                                         },
-                                        on_select: move |k| on_select_dm.call(k),
+                                        on_select: move |k| open_dm_if_pubkey(k, on_select_dm),
                                         on_changed: move |_| bump(),
                                         on_block: move |(key, label)| {
                                             dialog.set(Some(RailDialog::BlockConfirm { key, label }));
@@ -2354,6 +2350,7 @@ fn ChannelRailItem(
     sections: Vec<MessagesRailSection>,
     details: Signal<Option<RailDetails>>,
     on_select: EventHandler<String>,
+    on_select_dm: EventHandler<String>,
     on_appearance: EventHandler<String>,
     on_delete: EventHandler<String>,
     on_changed: EventHandler<()>,
@@ -2370,97 +2367,153 @@ fn ChannelRailItem(
     let fav_name = name.clone();
     let menu_key = name.clone();
     let details_key = name.clone();
+    let speakers = crate::channel_speakers::list(&name);
     let row_class = rail_item_row_class(active, false, zebra);
     let mut menu = use_signal(|| None::<RailItemMenuAnchor>);
     rsx! {
         div {
-            key: "ch-{name}",
-            class: "{row_class}",
-            oncontextmenu: move |event: MouseEvent| {
-                event.prevent_default();
-                event.stop_propagation();
-                let pt = event.data().client_coordinates();
-                menu.set(Some(RailItemMenuAnchor::Context { x: pt.x, y: pt.y }));
-            },
-            button {
-                r#type: "button",
-                class: "messages-rail-item-main",
-                onclick: move |_| on_select.call(select_name.clone()),
-                ConversationAvatar {
-                    label: name.clone(),
-                    seed: name.clone(),
-                }
-                span { class: "messages-rail-item-label", "{name}" }
-                if has_look {
-                    span {
-                        class: "text-[0.6rem] uppercase tracking-wide text-muted-foreground",
-                        title: "Custom appearance",
-                        "Aa"
-                    }
-                }
-                if unread > 0 {
-                    span { class: "{unread_badge_class(channel.unread_mentions)}",
-                        if unread > 99 { "99+" } else { "{unread}" }
-                    }
-                }
-            }
-            button {
-                r#type: "button",
-                class: if favorite {
-                    "messages-rail-item-action messages-rail-item-action-fav-on"
-                } else {
-                    "messages-rail-item-action"
-                },
-                title: if favorite { "Remove favorite" } else { "Favorite" },
-                onclick: move |event: MouseEvent| {
+            key: "ch-group-{name}",
+            class: "messages-rail-channel-group",
+            div {
+                class: "{row_class}",
+                oncontextmenu: move |event: MouseEvent| {
                     event.prevent_default();
                     event.stop_propagation();
-                    let _ = state().db.set_messages_favorite("channel", &fav_name, !favorite);
-                    on_changed.call(());
+                    let pt = event.data().client_coordinates();
+                    menu.set(Some(RailItemMenuAnchor::Context { x: pt.x, y: pt.y }));
                 },
-                Icon { name: IconName::Star, size: 12 }
-            }
-            div { class: "messages-rail-item-settings",
                 button {
                     r#type: "button",
-                    class: "messages-rail-item-action",
-                    title: "Channel settings",
+                    class: "messages-rail-item-main",
+                    onclick: move |_| on_select.call(select_name.clone()),
+                    ConversationAvatar {
+                        label: name.clone(),
+                        seed: name.clone(),
+                    }
+                    span { class: "messages-rail-item-label", "{name}" }
+                    if has_look {
+                        span {
+                            class: "text-[0.6rem] uppercase tracking-wide text-muted-foreground",
+                            title: "Custom appearance",
+                            "Aa"
+                        }
+                    }
+                    if unread > 0 {
+                        span { class: "{unread_badge_class(channel.unread_mentions)}",
+                            if unread > 99 { "99+" } else { "{unread}" }
+                        }
+                    }
+                }
+                button {
+                    r#type: "button",
+                    class: if favorite {
+                        "messages-rail-item-action messages-rail-item-action-fav-on"
+                    } else {
+                        "messages-rail-item-action"
+                    },
+                    title: if favorite { "Remove favorite" } else { "Favorite" },
                     onclick: move |event: MouseEvent| {
                         event.prevent_default();
                         event.stop_propagation();
-                        if menu().is_some() {
-                            menu.set(None);
-                        } else {
-                            let pt = event.data().client_coordinates();
-                            // Open just under the gear, into the convo pane.
-                            menu.set(Some(RailItemMenuAnchor::Context {
-                                x: pt.x - 12.0,
-                                y: pt.y + 8.0,
-                            }));
-                        }
+                        let _ = state().db.set_messages_favorite("channel", &fav_name, !favorite);
+                        on_changed.call(());
                     },
-                    Icon { name: IconName::Settings, size: 12 }
+                    Icon { name: IconName::Star, size: 12 }
                 }
-                if let Some(anchor) = menu() {
-                    RailItemMenuPanel {
-                        anchor,
-                        favorite,
-                        item_kind: "channel".to_string(),
-                        item_key: menu_key.clone(),
-                        sections: sections.clone(),
-                        show_appearance: true,
-                        can_delete,
-                        on_close: move |_| menu.set(None),
-                        on_changed: move |_| on_changed.call(()),
-                        on_appearance: move |_| on_appearance.call(appear_name.clone()),
-                        on_delete: move |_| on_delete.call(delete_name.clone()),
-                        on_clear: move |_| {},
-                        on_add_section: move |pair| on_add_section.call(pair),
-                        on_details: move |_| {
-                            details.set(Some(RailDetails::Channel(details_key.clone())));
+                div { class: "messages-rail-item-settings",
+                    button {
+                        r#type: "button",
+                        class: "messages-rail-item-action",
+                        title: "Channel settings",
+                        onclick: move |event: MouseEvent| {
+                            event.prevent_default();
+                            event.stop_propagation();
+                            if menu().is_some() {
+                                menu.set(None);
+                            } else {
+                                let pt = event.data().client_coordinates();
+                                // Open just under the gear, into the convo pane.
+                                menu.set(Some(RailItemMenuAnchor::Context {
+                                    x: pt.x - 12.0,
+                                    y: pt.y + 8.0,
+                                }));
+                            }
                         },
-                        on_block: move |_| {},
-                        on_refresh_contact: move |_| {},
+                        Icon { name: IconName::Settings, size: 12 }
+                    }
+                    if let Some(anchor) = menu() {
+                        RailItemMenuPanel {
+                            anchor,
+                            favorite,
+                            item_kind: "channel".to_string(),
+                            item_key: menu_key.clone(),
+                            sections: sections.clone(),
+                            show_appearance: true,
+                            can_delete,
+                            on_close: move |_| menu.set(None),
+                            on_changed: move |_| on_changed.call(()),
+                            on_appearance: move |_| on_appearance.call(appear_name.clone()),
+                            on_delete: move |_| on_delete.call(delete_name.clone()),
+                            on_clear: move |_| {},
+                            on_add_section: move |pair| on_add_section.call(pair),
+                            on_details: move |_| {
+                                details.set(Some(RailDetails::Channel(details_key.clone())));
+                            },
+                            on_block: move |_| {},
+                            on_refresh_contact: move |_| {},
+                        }
+                    }
+                }
+            }
+            for speaker in speakers.iter() {
+                {
+                    let sp_name = speaker.name.clone();
+                    let sp_key = speaker
+                        .pubkey
+                        .as_ref()
+                        .map(|k| k.trim().to_ascii_lowercase())
+                        .filter(|k| is_hex_pubkey(k));
+                    let can_dm = sp_key.is_some();
+                    let seed = sp_key
+                        .clone()
+                        .unwrap_or_else(|| format!("name:{}", sp_name));
+                    let title = if can_dm {
+                        format!("Open DM with {sp_name}")
+                    } else {
+                        format!(
+                            "{sp_name} — channel traffic has no public key. DM after you Add their contact card (or they share meshcore://contact/add)."
+                        )
+                    };
+                    let speaker_class = if can_dm {
+                        "messages-rail-speaker"
+                    } else {
+                        "messages-rail-speaker messages-rail-speaker-nokey"
+                    };
+                    rsx! {
+                        button {
+                            key: "sp-{name}-{sp_name}-{seed}",
+                            r#type: "button",
+                            class: "{speaker_class}",
+                            title: "{title}",
+                            onclick: move |_| {
+                                if let Some(pk) = sp_key.clone() {
+                                    on_select_dm.call(pk);
+                                } else {
+                                    crate::toast::push(
+                                        crate::toast::ToastKind::Warn,
+                                        format!(
+                                            "No public key for {sp_name} yet. Channel posts are name-only — Add their contact card (meshcore://contact/add) to DM."
+                                        ),
+                                    );
+                                }
+                            },
+                            ConversationAvatar {
+                                label: sp_name.clone(),
+                                seed: seed.clone(),
+                                compact: true,
+                            }
+                            span { class: "messages-rail-speaker-label", "{sp_name}" }
+                        }
                     }
                 }
             }
@@ -2642,6 +2695,7 @@ fn ContactNodeItem(
         hover_title = format!("Refreshing… · {hover_title}");
     }
     let row_class = rail_item_row_class(active, blocked, zebra);
+    let has_pubkey = is_hex_pubkey(&pubkey);
     rsx! {
         div {
             key: "node-{pubkey}",
@@ -2725,7 +2779,7 @@ fn ContactNodeItem(
                         item_label: menu_label.clone(),
                         sections: sections.clone(),
                         is_contact_pin: true,
-                        show_fetch_path: true,
+                        show_fetch_path: has_pubkey,
                         show_block: true,
                         is_blocked: blocked,
                         on_close: move |_| menu.set(None),
@@ -2874,91 +2928,22 @@ pub fn resolve_contact_pubkey(
     ))
 }
 
-/// Resolve a channel-bubble sender to a full 64-char pubkey for opening a DM.
-/// Never returns a `name:…` bookmark — DMs need a real key on the companion.
-/// Errors distinguish ambiguous roster names from a missing key.
-pub fn resolve_dm_pubkey(known: Option<&str>, display_name: &str) -> Result<String, String> {
-    let label = display_name.trim();
-    if let Some(raw) = known.map(str::trim).filter(|s| !s.is_empty()) {
-        let key = raw.to_ascii_lowercase();
-        if is_hex_pubkey(&key) {
-            return Ok(key);
-        }
-        let matches: Vec<_> = state()
-            .db
-            .list_nodes()
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .filter(|n| {
-                n.pubkey.to_ascii_lowercase().starts_with(&key)
-                    || n.prefix.to_ascii_lowercase() == key
-            })
-            .collect();
-        if matches.len() == 1 {
-            return Ok(matches[0].pubkey.clone());
-        }
-        if matches.len() > 1 {
-            return Err(format!(
-                "Ambiguous key prefix for “{label}” — {} roster contacts match.",
-                matches.len()
-            ));
-        }
-    }
-    if !label.is_empty() {
-        let matches = state()
-            .db
-            .nodes_matching_display_name(label)
-            .map_err(|e| e.to_string())?;
-        if matches.len() == 1 {
-            return Ok(matches[0].pubkey.clone());
-        }
-        if matches.len() > 1 {
-            return Err(format!(
-                "Ambiguous name “{label}” — {} roster contacts match. Open Contacts and pick one, or Add their key.",
-                matches.len()
-            ));
-        }
-        let dm_hits: Vec<_> = state()
-            .db
-            .list_dm_threads()
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .filter(|t| t.name.eq_ignore_ascii_case(label))
-            .collect();
-        if dm_hits.len() == 1 {
-            let key = dm_hits[0].pubkey.trim().to_ascii_lowercase();
-            if is_hex_pubkey(&key) {
-                return Ok(key);
-            }
-        }
-        let from_msgs = state()
-            .db
-            .pubkeys_for_sender_label(label)
-            .map_err(|e| e.to_string())?;
-        if from_msgs.len() == 1 && is_hex_pubkey(&from_msgs[0]) {
-            return Ok(from_msgs[0].clone());
-        }
-        if from_msgs.len() > 1 {
-            return Err(format!(
-                "Ambiguous name “{label}” — prior messages used {} different keys.",
-                from_msgs.len()
-            ));
-        }
-        return Err(format!(
-            "No public key for “{label}” on the roster yet. Syncing contacts may help if they renamed; otherwise Add their key from Contacts."
-        ));
-    }
-    Err("Could not resolve a public key for this sender.".into())
-}
-
-/// True when a DM resolve failure is worth a quiet companion contact sync + retry.
-pub fn dm_resolve_worth_contact_sync(err: &str) -> bool {
-    let lower = err.to_ascii_lowercase();
-    lower.contains("no public key") || lower.contains("could not resolve")
-}
-
 fn is_hex_pubkey(key: &str) -> bool {
+    let key = key.trim();
     key.len() == 64 && key.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Open a DM only when `key` is a full public key (contact card / companion contact).
+fn open_dm_if_pubkey(key: String, on_select_dm: EventHandler<String>) {
+    let key = key.trim().to_ascii_lowercase();
+    if is_hex_pubkey(&key) {
+        on_select_dm.call(key);
+    } else {
+        crate::toast::push(
+            crate::toast::ToastKind::Warn,
+            "No public key yet — DM needs a contact card (meshcore://contact/add) or a synced companion contact. Channel names alone are not enough.",
+        );
+    }
 }
 
 pub fn pin_contact_from_message(pubkey: &str, label: &str) -> Result<bool, String> {

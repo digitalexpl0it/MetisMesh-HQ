@@ -9,6 +9,7 @@ mod app_log;
 mod backup;
 mod ble_pair;
 mod brand;
+mod channel_speakers;
 mod contact_export;
 mod contact_qr;
 mod db;

@@ -1272,8 +1272,6 @@ pub enum ComposePlusAction {
     ShareChannel,
     ShareContact,
     ShareMapLocation,
-    /// Channel composer only — open a quick DM to another node.
-    QuickDm,
 }
 
 /// Invisible full-viewport layer under a popover so a click outside dismisses it.
@@ -1292,36 +1290,27 @@ pub fn PopoverDismissLayer(on_dismiss: EventHandler<()>) -> Element {
     }
 }
 
-/// Plus button that lists share / quick-DM actions above the compose field.
+/// Plus button that lists share actions above the compose field.
 #[component]
 pub fn ComposePlusButton(
     #[props(default = false)] disabled: bool,
-    /// When true, include “Quick message (DM)” (channel threads only).
-    #[props(default = false)]
-    show_quick_dm: bool,
     on_action: EventHandler<ComposePlusAction>,
 ) -> Element {
     let mut open = use_signal(|| false);
-    let items: Vec<(ComposePlusAction, &'static str)> = {
-        let mut rows = vec![
-            (ComposePlusAction::MyContact, "My contact info"),
-            (ComposePlusAction::MyPosition, "My current position"),
-            (ComposePlusAction::ShareChannel, "Share channel"),
-            (ComposePlusAction::ShareContact, "Share contact"),
-            (ComposePlusAction::ShareMapLocation, "Share location from map"),
-        ];
-        if show_quick_dm {
-            rows.push((ComposePlusAction::QuickDm, "Quick message (DM)"));
-        }
-        rows
-    };
+    let items: [(ComposePlusAction, &'static str); 5] = [
+        (ComposePlusAction::MyContact, "My contact info"),
+        (ComposePlusAction::MyPosition, "My current position"),
+        (ComposePlusAction::ShareChannel, "Share channel"),
+        (ComposePlusAction::ShareContact, "Share contact"),
+        (ComposePlusAction::ShareMapLocation, "Share location from map"),
+    ];
     rsx! {
         div { class: "emoji-picker-wrap",
             button {
                 r#type: "button",
                 class: "emoji-picker-trigger",
-                title: "Share and quick actions",
-                "aria-label": "Share and quick actions",
+                title: "Share actions",
+                "aria-label": "Share actions",
                 "aria-expanded": if open() { "true" } else { "false" },
                 disabled,
                 onclick: move |event: MouseEvent| {
@@ -1340,7 +1329,7 @@ pub fn ComposePlusButton(
                 div {
                     class: "compose-plus-panel",
                     role: "menu",
-                    "aria-label": "Share and quick actions",
+                    "aria-label": "Share actions",
                     onclick: move |event: MouseEvent| event.stop_propagation(),
                     for (action, label) in items {
                         button {

@@ -46,6 +46,16 @@ pub fn reopen_welcome() {
     set_welcome_done(false);
 }
 
+/// True when a scanned BLE row is the radio we are linking / linked to.
+fn device_matches_link(address: &str, name: &str, linked_name: &str) -> bool {
+    let linked = linked_name.trim();
+    if linked.is_empty() {
+        return false;
+    }
+    address.eq_ignore_ascii_case(linked)
+        || (!name.trim().is_empty() && name.eq_ignore_ascii_case(linked))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum WelcomeFinishAction {
     Dismiss,
@@ -76,12 +86,29 @@ pub fn WelcomeWizard(
         "pairing" | "connecting" | "reconnecting"
     ) || radio.sync_phase.is_active();
     let companion_linked = radio.state == "connected";
+    let detail_lower = radio.detail.to_ascii_lowercase();
     let companion_failed = radio.state == "error"
-        || radio.state == "disconnected"
-            && radio
-                .detail
-                .to_ascii_lowercase()
-                .contains("busy");
+        || (radio.state == "disconnected"
+            && (detail_lower.contains("busy")
+                || detail_lower.contains("timeout")
+                || detail_lower.contains("failed")
+                || detail_lower.contains("not connected")
+                || detail_lower.contains("appstart")));
+    let linked_name = radio.connected_name.trim().to_string();
+    let ble_target_now = ble_target();
+    let selected_is_linked = companion_linked
+        && !ble_target_now.is_empty()
+        && device_matches_link(&ble_target_now, "", &linked_name);
+    let pair_button_label = if companion_linked && (selected_is_linked || ble_target_now.is_empty())
+    {
+        "Connected"
+    } else if companion_linking {
+        "Working…"
+    } else if companion_failed {
+        "Retry pair"
+    } else {
+        "Pair with PIN"
+    };
 
     let finish = move |action: WelcomeFinishAction| {
         set_welcome_done(true);
@@ -225,7 +252,7 @@ pub fn WelcomeWizard(
                                         if radio.state == "pairing" {
                                             "Pairing… enter the same PIN in the Windows Bluetooth prompt if it appears, then wait for the link."
                                         } else if radio.sync_phase.is_active() {
-                                            "Connected — syncing companion ({radio.sync_label}). Stay on this step until ready."
+                                            "Linked — syncing ({radio.sync_label}). Stay here until it finishes."
                                         } else {
                                             "Connecting… {radio.detail}"
                                         }
@@ -233,15 +260,22 @@ pub fn WelcomeWizard(
                                 }
                             } else if companion_linked {
                                 p { class: "welcome-note welcome-note-ok",
-                                    "Connected — {radio.detail}. You can continue."
+                                    span { class: "welcome-inline-check",
+                                        Icon { name: IconName::Check, size: 14 }
+                                    }
+                                    if linked_name.is_empty() {
+                                        "Connected. You can continue."
+                                    } else {
+                                        "Connected to {linked_name}. You can continue."
+                                    }
                                 }
                             } else if companion_failed {
                                 p { class: "welcome-note welcome-note-warn",
                                     "{radio.detail}"
                                 }
                             } else {
-                                p { class: "welcome-note",
-                                    "Radio: {radio.state} — {radio.detail}"
+                                p { class: "welcome-copy-muted",
+                                    "Scan, select your companion, then Pair with PIN. The phone MeshCore app must be disconnected first."
                                 }
                             }
                         }
@@ -291,36 +325,97 @@ pub fn WelcomeWizard(
                                             for device in radio.devices.clone() {
                                                 {
                                                     let addr = device.address.clone();
+                                                    let name = device.name.clone();
                                                     let label = if device.name.trim().is_empty() {
                                                         device.address.clone()
                                                     } else {
                                                         format!("{} ({})", device.name, device.address)
                                                     };
                                                     let selected = ble_target() == addr;
+                                                    let linked = (companion_linked || companion_linking)
+                                                        && device_matches_link(
+                                                            &addr,
+                                                            &name,
+                                                            &linked_name,
+                                                        );
+                                                    let row_busy = companion_linking
+                                                        && (selected
+                                                            || device_matches_link(
+                                                                &addr,
+                                                                &name,
+                                                                &linked_name,
+                                                            )
+                                                            || (!ble_target_now.is_empty()
+                                                                && addr == ble_target_now));
+                                                    let class = if linked && companion_linked {
+                                                        "welcome-device welcome-device-linked"
+                                                    } else if selected || row_busy {
+                                                        "welcome-device active"
+                                                    } else {
+                                                        "welcome-device"
+                                                    };
                                                     rsx! {
                                                         button {
-                                                            class: if selected { "welcome-device active" } else { "welcome-device" },
+                                                            class: "{class}",
+                                                            disabled: companion_linking,
                                                             onclick: move |_| ble_target.set(addr.clone()),
-                                                            "{label}"
+                                                            span { class: "welcome-device-main",
+                                                                span { class: "welcome-device-label", "{label}" }
+                                                                if linked && companion_linked {
+                                                                    span { class: "welcome-device-badge welcome-device-badge-ok",
+                                                                        Icon { name: IconName::Check, size: 12 }
+                                                                        "Connected"
+                                                                    }
+                                                                } else if row_busy {
+                                                                    span { class: "welcome-device-badge",
+                                                                        Throbber { size: 12 }
+                                                                        if radio.state == "pairing" {
+                                                                            "Pairing…"
+                                                                        } else {
+                                                                            "Connecting…"
+                                                                        }
+                                                                    }
+                                                                } else if selected {
+                                                                    span { class: "welcome-device-badge", "Selected" }
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 }
                                             }
                                         }
                                     }
-                                    div { class: "welcome-actions",
+                                    div { class: "welcome-actions welcome-pair-row",
                                         Button {
-                                            kind: ButtonKind::Primary,
-                                            disabled: ble_target().trim().is_empty() || companion_linking,
+                                            kind: if companion_linked && selected_is_linked {
+                                                ButtonKind::Ghost
+                                            } else {
+                                                ButtonKind::Primary
+                                            },
+                                            disabled: ble_target().trim().is_empty()
+                                                || companion_linking
+                                                || (companion_linked && selected_is_linked),
                                             onclick: move |_| {
                                                 on_request_pin.call(ble_target());
                                             },
                                             if companion_linking {
                                                 Throbber { size: 14 }
+                                            } else if companion_linked && selected_is_linked {
+                                                Icon { name: IconName::Check, size: 14 }
                                             } else {
                                                 Icon { name: IconName::Bluetooth, size: 14 }
                                             }
-                                            if companion_linking { "Working…" } else { "Pair with PIN" }
+                                            "{pair_button_label}"
+                                        }
+                                        if companion_linked {
+                                            span { class: "welcome-pair-hint welcome-note-ok",
+                                                Icon { name: IconName::Check, size: 14 }
+                                                "Companion linked"
+                                            }
+                                        } else if companion_linking {
+                                            span { class: "welcome-pair-hint",
+                                                "Linking… status updates above"
+                                            }
                                         }
                                     }
                                 }

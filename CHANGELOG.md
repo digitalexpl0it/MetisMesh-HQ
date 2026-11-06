@@ -13,6 +13,7 @@
 - After pair/connect: welcome step shows pairing → connecting → syncing feedback with a throbber; Continue/Skip stay disabled until the attempt finishes
 - Stop reconnect loops when channel sync times out after a long contact dump — stay linked, settle, retry channel setup in the background
 - BLE settle delays after GATT open and after contacts (longer on Windows); one get_channel retry before deferring
+- APPSTART / device query listen before write (meshcore-rs race dropped fast SelfInfo → “Reading companion identity…” timeout); longer Windows settle + one BLE retry
 
 ## 0.1.6 — 2026-11-06
 

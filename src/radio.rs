@@ -3511,6 +3511,119 @@ struct SelfIdentity {
     raw: serde_json::Value,
 }
 
+/// APPSTART frame (same bytes as meshcore-rs `send_appstart`).
+const APPSTART_FRAME: [u8; 13] = [
+    1, // CMD_APP_START
+    0, 0, 0, 0, 0, 0, 0, // reserved
+    b'm', b'c', b'c', b'l', b'i',
+];
+
+fn appstart_timeout(transport: &str) -> Duration {
+    if transport == "ble" {
+        if cfg!(target_os = "windows") {
+            Duration::from_secs(15)
+        } else {
+            Duration::from_secs(10)
+        }
+    } else {
+        Duration::from_secs(8)
+    }
+}
+
+fn clarify_appstart_timeout(transport: &str, raw: &str) -> String {
+    let lower = raw.to_ascii_lowercase();
+    if !(lower.contains("timeout")
+        && (lower.contains("selfinfo") || lower.contains("self info") || lower.contains("response")))
+    {
+        return raw.to_string();
+    }
+    if transport == "ble" {
+        return format!(
+            "{raw} Bluetooth linked, but the companion never answered APPSTART. \
+Close the phone MeshCore app, forget/re-pair if the PIN prompt never appeared, \
+and avoid running HQ elevated (admin) — that often breaks the GATT session on Windows."
+        );
+    }
+    clarify_usb_session_error(raw)
+}
+
+async fn companion_appstart_once(
+    commands: &meshcore_rs::commands::CommandHandler,
+    dispatcher: &meshcore_rs::events::EventDispatcher,
+    timeout: Duration,
+) -> Result<meshcore_rs::events::SelfInfo, String> {
+    let event = request_listening_first(
+        commands,
+        dispatcher,
+        &APPSTART_FRAME,
+        &[EventType::SelfInfo],
+        timeout,
+    )
+    .await?;
+    match event.payload {
+        EventPayload::SelfInfo(info) => Ok(info),
+        _ => Err("Unexpected response to APPSTART.".into()),
+    }
+}
+
+/// APPSTART with listen-before-write. meshcore-rs `send_appstart` subscribes only
+/// after the write, so a fast SelfInfo is dropped and we sit until timeout —
+/// common on Windows BLE right after GATT open.
+async fn companion_appstart(
+    commands: &meshcore_rs::commands::CommandHandler,
+    dispatcher: &meshcore_rs::events::EventDispatcher,
+    transport: &str,
+) -> Result<meshcore_rs::events::SelfInfo, String> {
+    let timeout = appstart_timeout(transport);
+    match companion_appstart_once(commands, dispatcher, timeout).await {
+        Ok(info) => Ok(info),
+        Err(err) if transport == "ble" => {
+            hq_log!(warn, "appstart: {err}; settling and retrying once");
+            let settle = if cfg!(target_os = "windows") {
+                Duration::from_millis(1500)
+            } else {
+                Duration::from_millis(600)
+            };
+            tokio::time::sleep(settle).await;
+            companion_appstart_once(commands, dispatcher, timeout)
+                .await
+                .map_err(|e| clarify_appstart_timeout(transport, &e))
+        }
+        Err(err) => Err(clarify_appstart_timeout(transport, &err)),
+    }
+}
+
+/// Device query with listen-before-write (same race as APPSTART).
+async fn companion_device_query(
+    commands: &meshcore_rs::commands::CommandHandler,
+    dispatcher: &meshcore_rs::events::EventDispatcher,
+    transport: &str,
+) -> Result<meshcore_rs::events::DeviceInfoData, String> {
+    let data = [22u8, 8]; // CMD_DEVICE_QUERY + protocol version
+    let timeout = appstart_timeout(transport);
+    let event = request_listening_first(
+        commands,
+        dispatcher,
+        &data,
+        &[EventType::DeviceInfo],
+        timeout,
+    )
+    .await
+    .map_err(|err| {
+        if transport == "ble" {
+            format!(
+                "{err} Device query timed out after identity. Retry Connect; close other Bluetooth clients first."
+            )
+        } else {
+            err
+        }
+    })?;
+    match event.payload {
+        EventPayload::DeviceInfo(info) => Ok(info),
+        _ => Err("Unexpected response to device query.".into()),
+    }
+}
+
 /// Record this companion as the HQ node and site settings. Primary companion only.
 fn apply_hq_identity(db: &Db, ident: &SelfIdentity) -> Result<(), String> {
     db.save_hq(&ident.pubkey, &ident.name, ident.adv_lat, ident.adv_lon, &ident.raw)
@@ -3609,9 +3722,9 @@ async fn run_session(
     // session is stuck mid-sync or waiting on the command lock.
     *live.lock().unwrap_or_else(|err| err.into_inner()) = Some(meshcore.clone());
 
-    // Windows BLE needs a short settle after GATT open before companion frames.
+    // Windows BLE needs a settle after GATT open before companion frames.
     if ctx.transport == "ble" {
-        let ms = if cfg!(target_os = "windows") { 1200 } else { 400 };
+        let ms = if cfg!(target_os = "windows") { 2000 } else { 500 };
         write_sync(
             status,
             SyncPhase::AppStart,
@@ -3626,71 +3739,71 @@ async fn run_session(
     let channel_setup_inflight = Arc::new(AtomicBool::new(false));
     let max_channels;
     {
+        let dispatcher = meshcore.dispatcher();
         let commands = meshcore.commands().lock().await;
         write_sync(status, SyncPhase::AppStart, "Reading companion identity…", None);
-        match commands.send_appstart().await {
-            Ok(info) => {
-                let pubkey = hex::encode(info.public_key);
-                let raw = json!({
-                    "name": info.name,
-                    "tx_power": info.tx_power,
-                    "max_tx_power": info.max_tx_power,
-                    "multi_acks": info.multi_acks,
-                    "adv_loc_policy": info.adv_loc_policy,
-                    "telemetry_base": info.telemetry_mode_base,
-                    "telemetry_loc": info.telemetry_mode_loc,
-                    "telemetry_env": info.telemetry_mode_env,
-                    "manual_add_contacts": info.manual_add_contacts,
-                    "freq": info.radio_freq,
-                    "bw": info.radio_bw,
-                    "sf": info.sf,
-                    "cr": info.cr,
-                });
-                let label = if info.name.trim().is_empty() {
-                    name
-                } else {
-                    info.name.trim()
-                };
-                let _ = db.remember_radio(&ctx.transport, name, label);
-                let (lat, lon) = crate::db::coords_from_micro(info.adv_lat, info.adv_lon);
-                {
-                    let mut guard = status.lock().unwrap_or_else(|err| err.into_inner());
-                    guard.hq_lat = lat;
-                    guard.hq_lon = lon;
-                    guard.tx_power = Some(info.tx_power);
-                    guard.max_tx_power = Some(info.max_tx_power);
-                    guard.radio_freq_mhz = Some(info.radio_freq as f64 / 1000.0);
-                    guard.radio_bw_khz = Some(info.radio_bw as f64 / 1000.0);
-                    guard.radio_sf = Some(info.sf);
-                    guard.radio_cr = Some(info.cr);
-                    guard.adv_loc_policy = Some(info.adv_loc_policy);
-                    guard.manual_add_contacts = info.manual_add_contacts;
-                    guard.telemetry_mode_base = info.telemetry_mode_base;
-                    guard.telemetry_mode_loc = info.telemetry_mode_loc;
-                    guard.telemetry_mode_env = info.telemetry_mode_env;
-                    guard.multi_acks = info.multi_acks;
-                    guard.public_key = pubkey.clone();
-                }
-                let ident = SelfIdentity {
-                    pubkey,
-                    name: info.name.clone(),
-                    adv_lat: info.adv_lat,
-                    adv_lon: info.adv_lon,
-                    raw,
-                };
-                // The first connected companion becomes primary when none is set.
-                ctx.set_link(true);
-                if ctx.is_primary() {
-                    if let Err(err) = apply_hq_identity(db, &ident) {
-                        return SessionEnd::Lost(err);
-                    }
-                }
-                identity = Some(ident);
-            }
-            Err(err) => return SessionEnd::Lost(err.to_string()),
+        let info = match companion_appstart(&commands, dispatcher, &ctx.transport).await {
+            Ok(info) => info,
+            Err(err) => return SessionEnd::Lost(err),
+        };
+        let pubkey = hex::encode(info.public_key);
+        let raw = json!({
+            "name": info.name,
+            "tx_power": info.tx_power,
+            "max_tx_power": info.max_tx_power,
+            "multi_acks": info.multi_acks,
+            "adv_loc_policy": info.adv_loc_policy,
+            "telemetry_base": info.telemetry_mode_base,
+            "telemetry_loc": info.telemetry_mode_loc,
+            "telemetry_env": info.telemetry_mode_env,
+            "manual_add_contacts": info.manual_add_contacts,
+            "freq": info.radio_freq,
+            "bw": info.radio_bw,
+            "sf": info.sf,
+            "cr": info.cr,
+        });
+        let label = if info.name.trim().is_empty() {
+            name
+        } else {
+            info.name.trim()
+        };
+        let _ = db.remember_radio(&ctx.transport, name, label);
+        let (lat, lon) = crate::db::coords_from_micro(info.adv_lat, info.adv_lon);
+        {
+            let mut guard = status.lock().unwrap_or_else(|err| err.into_inner());
+            guard.hq_lat = lat;
+            guard.hq_lon = lon;
+            guard.tx_power = Some(info.tx_power);
+            guard.max_tx_power = Some(info.max_tx_power);
+            guard.radio_freq_mhz = Some(info.radio_freq as f64 / 1000.0);
+            guard.radio_bw_khz = Some(info.radio_bw as f64 / 1000.0);
+            guard.radio_sf = Some(info.sf);
+            guard.radio_cr = Some(info.cr);
+            guard.adv_loc_policy = Some(info.adv_loc_policy);
+            guard.manual_add_contacts = info.manual_add_contacts;
+            guard.telemetry_mode_base = info.telemetry_mode_base;
+            guard.telemetry_mode_loc = info.telemetry_mode_loc;
+            guard.telemetry_mode_env = info.telemetry_mode_env;
+            guard.multi_acks = info.multi_acks;
+            guard.public_key = pubkey.clone();
         }
+        let ident = SelfIdentity {
+            pubkey,
+            name: info.name.clone(),
+            adv_lat: info.adv_lat,
+            adv_lon: info.adv_lon,
+            raw,
+        };
+        // The first connected companion becomes primary when none is set.
+        ctx.set_link(true);
+        if ctx.is_primary() {
+            if let Err(err) = apply_hq_identity(db, &ident) {
+                return SessionEnd::Lost(err);
+            }
+        }
+        identity = Some(ident);
         write_sync(status, SyncPhase::AppStart, "Querying device info…", None);
-        max_channels = match commands.send_device_query().await {
+        max_channels = match companion_device_query(&commands, dispatcher, &ctx.transport).await {
             Ok(info) => {
                 // Companion firmwares report up to ~40 slots; clamp so a bad
                 // value cannot queue BLE with dozens of timed-out queries.
@@ -3716,7 +3829,7 @@ async fn run_session(
                 }
                 max_channels
             }
-            Err(err) => return SessionEnd::Lost(err.to_string()),
+            Err(err) => return SessionEnd::Lost(err),
         };
         let _ = commands.set_time(unix_now() as u32).await;
         {
@@ -6650,6 +6763,15 @@ mod tests {
         assert!(!is_explicit_companion_busy_error(
             "Timeout waiting for Some(SelfInfo)"
         ));
+    }
+
+    #[test]
+    fn ble_appstart_timeout_hints_phone_and_elevation() {
+        let msg = clarify_appstart_timeout("ble", "Timeout waiting for Some(SelfInfo)");
+        let lower = msg.to_ascii_lowercase();
+        assert!(lower.contains("appstart"), "{msg}");
+        assert!(lower.contains("phone"), "{msg}");
+        assert!(lower.contains("elevated") || lower.contains("admin"), "{msg}");
     }
 
     #[test]

@@ -9,7 +9,9 @@ use super::icons::{Icon, IconName};
 use super::state;
 use super::widgets::{
     Button, ButtonKind, ConversationAvatar, Dialog, EmojiPickerButton, SlideDownPanel, TextInput,
+    Throbber,
 };
+use std::collections::HashSet;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RailTab {
@@ -30,6 +32,11 @@ enum RailDialog {
         current: String,
     },
     AddContact,
+    /// Confirm block for a contact/DM row (`key`, display label).
+    BlockConfirm {
+        key: String,
+        label: String,
+    },
 }
 
 /// Slide-down details for a rail row (channel name, or contact/DM pubkey / `name:` key).
@@ -82,6 +89,113 @@ fn tab_search_placeholder(tab: RailTab) -> &'static str {
         RailTab::Dms => "Search DMs…",
         RailTab::Contacts => "Search contacts…",
     }
+}
+
+/// True when this contact/DM key or its display name is on the block list.
+fn rail_contact_is_blocked(key: &str, label: &str) -> bool {
+    let pk = if key.starts_with("name:") {
+        None
+    } else {
+        Some(key)
+    };
+    let name = label.trim();
+    let name_opt = if name.is_empty() { None } else { Some(name) };
+    state()
+        .db
+        .is_channel_sender_blocked(name_opt, pk)
+        .unwrap_or(false)
+        || state().db.is_blocked(key).unwrap_or(false)
+}
+
+/// Clear pubkey and/or name-key blocks for a rail contact.
+fn rail_unblock_contact(key: &str, label: &str) -> Result<(), String> {
+    let mut unblocked = false;
+    if state().db.is_blocked(key).unwrap_or(false) {
+        state()
+            .db
+            .unblock_node(key)
+            .map_err(|e| e.to_string())?;
+        unblocked = true;
+    }
+    if let Some(nk) = crate::db::name_block_key(label) {
+        if nk != key && state().db.is_blocked(&nk).unwrap_or(false) {
+            state()
+                .db
+                .unblock_node(&nk)
+                .map_err(|e| e.to_string())?;
+            unblocked = true;
+        }
+    }
+    if unblocked {
+        Ok(())
+    } else {
+        Err("That contact is not blocked.".into())
+    }
+}
+
+fn rail_item_row_class(active: bool, blocked: bool, zebra: bool) -> String {
+    let mut class = String::from("messages-rail-item");
+    if active {
+        class.push_str(" messages-rail-item-active");
+    }
+    if blocked {
+        class.push_str(" messages-rail-item-blocked");
+    }
+    if zebra {
+        class.push_str(" row-zebra");
+    }
+    class
+}
+
+fn rail_block_label(label: &str) -> String {
+    label
+        .trim()
+        .strip_suffix(" (awaiting advert)")
+        .unwrap_or(label.trim())
+        .to_string()
+}
+
+fn rail_begin_contact_refresh(
+    key: String,
+    mut refreshing: Signal<HashSet<String>>,
+    on_done: EventHandler<()>,
+) {
+    if key.starts_with("name:") {
+        crate::toast::push(
+            crate::toast::ToastKind::Warn,
+            "No public key yet — wait for their advert, or Add their key.",
+        );
+        return;
+    }
+    if state().radio.snapshot().state != "connected" {
+        crate::toast::push(
+            crate::toast::ToastKind::Warn,
+            "Connect a companion before refreshing a contact.",
+        );
+        return;
+    }
+    if refreshing().contains(&key) {
+        return;
+    }
+    refreshing.write().insert(key.clone());
+    crate::toast::push(
+        crate::toast::ToastKind::Info,
+        "Refreshing contact (path, status, telemetry)…",
+    );
+    let rx = state().radio.refresh_contact(key.clone());
+    spawn(async move {
+        let result = rx
+            .await
+            .unwrap_or_else(|_| Err("Radio task ended.".into()));
+        refreshing.write().remove(&key);
+        match result {
+            Ok(refresh) => {
+                crate::toast::push(crate::toast::ToastKind::Success, refresh.summary);
+                on_done.call(());
+            }
+            Err(err) => crate::toast::push(crate::toast::ToastKind::Error, err),
+        }
+    });
 }
 
 fn unread_badge_class(unread_mentions: i64) -> &'static str {
@@ -138,6 +252,7 @@ pub fn MessagesRail(
     let mut dialog = use_signal(|| None::<RailDialog>);
     let mut details = use_signal(|| None::<RailDetails>);
     let mut details_tick = use_signal(|| 0u64);
+    let refreshing = use_signal(HashSet::<String>::new);
     let mut section_name = use_signal(String::new);
     let mut section_emoji = use_signal(String::new);
     let mut contact_key = use_signal(String::new);
@@ -421,15 +536,17 @@ pub fn MessagesRail(
                         if fav_channels.is_empty() {
                             p { class: "messages-rail-empty", "Star a channel to pin it here." }
                         }
-                        for channel in fav_channels.iter() {
+                        for (stripe_i, channel) in fav_channels.iter().enumerate() {
                             {
                                 let channel = channel.clone();
                                 let active = selected_channel.as_ref() == Some(&channel.name);
+                                let zebra = stripe_i % 2 == 1;
                                 rsx! {
                                     ChannelRailItem {
                                         channel,
                                         active,
                                         favorite: true,
+                                        zebra,
                                         sections: chat_custom_sections.clone(),
                                         details,
                                         on_add_section: move |(kind, key)| {
@@ -512,17 +629,19 @@ pub fn MessagesRail(
                                     if members.is_empty() {
                                         p { class: "messages-rail-empty", "Move a channel here." }
                                     }
-                                    for (ik, key) in members.iter() {
+                                    for (stripe_i, (ik, key)) in members.iter().enumerate() {
                                         if ik == "channel" {
                                             if let Some(channel) = channels.iter().find(|c| &c.name == key).cloned() {
                                                 {
                                                     let fav = fav_set.contains(&("channel".into(), channel.name.clone()));
                                                     let active = selected_channel.as_ref() == Some(&channel.name);
+                                                    let zebra = stripe_i % 2 == 1;
                                                     rsx! {
                                                         ChannelRailItem {
                                                             channel,
                                                             active,
                                                             favorite: fav,
+                                                            zebra,
                                                             sections: chat_custom_sections.clone(),
                                                             details,
                                                             on_add_section: move |(kind, key)| {
@@ -577,16 +696,18 @@ pub fn MessagesRail(
                         if default_channels.is_empty() {
                             p { class: "messages-rail-empty", "No channels yet." }
                         }
-                        for channel in default_channels.iter() {
+                        for (stripe_i, channel) in default_channels.iter().enumerate() {
                             {
                                 let channel = channel.clone();
                                 let fav = fav_set.contains(&("channel".into(), channel.name.clone()));
                                 let active = selected_channel.as_ref() == Some(&channel.name);
+                                let zebra = stripe_i % 2 == 1;
                                 rsx! {
                                     ChannelRailItem {
                                         channel,
                                         active,
                                         favorite: fav,
+                                        zebra,
                                         sections: chat_custom_sections.clone(),
                                         details,
                                         on_add_section: move |(kind, key)| {
@@ -660,15 +781,18 @@ pub fn MessagesRail(
                                 }
                             }
                         }
-                        for thread in fav_dms.iter() {
+                        for (stripe_i, thread) in fav_dms.iter().enumerate() {
                             {
                                 let thread = thread.clone();
                                 let active = selected_dm.as_ref() == Some(&thread.pubkey);
+                                let zebra = stripe_i % 2 == 1;
                                 rsx! {
                                     DmRailItem {
                                         thread,
                                         active,
                                         favorite: true,
+                                        zebra,
+                                        refreshing,
                                         sections: dm_custom_sections.clone(),
                                         details,
                                         on_add_section: move |(kind, key)| {
@@ -682,6 +806,9 @@ pub fn MessagesRail(
                                         on_select: move |k| on_select_dm.call(k),
                                         on_clear: move |pair| on_clear_dm.call(pair),
                                         on_changed: move |_| bump(),
+                                        on_block: move |(key, label)| {
+                                            dialog.set(Some(RailDialog::BlockConfirm { key, label }));
+                                        },
                                     }
                                 }
                             }
@@ -750,16 +877,19 @@ pub fn MessagesRail(
                                         if members.is_empty() {
                                             p { class: "messages-rail-empty", "Move a DM here." }
                                         }
-                                        for (_ik, key) in members.iter() {
+                                        for (stripe_i, (_ik, key)) in members.iter().enumerate() {
                                             if let Some(thread) = dm_threads.iter().find(|t| &t.pubkey == key).cloned() {
                                                 {
                                                     let fav = fav_set.contains(&("dm".into(), thread.pubkey.clone()));
                                                     let active = selected_dm.as_ref() == Some(&thread.pubkey);
+                                                    let zebra = stripe_i % 2 == 1;
                                                     rsx! {
                                                         DmRailItem {
                                                             thread,
                                                             active,
                                                             favorite: fav,
+                                                            zebra,
+                                                            refreshing,
                                                             sections: dm_custom_sections.clone(),
                                                             details,
                                                             on_add_section: move |(kind, key)| {
@@ -773,6 +903,9 @@ pub fn MessagesRail(
                                                             on_select: move |k| on_select_dm.call(k),
                                                             on_clear: move |pair| on_clear_dm.call(pair),
                                                             on_changed: move |_| bump(),
+                                                            on_block: move |(key, label)| {
+                                                                dialog.set(Some(RailDialog::BlockConfirm { key, label }));
+                                                            },
                                                         }
                                                     }
                                                 }
@@ -817,7 +950,7 @@ pub fn MessagesRail(
                                 }
                             }
                         }
-                        for thread in default_dms.iter() {
+                        for (stripe_i, thread) in default_dms.iter().enumerate() {
                             {
                                 let thread = thread.clone();
                                 let fav = fav_set.contains(&("dm".into(), thread.pubkey.clone()))
@@ -826,11 +959,14 @@ pub fn MessagesRail(
                                         thread.pubkey.to_ascii_lowercase(),
                                     ));
                                 let active = selected_dm.as_ref() == Some(&thread.pubkey);
+                                let zebra = stripe_i % 2 == 1;
                                 rsx! {
                                     DmRailItem {
                                         thread,
                                         active,
                                         favorite: fav,
+                                        zebra,
+                                        refreshing,
                                         sections: dm_custom_sections.clone(),
                                         details,
                                         on_add_section: move |(kind, key)| {
@@ -844,6 +980,9 @@ pub fn MessagesRail(
                                         on_select: move |k| on_select_dm.call(k),
                                         on_clear: move |pair| on_clear_dm.call(pair),
                                         on_changed: move |_| bump(),
+                                        on_block: move |(key, label)| {
+                                            dialog.set(Some(RailDialog::BlockConfirm { key, label }));
+                                        },
                                     }
                                 }
                             }
@@ -909,7 +1048,7 @@ pub fn MessagesRail(
                         } else if pinned_filtered.is_empty() {
                             p { class: "messages-rail-empty", "No pinned contacts match." }
                         }
-                        for row in pinned_filtered.iter() {
+                        for (stripe_i, row) in pinned_filtered.iter().enumerate() {
                             {
                                 let pubkey = row.pubkey.clone();
                                 let label = if row.label.trim().is_empty() {
@@ -919,6 +1058,7 @@ pub fn MessagesRail(
                                 };
                                 let active = selected_dm.as_ref() == Some(&pubkey);
                                 let name_only = pubkey.starts_with("name:");
+                                let zebra = stripe_i % 2 == 1;
                                 rsx! {
                                     ContactNodeItem {
                                         pubkey: pubkey.clone(),
@@ -930,6 +1070,8 @@ pub fn MessagesRail(
                                         contact_type: 1,
                                         active,
                                         pinned: true,
+                                        zebra,
+                                        refreshing,
                                         sections: contact_custom_sections.clone(),
                                         details,
                                         on_add_section: move |(kind, key)| {
@@ -951,6 +1093,9 @@ pub fn MessagesRail(
                                             }
                                         },
                                         on_changed: move |_| bump(),
+                                        on_block: move |(key, label)| {
+                                            dialog.set(Some(RailDialog::BlockConfirm { key, label }));
+                                        },
                                     }
                                 }
                             }
@@ -1029,11 +1174,12 @@ pub fn MessagesRail(
                                     if members.is_empty() {
                                         p { class: "messages-rail-empty", "Move a contact here." }
                                     }
-                                    for (_ik, key) in members.iter() {
+                                    for (stripe_i, (_ik, key)) in members.iter().enumerate() {
                                         if let Some(node) = nodes.iter().find(|n| &n.pubkey == key).cloned() {
                                             {
                                                 let pinned_on = pinned_set.contains(&node.pubkey);
                                                 let active = selected_dm.as_ref() == Some(&node.pubkey);
+                                                let zebra = stripe_i % 2 == 1;
                                                 rsx! {
                                                     ContactNodeItem {
                                                         pubkey: node.pubkey.clone(),
@@ -1041,6 +1187,8 @@ pub fn MessagesRail(
                                                         contact_type: node.contact_type,
                                                         active,
                                                         pinned: pinned_on,
+                                                        zebra,
+                                                        refreshing,
                                                         sections: contact_custom_sections.clone(),
                                                         details,
                                                         on_add_section: move |(kind, key)| {
@@ -1053,6 +1201,9 @@ pub fn MessagesRail(
                                                         },
                                                         on_select: move |k| on_select_dm.call(k),
                                                         on_changed: move |_| bump(),
+                                                        on_block: move |(key, label)| {
+                                                            dialog.set(Some(RailDialog::BlockConfirm { key, label }));
+                                                        },
                                                     }
                                                 }
                                             }
@@ -1064,6 +1215,7 @@ pub fn MessagesRail(
                                                     row.label.clone()
                                                 };
                                                 let active = selected_dm.as_ref() == Some(&row.pubkey);
+                                                let zebra = stripe_i % 2 == 1;
                                                 rsx! {
                                                     ContactNodeItem {
                                                         pubkey: row.pubkey.clone(),
@@ -1071,6 +1223,8 @@ pub fn MessagesRail(
                                                         contact_type: 1,
                                                         active,
                                                         pinned: true,
+                                                        zebra,
+                                                        refreshing,
                                                         sections: contact_custom_sections.clone(),
                                                         details,
                                                         on_add_section: move |(kind, key)| {
@@ -1083,6 +1237,9 @@ pub fn MessagesRail(
                                                         },
                                                         on_select: move |k| on_select_dm.call(k),
                                                         on_changed: move |_| bump(),
+                                                        on_block: move |(key, label)| {
+                                                            dialog.set(Some(RailDialog::BlockConfirm { key, label }));
+                                                        },
                                                     }
                                                 }
                                             }
@@ -1121,10 +1278,11 @@ pub fn MessagesRail(
                         if roster_nodes.is_empty() {
                             p { class: "messages-rail-empty", "Roster chat devices appear here automatically." }
                         }
-                        for node in roster_nodes.iter() {
+                        for (stripe_i, node) in roster_nodes.iter().enumerate() {
                             {
                                 let active = selected_dm.as_ref() == Some(&node.pubkey);
                                 let pinned_on = pinned_set.contains(&node.pubkey);
+                                let zebra = stripe_i % 2 == 1;
                                 rsx! {
                                     ContactNodeItem {
                                         pubkey: node.pubkey.clone(),
@@ -1132,6 +1290,8 @@ pub fn MessagesRail(
                                         contact_type: node.contact_type,
                                         active,
                                         pinned: pinned_on,
+                                        zebra,
+                                        refreshing,
                                         sections: contact_custom_sections.clone(),
                                         details,
                                         on_add_section: move |(kind, key)| {
@@ -1144,6 +1304,9 @@ pub fn MessagesRail(
                                         },
                                         on_select: move |k| on_select_dm.call(k),
                                         on_changed: move |_| bump(),
+                                        on_block: move |(key, label)| {
+                                            dialog.set(Some(RailDialog::BlockConfirm { key, label }));
+                                        },
                                     }
                                 }
                             }
@@ -1176,10 +1339,11 @@ pub fn MessagesRail(
                         if default_infra.is_empty() {
                             p { class: "messages-rail-empty", "No repeaters or rooms heard yet." }
                         }
-                        for node in default_infra.iter() {
+                        for (stripe_i, node) in default_infra.iter().enumerate() {
                             {
                                 let pinned_on = pinned_set.contains(&node.pubkey);
                                 let active = selected_dm.as_ref() == Some(&node.pubkey);
+                                let zebra = stripe_i % 2 == 1;
                                 rsx! {
                                     ContactNodeItem {
                                         pubkey: node.pubkey.clone(),
@@ -1187,6 +1351,8 @@ pub fn MessagesRail(
                                         contact_type: node.contact_type,
                                         active,
                                         pinned: pinned_on,
+                                        zebra,
+                                        refreshing,
                                         sections: contact_custom_sections.clone(),
                                         details,
                                         on_add_section: move |(kind, key)| {
@@ -1199,6 +1365,9 @@ pub fn MessagesRail(
                                         },
                                         on_select: move |k| on_select_dm.call(k),
                                         on_changed: move |_| bump(),
+                                        on_block: move |(key, label)| {
+                                            dialog.set(Some(RailDialog::BlockConfirm { key, label }));
+                                        },
                                     }
                                 }
                             }
@@ -1216,6 +1385,7 @@ pub fn MessagesRail(
                     Some(RailDialog::NewSection { .. }) => "New section".into(),
                     Some(RailDialog::SetSectionIcon { .. }) => "Section icon".into(),
                     Some(RailDialog::AddContact) => "Add contact".into(),
+                    Some(RailDialog::BlockConfirm { .. }) => "Block contact".into(),
                     None => String::new(),
                 },
                 on_close: move |_| dialog.set(None),
@@ -1406,6 +1576,55 @@ pub fn MessagesRail(
                                 }
                             }
                         },
+                        Some(RailDialog::BlockConfirm { key, label }) => {
+                            let name_only = key.starts_with("name:");
+                            let confirm_key = key.clone();
+                            let confirm_label = label.clone();
+                            rsx! {
+                                p { class: "text-sm text-muted-foreground",
+                                    if name_only {
+                                        "Block {label}? Future channel messages from this display name will be dropped. If HQ later hears their node, DMs from that pubkey are blocked too. Enrollment stays the same — unblock from this menu or Messages → Blocked."
+                                    } else {
+                                        "Block {label}? Future channel and direct messages from them will be dropped. Enrollment stays the same — unblock from this menu or Messages → Blocked."
+                                    }
+                                }
+                                div { class: "flex justify-end gap-2",
+                                    Button {
+                                        kind: ButtonKind::Ghost,
+                                        onclick: move |_| dialog.set(None),
+                                        "Cancel"
+                                    }
+                                    Button {
+                                        kind: ButtonKind::Danger,
+                                        onclick: move |_| {
+                                            let pubkey = if confirm_key.starts_with("name:") {
+                                                None
+                                            } else {
+                                                Some(confirm_key.as_str())
+                                            };
+                                            match state().db.block_sender(pubkey, &confirm_label) {
+                                                Ok(()) => {
+                                                    dialog.set(None);
+                                                    crate::toast::push(
+                                                        crate::toast::ToastKind::Success,
+                                                        format!(
+                                                            "Blocked {confirm_label}. Future messages from them are dropped."
+                                                        ),
+                                                    );
+                                                    bump();
+                                                }
+                                                Err(err) => crate::toast::push(
+                                                    crate::toast::ToastKind::Error,
+                                                    err.to_string(),
+                                                ),
+                                            }
+                                        },
+                                        Icon { name: IconName::Ban, size: 14 }
+                                        "Block"
+                                    }
+                                }
+                            }
+                        },
                         None => rsx! {},
                     }
                 }
@@ -1414,6 +1633,7 @@ pub fn MessagesRail(
         RailDetailsSlide {
             target: details(),
             tick: details_tick(),
+            refreshing,
             on_close: move |_| details.set(None),
             on_refreshed: move |_| {
                 details_tick.with_mut(|n| *n = n.wrapping_add(1));
@@ -1454,6 +1674,7 @@ fn RailDetailField(label: String, children: Element) -> Element {
 fn RailDetailsSlide(
     target: Option<RailDetails>,
     tick: u64,
+    refreshing: Signal<HashSet<String>>,
     on_close: EventHandler<()>,
     on_refreshed: EventHandler<()>,
 ) -> Element {
@@ -1593,42 +1814,30 @@ fn RailDetailsSlide(
                     }
                 }
             } else if let Some(node) = node.as_ref() {
+                {
+                    let refresh_busy = refresh_key
+                        .as_ref()
+                        .is_some_and(|k| refreshing().contains(k));
+                    rsx! {
                 div { class: "flex flex-col gap-4 text-sm",
                     div { class: "flex flex-wrap gap-2",
                         if let Some(key) = refresh_key.clone() {
                             Button {
                                 kind: ButtonKind::Ghost,
+                                disabled: refresh_busy,
                                 onclick: move |_| {
-                                    if state().radio.snapshot().state != "connected" {
-                                        crate::toast::push(
-                                            crate::toast::ToastKind::Warn,
-                                            "Connect a companion before refreshing.",
-                                        );
-                                        return;
-                                    }
-                                    crate::toast::push(
-                                        crate::toast::ToastKind::Info,
-                                        "Refreshing contact…",
+                                    rail_begin_contact_refresh(
+                                        key.clone(),
+                                        refreshing,
+                                        on_refreshed,
                                     );
-                                    let rx = state().radio.refresh_contact(key.clone());
-                                    spawn(async move {
-                                        match rx.await.unwrap_or_else(|_| Err("Radio task ended.".into())) {
-                                            Ok(refresh) => {
-                                                crate::toast::push(
-                                                    crate::toast::ToastKind::Success,
-                                                    refresh.summary,
-                                                );
-                                                on_refreshed.call(());
-                                            }
-                                            Err(err) => crate::toast::push(
-                                                crate::toast::ToastKind::Error,
-                                                err,
-                                            ),
-                                        }
-                                    });
                                 },
-                                Icon { name: IconName::Signal, size: 14 }
-                                "Refresh contact"
+                                if refresh_busy {
+                                    Throbber { size: 14 }
+                                } else {
+                                    Icon { name: IconName::Signal, size: 14 }
+                                }
+                                if refresh_busy { "Refreshing…" } else { "Refresh contact" }
                             }
                         }
                     }
@@ -1788,6 +1997,8 @@ fn RailDetailsSlide(
                         }
                     }
                 }
+                    }
+                }
             } else if contact_key.is_some() {
                 p { class: "text-sm text-muted-foreground",
                     "No roster row for this key yet. Refresh after the companion hears them, or Add the public key."
@@ -1868,6 +2079,9 @@ fn RailItemMenuPanel(
     #[props(default = false)] is_contact_pin: bool,
     /// Contact/DM with a real pubkey — offer companion advert-path fetch.
     #[props(default = false)] show_fetch_path: bool,
+    #[props(default = false)] show_block: bool,
+    #[props(default = false)] is_blocked: bool,
+    #[props(default)] item_label: String,
     on_close: EventHandler<()>,
     on_changed: EventHandler<()>,
     on_appearance: EventHandler<()>,
@@ -1875,6 +2089,8 @@ fn RailItemMenuPanel(
     on_clear: EventHandler<()>,
     on_add_section: EventHandler<(String, String)>,
     on_details: EventHandler<()>,
+    on_block: EventHandler<(String, String)>,
+    on_refresh_contact: EventHandler<String>,
 ) -> Element {
     let mut move_open = use_signal(|| false);
     let fav_kind = item_kind.clone();
@@ -1884,6 +2100,10 @@ fn RailItemMenuPanel(
     let add_kind = item_kind.clone();
     let add_key = item_key.clone();
     let fetch_key = item_key.clone();
+    let block_key = item_key.clone();
+    let block_label = item_label.clone();
+    let unblock_key = item_key.clone();
+    let unblock_label = item_label.clone();
     // Host on a full-viewport fixed shell so WebKit overflow on the rail cannot
     // clip the panel. Prefer opening into the convo pane; clamp near edges.
     let panel_class = "rail-item-menu rail-item-menu-context";
@@ -1962,41 +2182,7 @@ fn RailItemMenuPanel(
                     title: "Sync companion contact, fetch path, then request status and telemetry (uses airtime)",
                     onclick: move |_| {
                         on_close.call(());
-                        if fetch_key.starts_with("name:") {
-                            crate::toast::push(
-                                crate::toast::ToastKind::Warn,
-                                "No public key yet — wait for their advert, or Add their key.",
-                            );
-                            return;
-                        }
-                        if state().radio.snapshot().state != "connected" {
-                            crate::toast::push(
-                                crate::toast::ToastKind::Warn,
-                                "Connect a companion before refreshing a contact.",
-                            );
-                            return;
-                        }
-                        crate::toast::push(
-                            crate::toast::ToastKind::Info,
-                            "Refreshing contact (path, status, telemetry)…",
-                        );
-                        let key = fetch_key.clone();
-                        let rx = state().radio.refresh_contact(key);
-                        spawn(async move {
-                            let result = rx
-                                .await
-                                .unwrap_or_else(|_| Err("Radio task ended.".into()));
-                            match result {
-                                Ok(refresh) => crate::toast::push(
-                                    crate::toast::ToastKind::Success,
-                                    refresh.summary,
-                                ),
-                                Err(err) => crate::toast::push(
-                                    crate::toast::ToastKind::Error,
-                                    err,
-                                ),
-                            }
-                        });
+                        on_refresh_contact.call(fetch_key.clone());
                     },
                     Icon { name: IconName::Signal, size: 12 }
                     "Refresh contact"
@@ -2087,6 +2273,47 @@ fn RailItemMenuPanel(
                     "Appearance"
                 }
             }
+            if show_block {
+                if is_blocked {
+                    button {
+                        r#type: "button",
+                        class: "rail-item-menu-item",
+                        role: "menuitem",
+                        title: "Hear messages from this contact again",
+                        onclick: move |_| {
+                            match rail_unblock_contact(&unblock_key, &unblock_label) {
+                                Ok(()) => {
+                                    crate::toast::push(
+                                        crate::toast::ToastKind::Success,
+                                        format!("Unblocked {unblock_label}."),
+                                    );
+                                    on_changed.call(());
+                                }
+                                Err(err) => crate::toast::push(
+                                    crate::toast::ToastKind::Error,
+                                    err,
+                                ),
+                            }
+                            on_close.call(());
+                        },
+                        Icon { name: IconName::Ban, size: 12 }
+                        "Unblock"
+                    }
+                } else {
+                    button {
+                        r#type: "button",
+                        class: "rail-item-menu-item rail-item-menu-item-danger",
+                        role: "menuitem",
+                        title: "Drop future channel and DM traffic from this contact",
+                        onclick: move |_| {
+                            on_block.call((block_key.clone(), block_label.clone()));
+                            on_close.call(());
+                        },
+                        Icon { name: IconName::Ban, size: 12 }
+                        "Block"
+                    }
+                }
+            }
             if can_delete {
                 button {
                     r#type: "button",
@@ -2123,6 +2350,7 @@ fn ChannelRailItem(
     channel: ChannelRow,
     active: bool,
     favorite: bool,
+    #[props(default = false)] zebra: bool,
     sections: Vec<MessagesRailSection>,
     details: Signal<Option<RailDetails>>,
     on_select: EventHandler<String>,
@@ -2142,15 +2370,12 @@ fn ChannelRailItem(
     let fav_name = name.clone();
     let menu_key = name.clone();
     let details_key = name.clone();
+    let row_class = rail_item_row_class(active, false, zebra);
     let mut menu = use_signal(|| None::<RailItemMenuAnchor>);
     rsx! {
         div {
             key: "ch-{name}",
-            class: if active {
-                "messages-rail-item messages-rail-item-active"
-            } else {
-                "messages-rail-item"
-            },
+            class: "{row_class}",
             oncontextmenu: move |event: MouseEvent| {
                 event.prevent_default();
                 event.stop_propagation();
@@ -2234,6 +2459,8 @@ fn ChannelRailItem(
                         on_details: move |_| {
                             details.set(Some(RailDetails::Channel(details_key.clone())));
                         },
+                        on_block: move |_| {},
+                        on_refresh_contact: move |_| {},
                     }
                 }
             }
@@ -2246,12 +2473,15 @@ fn DmRailItem(
     thread: DmThreadRow,
     active: bool,
     favorite: bool,
+    #[props(default = false)] zebra: bool,
     sections: Vec<MessagesRailSection>,
     details: Signal<Option<RailDetails>>,
+    refreshing: Signal<HashSet<String>>,
     on_select: EventHandler<String>,
     on_clear: EventHandler<(String, String)>,
     on_changed: EventHandler<()>,
     on_add_section: EventHandler<(String, String)>,
+    on_block: EventHandler<(String, String)>,
 ) -> Element {
     let pubkey = thread.pubkey.clone();
     let label = thread.name.clone();
@@ -2262,17 +2492,23 @@ fn DmRailItem(
     let clear_label = label.clone();
     let fav_key = pubkey.clone();
     let menu_key = pubkey.clone();
+    let menu_label = rail_block_label(&label);
     let details_key = pubkey.clone();
-    let hover_title = rail_item_hover_title(&label, &pubkey, "");
+    let blocked = rail_contact_is_blocked(&pubkey, &menu_label);
+    let is_refreshing = refreshing().contains(&pubkey);
+    let mut hover_title = rail_item_hover_title(&label, &pubkey, "");
+    if blocked {
+        hover_title = format!("Blocked · {hover_title}");
+    }
+    if is_refreshing {
+        hover_title = format!("Refreshing… · {hover_title}");
+    }
+    let row_class = rail_item_row_class(active, blocked, zebra);
     let mut menu = use_signal(|| None::<RailItemMenuAnchor>);
     rsx! {
         div {
             key: "dm-{pubkey}",
-            class: if active {
-                "messages-rail-item messages-rail-item-active"
-            } else {
-                "messages-rail-item"
-            },
+            class: "{row_class}",
             oncontextmenu: move |event: MouseEvent| {
                 event.prevent_default();
                 event.stop_propagation();
@@ -2289,6 +2525,9 @@ fn DmRailItem(
                     seed: pubkey.clone(),
                 }
                 span { class: "messages-rail-item-label", "{label}" }
+                if is_refreshing {
+                    Throbber { size: 12 }
+                }
                 if unread > 0 {
                     span { class: "{unread_badge_class(mention_tone)}",
                         if unread > 99 { "99+" } else { "{unread}" }
@@ -2338,9 +2577,12 @@ fn DmRailItem(
                         favorite,
                         item_kind: "dm".to_string(),
                         item_key: menu_key.clone(),
+                        item_label: menu_label.clone(),
                         sections: sections.clone(),
                         show_clear: true,
                         show_fetch_path: true,
+                        show_block: true,
+                        is_blocked: blocked,
                         on_close: move |_| menu.set(None),
                         on_changed: move |_| on_changed.call(()),
                         on_appearance: move |_| {},
@@ -2349,6 +2591,10 @@ fn DmRailItem(
                         on_add_section: move |pair| on_add_section.call(pair),
                         on_details: move |_| {
                             details.set(Some(RailDetails::Contact(details_key.clone())));
+                        },
+                        on_block: move |pair| on_block.call(pair),
+                        on_refresh_contact: move |key| {
+                            rail_begin_contact_refresh(key, refreshing, on_changed);
                         },
                     }
                 }
@@ -2364,17 +2610,23 @@ fn ContactNodeItem(
     contact_type: u8,
     active: bool,
     pinned: bool,
+    #[props(default = false)] zebra: bool,
     sections: Vec<MessagesRailSection>,
     details: Signal<Option<RailDetails>>,
+    refreshing: Signal<HashSet<String>>,
     on_select: EventHandler<String>,
     on_changed: EventHandler<()>,
     on_add_section: EventHandler<(String, String)>,
+    on_block: EventHandler<(String, String)>,
 ) -> Element {
     let select_key = pubkey.clone();
     let pin_key = pubkey.clone();
-    let pin_label = label.clone();
+    let pin_label = rail_block_label(&label);
     let menu_key = pubkey.clone();
+    let menu_label = pin_label.clone();
     let details_key = pubkey.clone();
+    let blocked = rail_contact_is_blocked(&pubkey, &menu_label);
+    let is_refreshing = refreshing().contains(&pubkey);
     let mut menu = use_signal(|| None::<RailItemMenuAnchor>);
     let kind_note = match contact_type {
         2 => "Repeater",
@@ -2382,15 +2634,18 @@ fn ContactNodeItem(
         4 => "Sensor",
         _ => "",
     };
-    let hover_title = rail_item_hover_title(&label, &pubkey, kind_note);
+    let mut hover_title = rail_item_hover_title(&label, &pubkey, kind_note);
+    if blocked {
+        hover_title = format!("Blocked · {hover_title}");
+    }
+    if is_refreshing {
+        hover_title = format!("Refreshing… · {hover_title}");
+    }
+    let row_class = rail_item_row_class(active, blocked, zebra);
     rsx! {
         div {
             key: "node-{pubkey}",
-            class: if active {
-                "messages-rail-item messages-rail-item-active"
-            } else {
-                "messages-rail-item"
-            },
+            class: "{row_class}",
             oncontextmenu: move |event: MouseEvent| {
                 event.prevent_default();
                 event.stop_propagation();
@@ -2407,6 +2662,9 @@ fn ContactNodeItem(
                     seed: pubkey.clone(),
                 }
                 span { class: "messages-rail-item-label", "{label}" }
+                if is_refreshing {
+                    Throbber { size: 12 }
+                }
                 if !kind_note.is_empty() {
                     span { class: "messages-rail-kind", "{kind_note}" }
                 }
@@ -2464,9 +2722,12 @@ fn ContactNodeItem(
                         favorite: pinned,
                         item_kind: "contact".to_string(),
                         item_key: menu_key.clone(),
+                        item_label: menu_label.clone(),
                         sections: sections.clone(),
                         is_contact_pin: true,
                         show_fetch_path: true,
+                        show_block: true,
+                        is_blocked: blocked,
                         on_close: move |_| menu.set(None),
                         on_changed: move |_| on_changed.call(()),
                         on_appearance: move |_| {},
@@ -2475,6 +2736,10 @@ fn ContactNodeItem(
                         on_add_section: move |pair| on_add_section.call(pair),
                         on_details: move |_| {
                             details.set(Some(RailDetails::Contact(details_key.clone())));
+                        },
+                        on_block: move |pair| on_block.call(pair),
+                        on_refresh_contact: move |key| {
+                            rail_begin_contact_refresh(key, refreshing, on_changed);
                         },
                     }
                 }

@@ -3220,9 +3220,35 @@ html.hq-col-resize body {
   background: rgba(255, 255, 255, 0.05);
 }
 
+.messages-rail-item.row-zebra {
+  background-color: rgba(34, 40, 49, 0.55);
+}
+
+.messages-rail-item.row-zebra:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
 .messages-rail-item-active {
   border-color: rgba(61, 214, 140, 0.4);
   background: rgba(61, 214, 140, 0.12);
+}
+
+.messages-rail-item-active.row-zebra {
+  background: rgba(61, 214, 140, 0.12);
+}
+
+.messages-rail-item-blocked {
+  opacity: 0.48;
+  color: #8b939e;
+}
+
+.messages-rail-item-blocked .messages-rail-item-label {
+  color: #8b939e;
+  font-weight: 500;
+}
+
+.messages-rail-item-blocked:hover {
+  opacity: 0.68;
 }
 
 .messages-rail-item-main {
@@ -3652,6 +3678,10 @@ html.hq-col-resize body {
   color: #cbd5e1;
 }
 
+.message-action-btn.message-action-btn-dm {
+  color: #86efac;
+}
+
 .message-action-btn.message-action-btn-block {
   color: #fca5a5;
 }
@@ -3666,6 +3696,10 @@ html.hq-col-resize body {
 
 .message-action-btn.message-action-btn-copy:hover {
   background: rgba(148, 163, 184, 0.22);
+}
+
+.message-action-btn.message-action-btn-dm:hover {
+  background: rgba(61, 214, 140, 0.2);
 }
 
 .message-action-btn.message-action-btn-block:hover {
@@ -3767,6 +3801,84 @@ html.hq-col-resize body {
   background: rgba(148, 163, 184, 0.14);
   color: #cbd5e1;
   border-color: rgba(148, 163, 184, 0.3);
+}
+
+/* Roster Actions — icon-only with color + tooltip (title). */
+.roster-actions {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.25rem;
+}
+
+.roster-icon-btn {
+  display: inline-flex;
+  height: 2rem;
+  width: 2rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #ffffff14;
+  border-radius: 0.4rem;
+  background: rgba(0, 0, 0, 0.22);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.roster-icon-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.roster-icon-btn-details {
+  color: #94a3b8;
+}
+
+.roster-icon-btn-details:hover {
+  color: #e2e8f0;
+  border-color: #ffffff28;
+}
+
+.roster-icon-btn-claim {
+  color: #fbbf24;
+}
+
+.roster-icon-btn-claim:hover {
+  color: #fde68a;
+  background: rgba(251, 191, 36, 0.12);
+  border-color: rgba(251, 191, 36, 0.35);
+}
+
+.roster-icon-btn-message {
+  color: #3dd68c;
+}
+
+.roster-icon-btn-message:hover {
+  color: #86efac;
+  background: rgba(61, 214, 140, 0.12);
+  border-color: rgba(61, 214, 140, 0.35);
+}
+
+.roster-icon-btn-channel {
+  color: #7dd3fc;
+}
+
+.roster-icon-btn-channel:hover {
+  color: #bae6fd;
+  background: rgba(56, 189, 248, 0.12);
+  border-color: rgba(56, 189, 248, 0.35);
+}
+
+.roster-icon-btn-revoke {
+  color: #f87171;
+}
+
+.roster-icon-btn-revoke:hover {
+  color: #fecaca;
+  background: rgba(248, 113, 113, 0.12);
+  border-color: rgba(248, 113, 113, 0.35);
 }
 
 .map-basemap-switcher {

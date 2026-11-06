@@ -51,7 +51,14 @@
 - Messages rail right-click / gear: **Details** opens a slide-down for channel or contact/DM (identity, GPS, path, last status, RF, recent messages; Refresh contact on devices)
 - Slide-down panels sit above the Messages splitter (green grip was painting through Details)
 - Messages compose no longer stays disabled after contact refresh (sync_phase was left on Contacts); Send unlocks whenever companion state is Connected
+- Roster Actions: icon-only colored buttons with tooltips (Details / Claim / Message / channel / Revoke) to free table width
 - Favorite feedback is toast-only (no sticky line under the composer); contact/DM hover tips use short name + 8-char prefix (not the full pubkey)
+- Contact/DM rail right-click / gear: **Block** / **Unblock** (confirm dialog; unblock also under Messages → Blocked); blocked rows stay in the list but are greyed out
+- Channels / DMs / Contacts rail lists use zebra row strips for easier scanning
+- **Refresh contact** shows a throbber beside the rail name (and on the Details button) until path/status/telemetry finish
+- Channel **New messages** divider + unread badge stay until you scroll past the break — including when the channel is already open and live traffic arrives (no longer auto-cleared just because unread fit on screen)
+- New messages divider still appears when last-read is older than the loaded window (badge with no break was dropping the cursor outside the last 20 rows)
+- Channel bubble action **DM** opens a direct thread with that sender (needs a resolved public key; otherwise prompts to wait for advert / Add key)
 
 ## 0.1.4.0 — 2026-11-04
 

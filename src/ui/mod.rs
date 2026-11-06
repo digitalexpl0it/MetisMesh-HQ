@@ -2773,7 +2773,7 @@ fn RosterPage() -> Element {
                             th { class: "px-3 py-2 font-medium", "Type" }
                             th { class: "px-3 py-2 font-medium", "Last heard" }
                             th { class: "px-3 py-2 font-medium", "GPS" }
-                            th { class: "px-3 py-2 font-medium", "Actions" }
+                            th { class: "px-3 py-2 text-right font-medium", "Actions" }
                         }
                     }
                     tbody {
@@ -2837,9 +2837,12 @@ fn RosterPage() -> Element {
                                     }
                                 }
                                 td { class: "px-3 py-2",
-                                    div { class: "flex flex-wrap justify-end gap-2",
-                                        Button {
-                                            kind: ButtonKind::Ghost,
+                                    div { class: "roster-actions",
+                                        button {
+                                            r#type: "button",
+                                            class: "roster-icon-btn roster-icon-btn-details",
+                                            title: "Details",
+                                            "aria-label": "Details",
                                             onclick: {
                                                 let pubkey = node.pubkey.clone();
                                                 move |_| {
@@ -2847,12 +2850,14 @@ fn RosterPage() -> Element {
                                                     details_pubkey.set(Some(pubkey.clone()));
                                                 }
                                             },
-                                            Icon { name: IconName::ChevronRight, size: 14 }
-                                            "Details"
+                                            Icon { name: IconName::ChevronRight, size: 15 }
                                         }
                                         if can_claim {
-                                            Button {
-                                                kind: ButtonKind::Ghost,
+                                            button {
+                                                r#type: "button",
+                                                class: "roster-icon-btn roster-icon-btn-claim",
+                                                title: "Claim infrastructure…",
+                                                "aria-label": "Claim infrastructure",
                                                 onclick: {
                                                     let pubkey = node.pubkey.clone();
                                                     let label = title.clone();
@@ -2862,13 +2867,15 @@ fn RosterPage() -> Element {
                                                         claim_target.set(Some((pubkey.clone(), label.clone())));
                                                     }
                                                 },
-                                                Icon { name: IconName::Key, size: 14 }
-                                                "Claim…"
+                                                Icon { name: IconName::Key, size: 15 }
                                             }
                                         }
                                         if node.enrollment != Enrollment::Hq {
-                                            Button {
-                                                kind: ButtonKind::Ghost,
+                                            button {
+                                                r#type: "button",
+                                                class: "roster-icon-btn roster-icon-btn-message",
+                                                title: "Direct message",
+                                                "aria-label": "Direct message",
                                                 onclick: {
                                                     let pubkey = node.pubkey.clone();
                                                     let title = title.clone();
@@ -2878,11 +2885,13 @@ fn RosterPage() -> Element {
                                                         dm_target.set(Some((pubkey.clone(), title.clone())));
                                                     }
                                                 },
-                                                Icon { name: IconName::Messages, size: 14 }
-                                                "Message"
+                                                Icon { name: IconName::Messages, size: 15 }
                                             }
-                                            Button {
-                                                kind: ButtonKind::Ghost,
+                                            button {
+                                                r#type: "button",
+                                                class: "roster-icon-btn roster-icon-btn-channel",
+                                                title: "Share private channel…",
+                                                "aria-label": "Share private channel",
                                                 onclick: {
                                                     let pubkey = node.pubkey.clone();
                                                     let title = title.clone();
@@ -2891,13 +2900,15 @@ fn RosterPage() -> Element {
                                                         invite_target.set(Some((pubkey.clone(), title.clone())));
                                                     }
                                                 },
-                                                Icon { name: IconName::Key, size: 14 }
-                                                "Add channel"
+                                                Icon { name: IconName::Radio, size: 15 }
                                             }
                                         }
                                         if node.enrollment == Enrollment::Enrolled {
-                                            Button {
-                                                kind: ButtonKind::Danger,
+                                            button {
+                                                r#type: "button",
+                                                class: "roster-icon-btn roster-icon-btn-revoke",
+                                                title: "Revoke enrollment",
+                                                "aria-label": "Revoke enrollment",
                                                 onclick: {
                                                     let pubkey = node.pubkey.clone();
                                                     let secrets = secrets.clone();
@@ -2911,8 +2922,7 @@ fn RosterPage() -> Element {
                                                         }
                                                     }
                                                 },
-                                                Icon { name: IconName::Ban, size: 14 }
-                                                "Revoke"
+                                                Icon { name: IconName::Ban, size: 15 }
                                             }
                                         }
                                     }
@@ -4924,34 +4934,34 @@ fn MessagesPage() -> Element {
             }
         };
         let emergency = channel.role == "emergency";
-        let latest_id = messages.last().map(|message| message.id);
+        let _latest_id = messages.last().map(|message| message.id);
         let needs_session = read_session()
             .as_ref()
             .map(|session| session.slot != slot || session.name != selected_name)
             .unwrap_or(true);
         if needs_session {
+            // Keep the raw last-read id even when it is older than the loaded
+            // window (initial load is only MSG_WINDOW_INITIAL rows). Dropping it
+            // left show_banner=true with no place to draw the divider.
             let stored_read = state().db.channel_last_read(slot).ok().flatten();
-            let anchor = stored_read.filter(|id| {
-                *id == 0 || messages.iter().any(|message| message.id == *id)
-            });
             // Match nav badge: RX + bot/service TX (origin=bot). Operator Compose TX does not.
             let new_count = channel.unread_count.max(0) as usize;
             let show_banner = new_count > 0;
-            if !show_banner {
-                if let Some(id) = latest_id {
-                    let _ = state().db.set_channel_last_read(slot, id);
-                }
-            }
+            // Do not advance last-read just because the thread opened with no
+            // unread — live traffic while open must still raise the divider + badge.
             read_session.set(Some(ChannelReadSession {
                 name: selected_name.clone(),
                 slot,
-                anchor_id: anchor,
+                anchor_id: stored_read,
                 show_banner,
                 new_count,
                 scrolled: false,
             }));
-            let scroll_anchor = anchor;
+            let scroll_anchor = stored_read;
             let scroll_to_bottom = !show_banner;
+            let anchor_in_window = scroll_anchor
+                .filter(|id| *id != 0)
+                .is_some_and(|id| messages.iter().any(|m| m.id == id));
             spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(60)).await;
                 if scroll_to_bottom {
@@ -4959,28 +4969,49 @@ fn MessagesPage() -> Element {
                         r#"const scroller = document.getElementById('channel-scroller');
                            if (scroller) { scroller.scrollTop = scroller.scrollHeight; }"#,
                     );
-                } else if let Some(id) = scroll_anchor {
-                    document::eval(&format!(
-                        r#"const el = document.getElementById('msg-anchor-{id}');
-                           if (el) {{ el.scrollIntoView({{ block: 'center', behavior: 'instant' }}); }}"#
-                    ));
+                } else if anchor_in_window {
+                    if let Some(id) = scroll_anchor {
+                        document::eval(&format!(
+                            r#"const el = document.getElementById('msg-anchor-{id}');
+                               if (el) {{ el.scrollIntoView({{ block: 'center', behavior: 'instant' }}); }}"#
+                        ));
+                    }
+                } else if show_banner {
+                    // Cursor older than the window / empty — land on the divider.
+                    document::eval(
+                        r#"const el = document.getElementById('new-messages-marker');
+                           if (el) { el.scrollIntoView({ block: 'center', behavior: 'instant' }); }"#,
+                    );
                 }
                 if let Some(mut session) = read_session() {
                     session.scrolled = true;
                     read_session.set(Some(session));
                 }
-                // If unread already fits on screen, clear the banner without waiting for scroll.
-                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-                if channel_unread_is_caught_up().await {
-                    dismiss_channel_new_banner(read_session);
-                }
             });
-        } else if let Some(session) = read_session() {
-            // While caught up in-channel, advance last-read with live traffic.
-            if !session.show_banner {
-                if let Some(id) = latest_id {
-                    let _ = state().db.set_channel_last_read(slot, id);
+        } else if let Some(mut session) = read_session() {
+            let unread = channel.unread_count.max(0) as usize;
+            if session.show_banner {
+                // Keep the divider count in sync as more traffic arrives.
+                if unread == 0 {
+                    session.show_banner = false;
+                    session.new_count = 0;
+                    read_session.set(Some(session));
+                } else if unread != session.new_count {
+                    session.new_count = unread;
+                    read_session.set(Some(session));
                 }
+            } else if unread > 0 {
+                // Channel was open and caught up — new traffic raises the
+                // divider + badge until the operator scrolls past it.
+                let stored_read = state().db.channel_last_read(slot).ok().flatten();
+                read_session.set(Some(ChannelReadSession {
+                    name: selected_name.clone(),
+                    slot,
+                    anchor_id: stored_read,
+                    show_banner: true,
+                    new_count: unread,
+                    scrolled: true,
+                }));
             }
         }
         let session = read_session().unwrap_or(ChannelReadSession {
@@ -5149,7 +5180,7 @@ fn MessagesPage() -> Element {
                             if read_session().as_ref().is_some_and(|session| session.show_banner) {
                                 spawn(async move {
                                     if channel_unread_is_caught_up().await {
-                                        dismiss_channel_new_banner(read_session);
+                                        dismiss_channel_new_banner(read_session, refresh);
                                     }
                                 });
                             }
@@ -5221,12 +5252,57 @@ fn MessagesPage() -> Element {
                         if messages.is_empty() {
                             p { class: "text-sm text-muted-foreground", "No messages in this channel yet." }
                         }
+                        {
+                            // Place the divider after the last-read message. If the cursor is
+                            // 0, missing, or older than the loaded window, put it above the
+                            // first visible row (those rows are all unread relative to cursor).
+                            let (banner_before_first, banner_after_id) = if !session.show_banner {
+                                (false, None)
+                            } else if session.anchor_id == Some(0) || session.anchor_id.is_none() {
+                                (true, None::<i64>)
+                            } else if let Some(aid) = session.anchor_id {
+                                if messages.iter().any(|m| m.id == aid) {
+                                    (false, Some(aid))
+                                } else if let Some(prev) =
+                                    messages.iter().rev().find(|m| m.id <= aid)
+                                {
+                                    (false, Some(prev.id))
+                                } else {
+                                    (true, None)
+                                }
+                            } else {
+                                (true, None)
+                            };
+                            let new_count = session.new_count;
+                            rsx! {
+                        if banner_before_first {
+                            div {
+                                id: "new-messages-marker",
+                                class: "my-3 flex w-full items-center gap-0 px-2",
+                                div {
+                                    class: "h-px min-w-0 flex-1",
+                                    style: "background-color: rgba(61, 214, 140, 0.45);",
+                                }
+                                span {
+                                    class: "shrink-0 text-[0.7rem] font-medium tracking-wide",
+                                    style: "color: #3dd68c; background-color: #101418; padding: 0.35rem 0.85rem; margin: 0 0.15rem;",
+                                    if new_count == 1 {
+                                        "New messages · 1"
+                                    } else {
+                                        "New messages · {new_count}"
+                                    }
+                                }
+                                div {
+                                    class: "h-px min-w-0 flex-1",
+                                    style: "background-color: rgba(61, 214, 140, 0.45);",
+                                }
+                            }
+                        }
                         for message in messages {
                             {
                                 let outgoing = message.direction == "tx";
-                                let show_new_banner = session.show_banner
-                                    && session.anchor_id == Some(message.id);
-                                let new_count = session.new_count;
+                                let show_new_banner = banner_after_id == Some(message.id);
+                                let new_count = new_count;
                                 let (parsed_name, body) = channel_sender_and_body(&message.text);
                                 let has_parsed_name = parsed_name
                                     .as_ref()
@@ -5368,6 +5444,47 @@ fn MessagesPage() -> Element {
                                                             let known = known_pk.clone();
                                                             rsx! {
                                                                 button {
+                                                                    class: "message-action-btn message-action-btn-dm",
+                                                                    title: "Open a direct message with this contact",
+                                                                    onclick: {
+                                                                        let resolve_name = resolve_name.clone();
+                                                                        let known = known.clone();
+                                                                        move |_| {
+                                                                            let pubkey = known
+                                                                                .clone()
+                                                                                .filter(|pk| {
+                                                                                    !pk.is_empty()
+                                                                                        && !pk.starts_with("name:")
+                                                                                })
+                                                                                .or_else(|| {
+                                                                                    state()
+                                                                                        .db
+                                                                                        .unique_node_by_display_name(
+                                                                                            &resolve_name,
+                                                                                        )
+                                                                                        .ok()
+                                                                                        .flatten()
+                                                                                        .map(|n| n.pubkey)
+                                                                                });
+                                                                            let Some(pubkey) = pubkey else {
+                                                                                status_note(
+                                                                                    "No public key for this sender yet — wait for their advert, or Add their key from Contacts.",
+                                                                                );
+                                                                                return;
+                                                                            };
+                                                                            selected_channel.set(None);
+                                                                            reply_target.set(None);
+                                                                            read_session.set(None);
+                                                                            msg_window.set(None);
+                                                                            draft.set(String::new());
+                                                                            note.set(String::new());
+                                                                            selected_dm.set(Some(pubkey));
+                                                                        }
+                                                                    },
+                                                                    Icon { name: IconName::Messages, size: 12 }
+                                                                    "DM"
+                                                                }
+                                                                button {
                                                                     class: "message-action-btn",
                                                                     title: "Favorite this contact",
                                                                     onclick: {
@@ -5499,6 +5616,8 @@ fn MessagesPage() -> Element {
                                         }
                                     }
                                 }
+                            }
+                        }
                             }
                         }
                     }
@@ -6623,26 +6742,32 @@ struct ChannelReadSession {
 
 async fn channel_unread_is_caught_up() -> bool {
     // Eval code runs as an async function body; the value must be returned.
+    // When the New messages divider is present, only clear after it has been
+    // scrolled into / past the upper third — do not treat "near bottom" alone
+    // as caught up (that wiped the banner + badge as soon as unread fit on screen).
     let result = document::eval(
         r#"return (() => {
           const scroller = document.getElementById('channel-scroller');
           if (!scroller) return false;
+          const marker = document.getElementById('new-messages-marker');
+          if (marker) {
+            const s = scroller.getBoundingClientRect();
+            const m = marker.getBoundingClientRect();
+            return m.bottom < s.top + s.height * 0.35;
+          }
           const remaining =
             scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
-          if (remaining < 56) return true;
-          const marker = document.getElementById('new-messages-marker');
-          if (!marker) return false;
-          const s = scroller.getBoundingClientRect();
-          const m = marker.getBoundingClientRect();
-          // Cleared once the divider has moved into / past the upper third.
-          return m.bottom < s.top + s.height * 0.35;
+          return remaining < 56;
         })();"#,
     )
     .await;
     result.ok().and_then(|value| value.as_bool()) == Some(true)
 }
 
-fn dismiss_channel_new_banner(mut read_session: Signal<Option<ChannelReadSession>>) {
+fn dismiss_channel_new_banner(
+    mut read_session: Signal<Option<ChannelReadSession>>,
+    mut refresh: Signal<u64>,
+) {
     let Some(mut session) = read_session() else {
         return;
     };
@@ -6653,6 +6778,7 @@ fn dismiss_channel_new_banner(mut read_session: Signal<Option<ChannelReadSession
     session.show_banner = false;
     session.new_count = 0;
     read_session.set(Some(session));
+    refresh.set(refresh() + 1);
 }
 
 fn truncate_chars(input: &str, max_chars: usize) -> String {

@@ -373,14 +373,14 @@ pub fn HelpPage() -> Element {
                         ul { class: "help-bullets",
                             li {
                                 strong { "Messages" }
-                                " — community channel traffic and direct threads."
+                                " — Channels / DMs / Contacts rail. Channel traffic lists who posted this session under each channel name (cleared when HQ restarts). Direct threads need a public key from a contact card (`meshcore://contact/add`) or a synced companion contact — channel display names alone are not enough."
                             }
                             li {
                                 strong { "Inbox" }
                                 " — operator queue: pending signups and held service alerts (when auto-relay is off)."
                             }
                         }
-                        p { "Ordinary DMs live under Messages → Direct, not Inbox." }
+                        p { "Ordinary DMs live under Messages → DMs (or Contacts with a known key), not Inbox." }
                     }
 
                     section { id: "help-map", class: "help-section",
@@ -586,11 +586,11 @@ pub fn HelpPage() -> Element {
                             }
                             li {
                                 strong { "Channel" }
-                                " — open Messages; post a short check-in on your community channel so volunteers know HQ is live."
+                                " — open Messages → Channels; post a short check-in on your community channel so volunteers know HQ is live. Speakers who post appear under the channel for this session only."
                             }
                             li {
-                                strong { "Roster" }
-                                " — approve pending enrollments only for people you trust; secrets are never shown in the log."
+                                strong { "Roster / Contacts" }
+                                " — approve pending enrollments only for people you trust; secrets are never shown in the log. DMs need a contact card or companion contact key — not a channel display name alone."
                             }
                             li {
                                 strong { "Flash only from cache" }

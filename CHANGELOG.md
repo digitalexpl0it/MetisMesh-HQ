@@ -2,73 +2,58 @@
 
 ## Unreleased
 
-### Messages rail
+## 0.1.6 — 2026-11-06
 
-- Channel bubble actions no longer include **DM** (MeshCore apps open DMs from the channel member list instead)
-- Channels list shows session speakers indented under each channel (cleared on app launch; filled when someone posts live)
+Package version `0.1.6` (Cargo / About). Windows Details may show `0.1.6.0`.
+
+Messages rail overhaul, MeshCore-aligned DMs, Windows desktop polish, and Infra admin capture — everything since 0.1.4.
+
+### Messages · rail
+
+- **Channels / DMs / Contacts** tabs with icons; Contacts **Roster** auto-fills from the node list
+- Custom sections (optional emoji) on Channels, DMs, and Contacts; star/favorite pins; rail section tables created on every DB open
+- Item menus under **settings** (gear) and **right-click**: Move to section, **Add section…**, Details, Block/Unblock, Refresh contact
+- Session speakers indented under each channel (cleared on app launch; filled when someone posts live)
 - DM only when a real public key is already known (contact card / companion contact) — channel display names alone never open a DM
+- Channel-only senders can still be Favorited as a Contacts → Pinned name bookmark; upgrades when an advert arrives
+- Per-tab fuzzy search; DMs search is thread-scoped (no roster dump)
+- Left/right panes drag-resizable (width remembered); col-resize cursor forced through WebView CSS + native cursor
+- Zebra row strips; blocked contacts stay listed but greyed out
+- **Refresh contact** throbber until path/status/telemetry finish; Details slide-down for channel or contact/DM
+- Slide-down panels sit above the splitter; Default keep is a top-right button → duration slide-down
 
-### Windows polish
+### Messages · chat
+
+- Compose **+** menu: my contact, my position, share channel (`meshcore://channel/add` for Public/hash; private name-only), share contact, share map location — private secrets never go in chat; Quick DM removed
+- `meshcore://contact/add` chips: **Add** / **Copy**; `meshcore://channel/add` chips: **Join** / **Copy**
+- Channel bubble actions: Reply / Quote / Copy / Favorite / Block (no bubble DM — MeshCore opens DMs from contacts with a key)
+- Chat bubbles: timestamp above; larger avatar/name; hops + sent/received below; action pill below the bubble
+- New-messages divider + unread badge until scrolled past (top of pane or bottom-of-thread); works when last-read is older than the loaded window
+- Join channel: private (name + hex secret), restore Public, hash/hashtag; create channel optional region tag
+- Create / join is one button → slide-down picker → form; channel cards truncate long previews
+- Composer emoji picker: larger glyph set + word filter; popovers dismiss on outside click
+- Switching channels/DMs no longer blanks the thread; list scrolls under `hq-main-fill`
+- Contact sync backfills `sender_pubkey` on recent name-only channel rows when the roster uniquely matches
+
+### Windows / desktop
 
 - Default EmergHQ brand logo uses an embedded data URL (WebView2 cannot load `metis://` in `<img>`); custom logos use `http://metis.localhost/…`
-- Bluetooth PIN slide-down sits above the welcome overlay so first-run Pair is usable
-- Welcome soft-deps probes are cached and Windows helper processes use `CREATE_NO_WINDOW` (stops UI stalls / flashing consoles during setup)
-- Release builds use `windows_subsystem = "windows"` so a cmd host does not stay open
-- Taskbar identity: set AppUserModelID + window icon from the mesh-head mark
-- BLE reconnect: skip aggressive GATT force-disconnect on session loss (avoids connect/disconnect loops); longer settle backoff
-- Offline map download: fetch Windows/Darwin `go-pmtiles` `.zip` (was looking for `.tar.gz`), extract with the zip crate, use `where` instead of `sh`
-- Map +/- zoom buttons owned by Dioxus (JS-injected controls were wiped on re-render)
-- Map trackpad zoom: HQ owns wheel/pinch (ctrl+wheel) so WebKitGTK/WebView2 cannot steal page zoom; two-finger scroll and pinch zoom the map on Linux and Windows
-- Messages page uses flex-fill main pane (WebKitGTK `height:100%` left a dead gap under the thread); reset WebView zoom to 1.0 on launch
-- Enrollment DMs: reply only to `#signup` / `#status` (same `#` command marker as channel bots); bare words and casual chat stay silent
-- BLE: three consecutive battery/channel timeouts while “connected” end the session and reconnect (was stuck Connected with `BLE TX error: Not connected`)
-- Messages compose **+** menu (channel and DM): my contact, my position, share channel (`meshcore://channel/add` for Public/hash; private name-only), share contact link, share map location — private secrets never go in chat; Quick DM removed (open DMs from Contacts when you have a public key)
-- Channel `meshcore://channel/add` chips show **Join** (same as contact **Add**)
-- Channel cards truncate long previews (URLs no longer bleed into the next card)
-- Chat bubbles: timestamp above; larger avatar/name inside the bubble with real padding; hops + sent/received below
-- Join channel: private (name + hex secret), restore Public, hash/hashtag channel; create channel optional advanced region tag
-- Messages list scrolls again under `hq-main-fill`; Create/join is one button → slide-down option picker → form
-- Companion already held (phone GATT / busy serial / early connect failures): stop auto-reconnect after a short streak and show “Companion busy — disconnect… then Connect again” instead of looping Reconnecting
-- Composer emoji picker: many more glyphs (reactions, faces, hands, mesh, status, weather, nature, food, people); panel scrolls
-- Messages: switching channels/DMs while a thread is open no longer shows a blank chat (paint from freshly loaded messages; scroller remounts per thread)
-- Infra Radio/TX settings: Get TX fills the dBm field; Get radio updates the Radio line; Get/Set TX and Get radio show a throbber while waiting on the mesh reply
-- Infra admin gets: capture replies into Status metrics / Settings fields (intervals, lat/lon, clock, repeat, …) with a green result banner and button throbbers — not only the bottom CLI transcript
-- Popovers (Messages compose + / emoji, Map Settings / Filters): click outside the menu to dismiss
-- Messages rail: **Channels / DMs / Contacts** tabs with icons; Contacts **Roster** auto-fills from the node list; custom sections (with optional emoji icon) on Channels and Contacts; star/favorite pins contacts; **Add** on `meshcore://contact/add` chips and DM bubbles; click channel or contact opens the chat thread; rail section tables created on every DB open
-- Messages rail item menus: move-to-section lives under **settings** (gear) and **right-click**; Move submenu lists sections plus **Add section…** (create then auto-move)
-- Channel bubble **Favorite** favorites the sender contact (not the channel); Messages left/right panes are drag-resizable (width remembered)
-- Section emoji uses the compose emoji picker button; Default keep is a single menu button instead of six chips
-- Messages rail: clearer col-resize cursor on the pane splitter; per-tab fuzzy search filters Channels / DMs / Contacts
-- Messages bubble **Favorite** resolves sender keys more reliably and refreshes the rail (Contacts → Pinned / DMs Favorites)
-- Pane splitter uses the native desktop col-resize cursor and keeps drag capture on a always-mounted overlay
-- DMs tab has its own **Section** button and custom sections (no longer lists Channels sections like “Locals”); DMs builtins seeded under the `dms` tab
-- Channel-only senders (no pubkey yet) can still be Favorited as a Contacts → Pinned name bookmark; upgrades when an advert arrives
-- DMs search is tab-scoped again (DMs stuck in old Channels sections no longer disappear); search also matches roster contacts to start a chat
-- Emoji picker: type common words (coffee, signal, heart…) to filter — same search on every emoji button
-- Messages pane splitter: force col-resize via WebView CSS class + native EwResize (WebKit was keeping the arrow)
-- DMs rail search filters DM threads only (no roster dump); short queries match names, not every pubkey hex digit
-- Channels: **Default keep** is a top-right button beside Create / join; options open in a slide-down panel
-- Default keep slide-down lists durations inline (dropdown was clipped under the panel footer)
-- Create / join channel picker: icons + soft color wells per action
-- Rail context/settings menus host on a full-viewport shell (WebKit was clipping under the rail); Move to section flies out to the right again (flips up/left near edges)
-- Name-only favorites show “awaiting advert” and auto-upgrade when the roster/advert resolves that name
-- Splitter cursor: await WebView style inject + native `ColResize` (fire-and-forget eval never applied)
-- Message bubble actions: drop redundant Pin/Contacts (Favorite already saves to Contacts → Pinned)
-- Awaiting-advert pin feedback is a toast (no longer a sticky rail banner); contact/DM right-click **Refresh contact** syncs the companion row, path cache, then requests status + telemetry over the air
-- Messages rail right-click / gear: **Details** opens a slide-down for channel or contact/DM (identity, GPS, path, last status, RF, recent messages; Refresh contact on devices)
-- Slide-down panels sit above the Messages splitter (green grip was painting through Details)
-- Messages compose no longer stays disabled after contact refresh (sync_phase was left on Contacts); Send unlocks whenever companion state is Connected
-- Roster Actions: icon-only colored buttons with tooltips (Details / Claim / Message / channel / Revoke) to free table width
-- Favorite feedback is toast-only (no sticky line under the composer); contact/DM hover tips use short name + 8-char prefix (not the full pubkey)
-- Contact/DM rail right-click / gear: **Block** / **Unblock** (confirm dialog; unblock also under Messages → Blocked); blocked rows stay in the list but are greyed out
-- Channels / DMs / Contacts rail lists use zebra row strips for easier scanning
-- **Refresh contact** shows a throbber beside the rail name (and on the Details button) until path/status/telemetry finish
-- Channel **New messages** divider + unread badge stay until you scroll past the break — including when the channel is already open and live traffic arrives (no longer auto-cleared just because unread fit on screen)
-- New messages divider still appears when last-read is older than the loaded window (badge with no break was dropping the cursor outside the last 20 rows)
-- New messages break clears once it reaches the top of the pane (not an arbitrary mid-screen band); short threads that fit on screen still clear without a fake scroll
-- New messages break also clears when you scroll to the bottom and cannot scroll further (open settle still ignores “already at bottom” so unread that fits is not wiped immediately)
-- `meshcore://contact/add` chips: larger **Add** / **Copy** under the URI (not cramped on the same line); bubble action pill sits below the bubble so it no longer covers those buttons
-- Contact sync backfills `sender_pubkey` on recent name-only channel rows when the roster uniquely matches
+- Bluetooth PIN slide-down sits above the welcome overlay; welcome soft-deps probes cached; Windows helpers use `CREATE_NO_WINDOW`
+- Release builds use `windows_subsystem = "windows"`; taskbar AppUserModelID + mesh-head icon
+- BLE reconnect: skip aggressive GATT force-disconnect on session loss; three consecutive battery/channel timeouts end the session and reconnect
+- Companion already held (phone GATT / busy serial): stop auto-reconnect and show “Companion busy…” instead of looping
+- Offline map download: Windows/Darwin `go-pmtiles` `.zip` + zip crate; MapLibre +/- and trackpad zoom owned by HQ (no page zoom steal)
+- Enrollment DMs: reply only to `#signup` / `#status`; bare words stay silent
+
+### Infra / Roster
+
+- Infra Radio/TX: Get TX fills dBm; Get radio updates the Radio line; Get/Set TX and Get radio show throbbers
+- Infra admin gets: capture replies into Status metrics / Settings fields with green result banners and button throbbers
+- Roster Actions: icon-only colored buttons with tooltips (Details / Claim / Message / channel / Revoke)
+
+## 0.1.5 — 2026-11-05
+
+Intermediate package bump (`0.1.5` on tag `v0.1.6` history). Release notes for that window are folded into **0.1.6** above.
 
 ## 0.1.4.0 — 2026-11-04
 

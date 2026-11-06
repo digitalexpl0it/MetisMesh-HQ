@@ -10,7 +10,7 @@ Churches, neighborhoods, and volunteer groups run this on a regular computer sit
 
 - **Radio pool** — connect MeshCore companions over Bluetooth, USB serial, or TCP (Wi-Fi / Ethernet, default port 5000); multiple radios with a primary that owns bot and enrollment traffic
 - **Enrollment** — approve join requests, hand out private channel secrets, run the local bot on METIS-INFO (`#weather`, `#quake`, `#amber`, and related commands)
-- **Messages** — public and private channels plus direct threads; unread and @mention tracking (inbound plus HQ bot/service posts); optional per-channel look; block senders (including by channel display name)
+- **Messages** — Channels / DMs / Contacts rail; public and private channels with session speakers under each channel; direct threads only when a public key is known (contact card / companion contact); unread and @mention tracking; optional per-channel look; block senders (including by channel display name); share via `meshcore://contact/add` and `meshcore://channel/add` chips
 - **Inbox** — pending signups and held community alerts (weather / Amber / civil) for operator confirm or auto-relay
 - **Roster** — everyone heard on the mesh (enrolled or not); contact QR; clear NEW / prune heard-only
 - **Map** — MapLibre with a local style (optional PMTiles offline packs); live pins, message sonar, tracked movers; operator path **Trace** (tracked/claimed) and passive **Traffic** edges
@@ -70,11 +70,11 @@ Critical UI libraries are probed before the window opens. On Debian/Ubuntu the a
 Releases are created only from version tags (not every `main` push):
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.6
+git push origin v0.1.6
 ```
 
-That runs the Build workflow and attaches `metis-mesh-hq-*-v0.1.0.tar.gz` / `.zip` to the new release.
+That runs the Build workflow and attaches `metis-mesh-hq-*-v0.1.6.tar.gz` / `.zip` to the new release. If `v0.1.6` already exists on an older commit, move it after the release commit (`git tag -f v0.1.6` then `git push --force origin v0.1.6`) or use the next patch version.
 
 ## Requirements (build from source)
 

@@ -19,8 +19,8 @@ One page for church / community volunteers running **Metis Mesh HQ** when the WA
 2. **Open HQ** — start Metis Mesh HQ from the desktop / Start menu (no cloud login).
 3. **Radio** — Settings → Connect: confirm the companion shows connected. If USB moved ports, Refresh ports and reconnect.
 4. **Map** — open Map; confirm local pins / last-heard nodes (self-reported GPS only).
-5. **Channel** — open Messages; post a short check-in on your community channel so volunteers know HQ is live.
-6. **Roster** — approve pending enrollments only for people you trust; secrets are never shown in the log.
+5. **Channel** — open Messages → Channels; post a short check-in on your community channel so volunteers know HQ is live. Speakers who post appear under the channel for this session only.
+6. **Roster / Contacts** — approve pending enrollments only for people you trust; secrets are never shown in the log. DMs need a contact card or companion contact key — not a channel display name alone.
 7. **Flash only from cache** — Settings → Flasher. Flash is blocked if a file fails checksum. If the locker is empty, **Import pack** and pick the USB `.zip`.
 
 ## What the HQ computer needs on battery / UPS

@@ -5,7 +5,6 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::io::Write;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -213,6 +212,7 @@ pub fn save_token(data_dir: &Path, token: &str) -> Result<(), String> {
     }
     #[cfg(unix)]
     {
+        use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         let mut opts = fs::OpenOptions::new();
         opts.create(true).write(true).truncate(true).mode(0o600);

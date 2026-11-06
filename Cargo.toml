@@ -1,6 +1,6 @@
 [package]
 name = "metis-mesh-hq"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 description = "Offline emergency headquarters for MeshCore communities"
 license = "MIT"
@@ -20,7 +20,9 @@ ed25519-dalek = "2"
 futures-util = "0.3"
 hex = "0.4"
 keyring = "3"
-meshcore-rs = { version = "0.2", default-features = false, features = ["ble", "serial", "tcp"] }
+# Path pin: vendored 0.2.0 with Windows BLE fixes (write-with-response, notify
+# ready before APPSTART, longer find, subscribe retry). Drop when upstream lands.
+meshcore-rs = { path = "vendor/meshcore-rs", default-features = false, features = ["ble", "serial", "tcp"] }
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 rand = "0.8"
 regex = "1"

@@ -150,6 +150,10 @@ html, body, #main {
         .with_background_color((16, 20, 24, 255))
         .with_custom_head(boot_head)
         .with_disable_context_menu(true)
+        // Dioxus/wry default on Windows is %LOCALAPPDATA%\<exe-stem>. Release
+        // builds ship as metis-mesh-hq-0.1.x.exe, which created a new WebView2
+        // folder per version. Keep one stable cache across upgrades.
+        .with_data_directory(webview_data_dir())
         .with_custom_protocol("metis", |_id, request| {
             serve_metis_protocol(request)
         })
@@ -509,6 +513,19 @@ pub(crate) fn data_dir() -> PathBuf {
         return PathBuf::from(path);
     }
     default_profile_data_dir().unwrap_or_else(|| PathBuf::from("data"))
+}
+
+/// WebView2 / WebKit user-data folder. Must not include the app version — the
+/// dioxus default used the exe filename stem (`metis-mesh-hq-0.1.7`), which
+/// littered `%LOCALAPPDATA%` with one folder per release.
+fn webview_data_dir() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            return PathBuf::from(local).join("MetisMeshHQ").join("webview");
+        }
+    }
+    data_dir().join("webview")
 }
 
 fn default_profile_data_dir() -> Option<PathBuf> {

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Windows install / profile
+
+- WebView2 cache uses a stable `%LOCALAPPDATA%\MetisMeshHQ\webview` path (dioxus default was `%LOCALAPPDATA%\<exe-name>`, so each `metis-mesh-hq-0.1.x.exe` created a new folder). Old versioned folders under Local are safe to delete. HQ data stays in `%APPDATA%\MetisMeshHQ`
+
 ### Offline map
 
 - Outline basemap + PMTiles use `http://metis.localhost/…` on Windows (WebView2 will not fetch `metis://` for MapLibre sources) so land outlines show and Place on map works without a ZIP first
@@ -14,7 +18,9 @@
 - Welcome Bluetooth list: Selected / Pairing… / Connecting… / Connected badge + checkmark on the linked row; Pair button becomes Connected with a “Companion linked” hint
 - Stop reconnect loops when channel sync times out after a long contact dump — stay linked, settle, retry channel setup in the background
 - BLE settle delays after GATT open and after contacts (longer on Windows); one get_channel retry before deferring
-- APPSTART / device query listen before write (meshcore-rs race dropped fast SelfInfo → “Reading companion identity…” timeout); longer Windows settle + one BLE retry
+- APPSTART / device query listen before write (meshcore-rs race dropped fast SelfInfo → “Reading companion identity…” timeout); longer Windows settle
+- Windows BLE: stop auto-reconnect after APPSTART / device-not-found (reconnect loop was resetting companions and hiding them from Scan); drop GATT so the radio can advertise again; single APPSTART attempt + longer post-GATT settle
+- Vendored `meshcore-rs` BLE: write-with-response (MeshCore-recommended; WithoutResponse often silent-fails on Win11), arm notify stream before any write, subscribe retry, 8s device find + known-peripheral match
 
 ## 0.1.6 — 2026-11-06
 

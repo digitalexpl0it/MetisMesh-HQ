@@ -2284,7 +2284,26 @@ fn clarify_ble_connect_error(raw: &str) -> String {
     if is_explicit_companion_busy_error(raw) {
         return format_held_disconnect("ble", raw);
     }
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("device not found") || lower.contains("not found") {
+        return format!(
+            "{raw} The companion is not advertising yet — after a failed link it often needs a few seconds (or a power cycle) before Scan can see it again. Wait, then Scan / Connect."
+        );
+    }
     raw.to_string()
+}
+
+/// Early BLE handshake failures (APPSTART / missing advert). Auto-reconnect
+/// hammers the radio and can knock it offline; stop the slot instead.
+fn is_ble_handshake_failure(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("appstart")
+        || (lower.contains("timeout")
+            && (lower.contains("selfinfo")
+                || lower.contains("self info")
+                || lower.contains("reading companion")))
+        || lower.contains("device not found")
+        || lower.contains("meshcore device not found")
 }
 
 fn clarify_usb_connect_error(raw: &str) -> String {
@@ -2591,11 +2610,15 @@ async fn slot_loop(
             let _ = meshcore.disconnect().await;
         }
         // Tear down OS GATT when the operator stops the slot (so the phone can
-        // take the radio). On Windows, also skipping force_disconnect during
-        // Lost avoids a WinRT connect/disconnect race that loops forever.
+        // take the radio), or after an early BLE handshake failure (so the
+        // companion can advertise again for Scan). Skipping force_disconnect on
+        // ordinary Windows Lost+reconnect avoided a WinRT loop; handshake
+        // failures now stop the slot instead of reconnecting.
+        let handshake_lost = matches!(&end, SessionEnd::Lost(err) if is_ble_handshake_failure(err));
         let force_ble_drop = ctx.transport == "ble"
             && match &end {
                 SessionEnd::Stopped => true,
+                SessionEnd::Lost(_) if handshake_lost => true,
                 SessionEnd::Lost(_) => {
                     #[cfg(target_os = "windows")]
                     {
@@ -2613,6 +2636,10 @@ async fn slot_loop(
                 .lock()
                 .unwrap_or_else(|err| err.into_inner())
                 .clone();
+            // Brief pause so meshcore-rs disconnect settles before WinRT drop.
+            if handshake_lost {
+                tokio::time::sleep(Duration::from_millis(800)).await;
+            }
             match tokio::time::timeout(
                 Duration::from_secs(8),
                 crate::ble_pair::force_disconnect(&name),
@@ -2640,11 +2667,23 @@ async fn slot_loop(
             SessionEnd::Lost(error) => {
                 let error = if ctx.transport == "usb" {
                     clarify_usb_session_error(&error)
+                } else if ctx.transport == "ble" {
+                    clarify_ble_connect_error(&error)
                 } else {
                     error
                 };
                 if ctx.transport == "usb" && is_fatal_usb_session_error(&error) {
                     end_slot_disconnected(&ctx, error);
+                    return;
+                }
+                // Do not auto-reconnect after APPSTART / not-found — that loop
+                // overloaded companions and hid them from Scan until app restart.
+                if ctx.transport == "ble" && is_ble_handshake_failure(&error) {
+                    let detail = format!(
+                        "{error} Auto-reconnect stopped so the radio can recover. \
+Wait ~10 seconds, Scan, then Connect once."
+                    );
+                    end_slot_disconnected(&ctx, detail);
                     return;
                 }
                 let early = started.elapsed() <= EARLY_SESSION;
@@ -2670,7 +2709,7 @@ async fn slot_loop(
                 // Windows BLE needs more settle time after a dropped GATT session.
                 #[cfg(target_os = "windows")]
                 if ctx.transport == "ble" {
-                    backoff = backoff.max(Duration::from_secs(5));
+                    backoff = backoff.max(Duration::from_secs(8));
                 }
                 clear_session_telemetry(status);
                 write_status(status, "reconnecting", error.clone());
@@ -3520,8 +3559,10 @@ const APPSTART_FRAME: [u8; 13] = [
 
 fn appstart_timeout(transport: &str) -> Duration {
     if transport == "ble" {
+        // One attempt only on Windows — a long double-timeout was holding GATT
+        // open long enough to reset some companions.
         if cfg!(target_os = "windows") {
-            Duration::from_secs(15)
+            Duration::from_secs(12)
         } else {
             Duration::from_secs(10)
         }
@@ -3533,15 +3574,18 @@ fn appstart_timeout(transport: &str) -> Duration {
 fn clarify_appstart_timeout(transport: &str, raw: &str) -> String {
     let lower = raw.to_ascii_lowercase();
     if !(lower.contains("timeout")
-        && (lower.contains("selfinfo") || lower.contains("self info") || lower.contains("response")))
+        && (lower.contains("selfinfo")
+            || lower.contains("self info")
+            || lower.contains("response")
+            || lower.contains("appstart")))
     {
         return raw.to_string();
     }
     if transport == "ble" {
         return format!(
             "{raw} Bluetooth linked, but the companion never answered APPSTART. \
-Close the phone MeshCore app, forget/re-pair if the PIN prompt never appeared, \
-and avoid running HQ elevated (admin) — that often breaks the GATT session on Windows."
+Close the phone MeshCore app, wait ~10s for the radio to advertise again, then Connect once \
+(do not spam Connect). Avoid running HQ elevated (admin)."
         );
     }
     clarify_usb_session_error(raw)
@@ -3569,6 +3613,9 @@ async fn companion_appstart_once(
 /// APPSTART with listen-before-write. meshcore-rs `send_appstart` subscribes only
 /// after the write, so a fast SelfInfo is dropped and we sit until timeout —
 /// common on Windows BLE right after GATT open.
+///
+/// Windows: single attempt only. A second APPSTART while GATT is wedged held the
+/// link open for ~30s and some companions drop offline / stop advertising.
 async fn companion_appstart(
     commands: &meshcore_rs::commands::CommandHandler,
     dispatcher: &meshcore_rs::events::EventDispatcher,
@@ -3577,14 +3624,9 @@ async fn companion_appstart(
     let timeout = appstart_timeout(transport);
     match companion_appstart_once(commands, dispatcher, timeout).await {
         Ok(info) => Ok(info),
-        Err(err) if transport == "ble" => {
+        Err(err) if transport == "ble" && !cfg!(target_os = "windows") => {
             hq_log!(warn, "appstart: {err}; settling and retrying once");
-            let settle = if cfg!(target_os = "windows") {
-                Duration::from_millis(1500)
-            } else {
-                Duration::from_millis(600)
-            };
-            tokio::time::sleep(settle).await;
+            tokio::time::sleep(Duration::from_millis(600)).await;
             companion_appstart_once(commands, dispatcher, timeout)
                 .await
                 .map_err(|e| clarify_appstart_timeout(transport, &e))
@@ -3722,9 +3764,10 @@ async fn run_session(
     // session is stuck mid-sync or waiting on the command lock.
     *live.lock().unwrap_or_else(|err| err.into_inner()) = Some(meshcore.clone());
 
-    // Windows BLE needs a settle after GATT open before companion frames.
+    // Windows BLE: notifications often lag 0.5–2s after subscribe; give the
+    // stack time before APPSTART or the reply never arrives.
     if ctx.transport == "ble" {
-        let ms = if cfg!(target_os = "windows") { 2000 } else { 500 };
+        let ms = if cfg!(target_os = "windows") { 3500 } else { 500 };
         write_sync(
             status,
             SyncPhase::AppStart,
@@ -6772,6 +6815,16 @@ mod tests {
         assert!(lower.contains("appstart"), "{msg}");
         assert!(lower.contains("phone"), "{msg}");
         assert!(lower.contains("elevated") || lower.contains("admin"), "{msg}");
+    }
+
+    #[test]
+    fn ble_handshake_failures_detected_for_stop_reconnect() {
+        assert!(is_ble_handshake_failure("Timeout waiting for Some(SelfInfo)"));
+        assert!(is_ble_handshake_failure(
+            "Timeout waiting for response Bluetooth linked, but the companion never answered APPSTART."
+        ));
+        assert!(is_ble_handshake_failure("MeshCore device not found"));
+        assert!(!is_ble_handshake_failure("Radio event stream ended."));
     }
 
     #[test]

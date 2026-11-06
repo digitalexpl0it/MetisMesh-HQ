@@ -533,10 +533,12 @@ pub fn save_basemap(kind: BasemapKind) {
         .set_setting("map_basemap", kind.as_str());
 }
 
-/// Outline GeoJSON is served over `metis://` (not inlined) so style swaps stay small
-/// enough for `document::eval` and do not blank the WebView.
+/// Outline GeoJSON is served over the `metis` custom protocol (not inlined) so
+/// style swaps stay small enough for `document::eval` and do not blank the WebView.
+/// On Windows wry exposes that as `http://metis.localhost` — WebView2 will not
+/// fetch `metis://` for MapLibre sources.
 fn outline_geojson_url(name: &str) -> String {
-    format!("metis://local/geojson/{name}")
+    crate::brand::metis_asset_url(&format!("geojson/{name}"))
 }
 
 fn outline_colors(kind: BasemapKind) -> (&'static str, &'static str, &'static str) {

@@ -2132,6 +2132,48 @@ option {
   word-break: break-word;
 }
 
+.welcome-link-status {
+  margin: 0.5rem 0 0.85rem;
+}
+
+.welcome-link-status .welcome-note {
+  margin: 0;
+}
+
+.welcome-link-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0.55rem 0.65rem;
+  border-radius: 0.4rem;
+  border: 1px solid rgba(125, 211, 252, 0.28);
+  background: rgba(14, 55, 78, 0.45);
+  color: #e0f2fe;
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.welcome-link-row .welcome-note {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.welcome-note-ok {
+  border-color: rgba(61, 214, 140, 0.35);
+  background: rgba(16, 56, 40, 0.55);
+  color: #bbf7d0;
+}
+
+.welcome-note-warn {
+  border-color: rgba(248, 113, 113, 0.35);
+  background: rgba(70, 24, 24, 0.45);
+  color: #fecaca;
+}
+
 .welcome-actions {
   display: flex;
   flex-wrap: wrap;
@@ -2533,6 +2575,10 @@ option {
   margin: 0.45rem 0 0;
   font-size: 0.65rem;
   color: #9aa3af;
+}
+
+.map-download-status--error {
+  color: #f87171;
 }
 
 .map-download-fab {

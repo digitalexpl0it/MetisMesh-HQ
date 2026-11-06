@@ -40,6 +40,7 @@ pub fn active_region_id() -> Option<String> {
 
 /// URL the MapLibre PMTiles protocol should fetch (custom `metis` scheme).
 /// `v=` is the file mtime so a re-download of the same region id busts the JS cache.
+/// On Windows this is `http://metis.localhost/…` — WebView2 will not fetch `metis://`.
 pub fn basemap_protocol_url() -> Option<String> {
     let path = current_pmtiles_path()?;
     let id = active_region_id().unwrap_or_else(|| "basemap".into());
@@ -49,5 +50,5 @@ pub fn basemap_protocol_url() -> Option<String> {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    Some(format!("metis://local/pmtiles/{id}?v={v}"))
+    Some(crate::brand::metis_asset_url(&format!("pmtiles/{id}?v={v}")))
 }

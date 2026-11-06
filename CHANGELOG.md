@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Offline map
+
+- Outline basemap + PMTiles use `http://metis.localhost/…` on Windows (WebView2 will not fetch `metis://` for MapLibre sources) so land outlines show and Place on map works without a ZIP first
+- Download card keeps status after Working… ends; ZIP/place downloads toast on success or error instead of going silent
+- HTTP downloads (map packs, firmware sync, presets) use OS native TLS so Zscaler / corporate roots in the Windows trust store work — no cert-ignore option
+
+### Windows BLE
+
+- After pair/connect: welcome step shows pairing → connecting → syncing feedback with a throbber; Continue/Skip stay disabled until the attempt finishes
+- Stop reconnect loops when channel sync times out after a long contact dump — stay linked, settle, retry channel setup in the background
+- BLE settle delays after GATT open and after contacts (longer on Windows); one get_channel retry before deferring
+
 ## 0.1.6 — 2026-11-06
 
 Package version `0.1.6` (Cargo / About). Windows Details may show `0.1.6.0`.

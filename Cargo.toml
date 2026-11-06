@@ -1,6 +1,6 @@
 [package]
 name = "metis-mesh-hq"
-version = "0.1.6"
+version = "0.1.6a"
 edition = "2021"
 description = "Offline emergency headquarters for MeshCore communities"
 license = "MIT"
@@ -35,7 +35,10 @@ thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 unicode-segmentation = "1"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
-ureq = { version = "2", default-features = false, features = ["tls"] }
+# native-tls → Windows SChannel / macOS Security / OpenSSL so corporate MITM
+# roots (Zscaler, etc.) already in the OS trust store are honored. rustls+webpki
+# only knows Mozilla CAs and fails with "certificate unknown" behind those proxies.
+ureq = { version = "2", default-features = false, features = ["native-tls"] }
 uuid = "1"
 webpki-roots = "0.26"
 zip = { version = "2", default-features = false, features = ["deflate"] }

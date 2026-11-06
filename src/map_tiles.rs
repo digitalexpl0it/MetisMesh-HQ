@@ -473,7 +473,7 @@ pub fn start_named_bbox_download(
         detail: format!("Preparing “{name}”…"),
         running: true,
     });
-    std::thread::Builder::new()
+    if let Err(err) = std::thread::Builder::new()
         .name("metis-pmtiles-named".into())
         .spawn(move || {
             let result = (|| -> Result<String, String> {
@@ -570,7 +570,14 @@ pub fn start_named_bbox_download(
                 }),
             }
         })
-        .ok();
+    {
+        set_download(DownloadStatus {
+            region_id: String::new(),
+            phase: "error".into(),
+            detail: format!("Could not start download thread: {err}"),
+            running: false,
+        });
+    }
 }
 
 fn radius_miles_from_bbox(bbox: [f64; 4]) -> f64 {
@@ -591,6 +598,7 @@ pub fn start_area_download(
 ) {
     let status = download_status();
     if status.running {
+        // Caller should toast; keep status detail so the card still shows progress.
         return;
     }
     set_download(DownloadStatus {
@@ -599,7 +607,7 @@ pub fn start_area_download(
         detail: "Looking up area…".into(),
         running: true,
     });
-    std::thread::Builder::new()
+    if let Err(err) = std::thread::Builder::new()
         .name("metis-pmtiles-area".into())
         .spawn(move || {
             let result = (|| -> Result<String, String> {
@@ -683,7 +691,14 @@ pub fn start_area_download(
                 }),
             }
         })
-        .ok();
+    {
+        set_download(DownloadStatus {
+            region_id: String::new(),
+            phase: "error".into(),
+            detail: format!("Could not start download thread: {err}"),
+            running: false,
+        });
+    }
 }
 
 fn resolve_latest_build_url() -> Result<String, String> {
@@ -801,6 +816,7 @@ fn which_pmtiles() -> Result<PathBuf, String> {
             .next()
             .unwrap_or("")
             .trim()
+            .trim_end_matches('\r')
             .to_string();
         if path.is_empty() {
             return Err("pmtiles not on PATH".into());
@@ -994,7 +1010,7 @@ pub fn start_download(db: std::sync::Arc<Db>, region_id: String) {
         detail: "Starting download…".into(),
         running: true,
     });
-    std::thread::Builder::new()
+    if let Err(err) = std::thread::Builder::new()
         .name("metis-pmtiles".into())
         .spawn(move || {
             let result = run_download(&db, &region_id);
@@ -1021,7 +1037,14 @@ pub fn start_download(db: std::sync::Arc<Db>, region_id: String) {
             }
             sync_active_path(&db);
         })
-        .ok();
+    {
+        set_download(DownloadStatus {
+            region_id: String::new(),
+            phase: "error".into(),
+            detail: format!("Could not start download thread: {err}"),
+            running: false,
+        });
+    }
 }
 
 fn run_download(db: &Db, region_id: &str) -> Result<(), String> {

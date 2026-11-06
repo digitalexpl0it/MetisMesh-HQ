@@ -33,9 +33,10 @@ fn brand_dir() -> PathBuf {
 
 /// Cross-platform URL for a `metis` custom-protocol asset.
 ///
-/// WebView2 on Windows does not load `metis://…` in `<img src>` — wry remaps the
-/// handler to `http://metis.localhost/…`. Linux/macOS keep the custom scheme.
-fn metis_asset_url(path_and_query: &str) -> String {
+/// WebView2 on Windows does not load `metis://…` in `<img src>` or MapLibre
+/// fetches — wry remaps the handler to `http://metis.localhost/…`. Linux/macOS
+/// keep the custom scheme.
+pub fn metis_asset_url(path_and_query: &str) -> String {
     let path = path_and_query.trim_start_matches('/');
     #[cfg(target_os = "windows")]
     {

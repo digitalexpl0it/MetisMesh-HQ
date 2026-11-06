@@ -2757,6 +2757,13 @@ pub fn MapPage() -> Element {
                                     let zip = zip_input();
                                     let radius = radius_miles() as f64;
                                     let db = state().db.clone();
+                                    if crate::map_tiles::download_status().running {
+                                        crate::toast::push(
+                                            crate::toast::ToastKind::Warn,
+                                            "Wait for the current map download to finish.",
+                                        );
+                                        return;
+                                    }
                                     spawn(async move {
                                         let cam = map_get_camera().await;
                                         let center = cam.map(|c| (c.lat, c.lng));
@@ -2766,23 +2773,36 @@ pub fn MapPage() -> Element {
                                             radius,
                                             center,
                                         );
-                                        dl_note.set("Download started…".into());
+                                        dl_note.set("Looking up area…".into());
                                         show_download.set(true);
+                                        tick.with_mut(|n| *n = n.wrapping_add(1));
                                         for _ in 0..180 {
                                             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                                             tick.with_mut(|n| *n = n.wrapping_add(1));
                                             let s = crate::map_tiles::download_status();
                                             if !s.running {
+                                                let detail = if s.detail.is_empty() {
+                                                    "Download stopped with no status.".into()
+                                                } else {
+                                                    s.detail.clone()
+                                                };
+                                                dl_note.set(detail.clone());
                                                 if s.phase == "done" {
-                                                    dl_note.set(s.detail.clone());
                                                     // Refresh style so Streets picks up the new archive.
                                                     preserve_camera.set(map_get_camera().await);
                                                     if *basemap.peek() == BasemapKind::Outline {
                                                         basemap.set(BasemapKind::Streets);
                                                     }
                                                     style_key.with_mut(|n| *n = n.wrapping_add(1));
+                                                    crate::toast::push(
+                                                        crate::toast::ToastKind::Success,
+                                                        "Offline map pack ready.",
+                                                    );
                                                 } else if s.phase == "error" {
-                                                    dl_note.set(s.detail.clone());
+                                                    crate::toast::push(
+                                                        crate::toast::ToastKind::Error,
+                                                        detail,
+                                                    );
                                                 }
                                                 break;
                                             }
@@ -2793,9 +2813,32 @@ pub fn MapPage() -> Element {
                                 if crate::map_tiles::download_status().running { "Working…" } else { "Download" }
                             }
                         }
-                        if crate::map_tiles::download_status().running {
-                            p { class: "map-download-status",
-                                "{crate::map_tiles::download_status().detail}"
+                        {
+                            // Keep the last status after Working… ends — previously the
+                            // card cleared the moment `running` flipped false, so ZIP
+                            // failures looked like a silent no-op.
+                            let dl = crate::map_tiles::download_status();
+                            let note = dl_note();
+                            let show = dl.running
+                                || !note.is_empty()
+                                || dl.phase == "error"
+                                || dl.phase == "done";
+                            let text = if dl.running || note.is_empty() {
+                                dl.detail.clone()
+                            } else {
+                                note
+                            };
+                            let class = if dl.phase == "error" && !dl.running {
+                                "map-download-status map-download-status--error"
+                            } else {
+                                "map-download-status"
+                            };
+                            if show && !text.is_empty() {
+                                rsx! {
+                                    p { class: "{class}", "{text}" }
+                                }
+                            } else {
+                                rsx! {}
                             }
                         }
                         {

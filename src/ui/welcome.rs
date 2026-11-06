@@ -71,6 +71,17 @@ pub fn WelcomeWizard(
     let report = deps::soft_status();
     let ble_scanning = radio.state == "scanning" || radio.state == "pairing";
     let usb_scanning = radio.state == "scanning_usb";
+    let companion_linking = matches!(
+        radio.state.as_str(),
+        "pairing" | "connecting" | "reconnecting"
+    ) || radio.sync_phase.is_active();
+    let companion_linked = radio.state == "connected";
+    let companion_failed = radio.state == "error"
+        || radio.state == "disconnected"
+            && radio
+                .detail
+                .to_ascii_lowercase()
+                .contains("busy");
 
     let finish = move |action: WelcomeFinishAction| {
         set_welcome_done(true);
@@ -206,17 +217,44 @@ pub fn WelcomeWizard(
                         p { class: "welcome-copy",
                             "Optional. Pair a MeshCore companion now, or skip and use Settings → Connect later."
                         }
-                        p { class: "welcome-note",
-                            "Radio: {radio.state} — {radio.detail}"
+                        div { class: "welcome-link-status",
+                            if companion_linking {
+                                span { class: "welcome-link-row",
+                                    Throbber { size: 14 }
+                                    span { class: "welcome-note",
+                                        if radio.state == "pairing" {
+                                            "Pairing… enter the same PIN in the Windows Bluetooth prompt if it appears, then wait for the link."
+                                        } else if radio.sync_phase.is_active() {
+                                            "Connected — syncing companion ({radio.sync_label}). Stay on this step until ready."
+                                        } else {
+                                            "Connecting… {radio.detail}"
+                                        }
+                                    }
+                                }
+                            } else if companion_linked {
+                                p { class: "welcome-note welcome-note-ok",
+                                    "Connected — {radio.detail}. You can continue."
+                                }
+                            } else if companion_failed {
+                                p { class: "welcome-note welcome-note-warn",
+                                    "{radio.detail}"
+                                }
+                            } else {
+                                p { class: "welcome-note",
+                                    "Radio: {radio.state} — {radio.detail}"
+                                }
+                            }
                         }
                         div { class: "welcome-transport-tabs",
                             button {
                                 class: if companion_tab() == CompanionTab::Bluetooth { "welcome-transport active" } else { "welcome-transport" },
+                                disabled: companion_linking,
                                 onclick: move |_| companion_tab.set(CompanionTab::Bluetooth),
                                 "Bluetooth"
                             }
                             button {
                                 class: if companion_tab() == CompanionTab::Usb { "welcome-transport active" } else { "welcome-transport" },
+                                disabled: companion_linking,
                                 onclick: move |_| {
                                     companion_tab.set(CompanionTab::Usb);
                                     state().radio.scan_usb();
@@ -225,6 +263,7 @@ pub fn WelcomeWizard(
                             }
                             button {
                                 class: if companion_tab() == CompanionTab::Network { "welcome-transport active" } else { "welcome-transport" },
+                                disabled: companion_linking,
                                 onclick: move |_| companion_tab.set(CompanionTab::Network),
                                 "TCP"
                             }
@@ -272,11 +311,16 @@ pub fn WelcomeWizard(
                                     div { class: "welcome-actions",
                                         Button {
                                             kind: ButtonKind::Primary,
-                                            disabled: ble_target().trim().is_empty(),
+                                            disabled: ble_target().trim().is_empty() || companion_linking,
                                             onclick: move |_| {
                                                 on_request_pin.call(ble_target());
                                             },
-                                            "Pair with PIN"
+                                            if companion_linking {
+                                                Throbber { size: 14 }
+                                            } else {
+                                                Icon { name: IconName::Bluetooth, size: 14 }
+                                            }
+                                            if companion_linking { "Working…" } else { "Pair with PIN" }
                                         }
                                     }
                                 }
@@ -320,11 +364,11 @@ pub fn WelcomeWizard(
                                     div { class: "welcome-actions",
                                         Button {
                                             kind: ButtonKind::Primary,
-                                            disabled: usb_path().trim().is_empty(),
+                                            disabled: usb_path().trim().is_empty() || companion_linking,
                                             onclick: move |_| {
                                                 state().radio.connect_usb(usb_path());
                                             },
-                                            "Connect USB"
+                                            if companion_linking { "Working…" } else { "Connect USB" }
                                         }
                                     }
                                 }
@@ -344,7 +388,7 @@ pub fn WelcomeWizard(
                                     div { class: "welcome-actions",
                                         Button {
                                             kind: ButtonKind::Primary,
-                                            disabled: tcp_host().trim().is_empty(),
+                                            disabled: tcp_host().trim().is_empty() || companion_linking,
                                             onclick: move |_| {
                                                 let host = tcp_host().trim().to_string();
                                                 let port = tcp_port().trim().to_string();
@@ -355,7 +399,7 @@ pub fn WelcomeWizard(
                                                 };
                                                 state().radio.connect_tcp(addr);
                                             },
-                                            "Connect TCP"
+                                            if companion_linking { "Working…" } else { "Connect TCP" }
                                         }
                                     }
                                 }
@@ -364,25 +408,38 @@ pub fn WelcomeWizard(
                         div { class: "welcome-actions",
                             Button {
                                 kind: ButtonKind::Ghost,
+                                disabled: companion_linking,
                                 onclick: move |_| step.set(WelcomeStep::System),
                                 "Back"
                             }
                             Button {
                                 kind: ButtonKind::Ghost,
+                                disabled: companion_linking,
                                 onclick: move |_| step.set(WelcomeStep::Done),
-                                "Skip"
+                                if companion_linking { "Wait…" } else { "Skip" }
                             }
                             Button {
                                 kind: ButtonKind::Primary,
+                                disabled: companion_linking,
                                 onclick: move |_| step.set(WelcomeStep::Done),
-                                "Continue"
+                                if companion_linked {
+                                    "Continue"
+                                } else if companion_linking {
+                                    "Connecting…"
+                                } else {
+                                    "Continue without radio"
+                                }
                             }
                         }
                     },
                     WelcomeStep::Done => rsx! {
                         h1 { class: "welcome-title", "You're set" }
                         p { class: "welcome-copy",
-                            "HQ is ready. Connect or manage radios anytime under Settings → Connect. Open About for version and data folder details."
+                            if companion_linked {
+                                "Companion is linked. Connect or manage radios anytime under Settings → Connect. Open About for version and data folder details."
+                            } else {
+                                "HQ is ready. Connect or manage radios anytime under Settings → Connect. Open About for version and data folder details."
+                            }
                         }
                         div { class: "welcome-actions",
                             Button {

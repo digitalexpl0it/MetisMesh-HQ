@@ -3609,8 +3609,21 @@ async fn run_session(
     // session is stuck mid-sync or waiting on the command lock.
     *live.lock().unwrap_or_else(|err| err.into_inner()) = Some(meshcore.clone());
 
+    // Windows BLE needs a short settle after GATT open before companion frames.
+    if ctx.transport == "ble" {
+        let ms = if cfg!(target_os = "windows") { 1200 } else { 400 };
+        write_sync(
+            status,
+            SyncPhase::AppStart,
+            "Bluetooth linked — settling…",
+            None,
+        );
+        tokio::time::sleep(Duration::from_millis(ms)).await;
+    }
+
     let identity: Option<SelfIdentity>;
-    let mut channel_setup_done = false;
+    let channel_setup_done = Arc::new(AtomicBool::new(false));
+    let channel_setup_inflight = Arc::new(AtomicBool::new(false));
     let max_channels;
     {
         let commands = meshcore.commands().lock().await;
@@ -3733,19 +3746,43 @@ async fn run_session(
             sync_contacts(db, &commands, meshcore.dispatcher(), Some(status), radio).await
         {
             hq_log!(warn, "contact sync: {err}");
-            if is_link_error(&err) {
+            if is_hard_gatt_drop(&err) || is_link_error(&err) {
                 return SessionEnd::Lost(err);
             }
         }
+        // After a long BLE contact dump the GATT link is often soft-dead for a
+        // moment; give it air before channel queries (Windows needs longer).
+        if ctx.transport == "ble" {
+            let ms = if cfg!(target_os = "windows") { 2000 } else { 600 };
+            write_sync(
+                status,
+                SyncPhase::Channels,
+                "Contacts synced — settling before channels…",
+                None,
+            );
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+        }
         // Slot numbers are per radio. Only the primary reads its channel table into
         // the database and receives the HQ channels; a secondary waits for promotion.
+        // Soft channel-setup failures must NOT drop the session — that reconnect
+        // loop (especially on Windows BLE after a big contact sync) never recovers.
         if ctx.is_primary() {
-            if let Err(err) =
-                primary_channel_setup(db, secrets, &commands, max_channels, status).await
-            {
-                return SessionEnd::Lost(err);
+            match primary_channel_setup(db, secrets, &commands, max_channels, status).await {
+                Ok(()) => channel_setup_done.store(true, Ordering::SeqCst),
+                Err(err) => {
+                    hq_log!(warn, "channel setup deferred: {err}");
+                    if is_hard_gatt_drop(&err) {
+                        return SessionEnd::Lost(err);
+                    }
+                    write_sync(
+                        status,
+                        SyncPhase::Channels,
+                        format!("Channel sync deferred — staying linked. ({err})"),
+                        None,
+                    );
+                    channel_setup_done.store(false, Ordering::SeqCst);
+                }
             }
-            channel_setup_done = true;
         }
         // Cap the initial queue drain. On a busy Public channel, new RF traffic
         // can refill the companion queue forever — holding this lock for hours
@@ -3883,6 +3920,12 @@ async fn run_session(
         }
     }
     let mut need_contact_retry = db.contacts_since_for_radio(radio).unwrap_or(0) == 0;
+    // Soft-deferred channel setup (BLE timeout after contact dump) retries here.
+    let mut channel_setup_retry_at = if channel_setup_done.load(Ordering::SeqCst) {
+        Instant::now() + Duration::from_secs(3600)
+    } else {
+        Instant::now() + Duration::from_secs(8)
+    };
     // Persistent interval — recreating `sleep(1s)` inside select! starves battery
     // polls whenever mesh events keep arriving (auto-fetch / advertisements).
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -4448,33 +4491,56 @@ async fn run_session(
                                 hq_log!(warn, "HQ identity: {err}");
                             }
                         }
-                        if !channel_setup_done {
-                            // Promoted from secondary: read its channel table and push HQ
-                            // channels off the select arm so sends stay responsive.
-                            channel_setup_done = true;
-                            pushed_generation = db.channel_generation().unwrap_or(0);
-                            let db = Arc::clone(db);
-                            let secrets = Arc::clone(&ctx.pool.secrets);
-                            let meshcore = meshcore.clone();
-                            let status = Arc::clone(status);
-                            tokio::spawn(async move {
-                                let Ok(commands) =
-                                    tokio::time::timeout(SEND_LOCK_WAIT, meshcore.commands().lock())
-                                        .await
+                        // Force a channel setup attempt after promotion.
+                        channel_setup_done.store(false, Ordering::SeqCst);
+                        channel_setup_retry_at = Instant::now();
+                    }
+                    if !channel_setup_done.load(Ordering::SeqCst)
+                        && !channel_setup_inflight.load(Ordering::SeqCst)
+                        && Instant::now() >= channel_setup_retry_at
+                    {
+                        channel_setup_retry_at = Instant::now() + Duration::from_secs(45);
+                        channel_setup_inflight.store(true, Ordering::SeqCst);
+                        pushed_generation = db.channel_generation().unwrap_or(0);
+                        let db = Arc::clone(db);
+                        let secrets = Arc::clone(&ctx.pool.secrets);
+                        let meshcore = meshcore.clone();
+                        let status = Arc::clone(status);
+                        let done = Arc::clone(&channel_setup_done);
+                        let inflight = Arc::clone(&channel_setup_inflight);
+                        tokio::spawn(async move {
+                            let outcome = async {
+                                let Ok(commands) = tokio::time::timeout(
+                                    SEND_LOCK_WAIT,
+                                    meshcore.commands().lock(),
+                                )
+                                .await
                                 else {
-                                    hq_log!(warn, "promotion channel setup: radio busy");
-                                    return;
+                                    return Err("radio busy".into());
                                 };
-                                if let Err(err) = primary_channel_setup(
+                                primary_channel_setup(
                                     &db, &secrets, &commands, max_channels, &status,
                                 )
                                 .await
-                                {
-                                    hq_log!(warn, "promotion channel setup: {err}");
+                            }
+                            .await;
+                            match outcome {
+                                Ok(()) => {
+                                    done.store(true, Ordering::SeqCst);
+                                    write_sync(&status, SyncPhase::Ready, "Companion ready", None);
                                 }
-                                write_sync(&status, SyncPhase::Ready, "Companion ready", None);
-                            });
-                        }
+                                Err(err) => {
+                                    hq_log!(warn, "deferred channel setup: {err}");
+                                    write_sync(
+                                        &status,
+                                        SyncPhase::Ready,
+                                        "Companion ready (channel sync still pending)",
+                                        None,
+                                    );
+                                }
+                            }
+                            inflight.store(false, Ordering::SeqCst);
+                        });
                     }
                     if let Err(err) = flush_one_outbound(db, &meshcore, radio, &mut replies).await {
                         hq_log!(warn, "send: {err}");
@@ -4748,6 +4814,20 @@ fn is_channel_query_timeout(err: &str) -> bool {
     err.to_ascii_lowercase().contains("timeout")
 }
 
+/// Hard GATT/serial drop — session must end. Soft timeouts (esp. after a long
+/// BLE contact dump) should not reconnect-loop the whole companion.
+fn is_hard_gatt_drop(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    (lower.contains("not connected")
+        || lower.contains("ble tx")
+        || lower.contains("disconnected")
+        || lower.contains("link closed")
+        || lower.contains("link lost")
+        || lower.contains("broken pipe")
+        || lower.contains("port closed"))
+        && !lower.contains("unresponsive during channel")
+}
+
 /// Blank a companion channel slot (`set_channel` with empty name + zero secret).
 async fn clear_radio_channel_slot(
     commands: &meshcore_rs::commands::CommandHandler,
@@ -4877,9 +4957,62 @@ async fn sync_channels(
                 // link — a push timeout aborts setup instead of false Ready.
                 if is_channel_query_timeout(&msg) {
                     if completed == 0 {
-                        return Err(format!(
-                            "Radio link unresponsive during channel sync (slot {idx}): {msg}"
-                        ));
+                        // One settle+retry — common after a multi-minute BLE contact dump.
+                        hq_log!(
+                            warn,
+                            "get_channel({idx}) timed out with no slots yet; settling and retrying once"
+                        );
+                        tokio::time::sleep(Duration::from_millis(
+                            if cfg!(target_os = "windows") {
+                                1500
+                            } else {
+                                700
+                            },
+                        ))
+                        .await;
+                        match commands.get_channel(idx).await {
+                            Ok(info) => {
+                                completed = step as u32 + 1;
+                                let name = info.name.trim();
+                                if !name.is_empty() {
+                                    match db.upsert_channel_from_radio(
+                                        name,
+                                        idx as i64,
+                                        &info.secret,
+                                        secrets,
+                                    ) {
+                                        Ok(false) => {
+                                            if let Err(err) =
+                                                clear_radio_channel_slot(commands, idx).await
+                                            {
+                                                hq_log!(
+                                                    warn,
+                                                    "clear soft-deleted channel slot {idx}: {err}"
+                                                );
+                                            }
+                                        }
+                                        Ok(true) => {}
+                                        Err(err) => {
+                                            hq_log!(warn, "upsert channel slot {idx}: {err}")
+                                        }
+                                    }
+                                }
+                                write_sync(
+                                    status,
+                                    SyncPhase::Channels,
+                                    "Syncing channels…",
+                                    Some((completed, total.max(1))),
+                                );
+                                continue;
+                            }
+                            Err(retry_err) => {
+                                let retry_msg = retry_err.to_string();
+                                hq_log!(debug, "get_channel({idx}) retry: {retry_msg}");
+                                return Err(format!(
+                                    "Radio link unresponsive during channel sync (slot {idx}): {msg}"
+                                ));
+                            }
+                        }
                     }
                     hq_log!(
                         warn,

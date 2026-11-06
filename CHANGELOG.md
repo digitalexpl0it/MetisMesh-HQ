@@ -16,7 +16,8 @@
 - Messages page uses flex-fill main pane (WebKitGTK `height:100%` left a dead gap under the thread); reset WebView zoom to 1.0 on launch
 - Enrollment DMs: reply only to `#signup` / `#status` (same `#` command marker as channel bots); bare words and casual chat stay silent
 - BLE: three consecutive battery/channel timeouts while “connected” end the session and reconnect (was stuck Connected with `BLE TX error: Not connected`)
-- Messages compose **+** menu (channel and DM): my contact, my position, share channel name, share contact link, share map location; **Quick message (DM)** on channels only — channel share never includes secrets
+- Messages compose **+** menu (channel and DM): my contact, my position, share channel (`meshcore://channel/add` for Public/hash; private name-only), share contact link, share map location; **Quick message (DM)** on channels only — private secrets never go in chat
+- Channel `meshcore://channel/add` chips show **Join** (same as contact **Add**)
 - Channel cards truncate long previews (URLs no longer bleed into the next card)
 - Chat bubbles: timestamp above; larger avatar/name inside the bubble with real padding; hops + sent/received below
 - Join channel: private (name + hex secret), restore Public, hash/hashtag channel; create channel optional advanced region tag
@@ -60,6 +61,7 @@
 - New messages divider still appears when last-read is older than the loaded window (badge with no break was dropping the cursor outside the last 20 rows)
 - New messages break clears once it reaches the top of the pane (not an arbitrary mid-screen band); short threads that fit on screen still clear without a fake scroll
 - New messages break also clears when you scroll to the bottom and cannot scroll further (open settle still ignores “already at bottom” so unread that fits is not wiped immediately)
+- `meshcore://contact/add` chips: larger **Add** / **Copy** under the URI (not cramped on the same line); bubble action pill sits below the bubble so it no longer covers those buttons
 - Channel bubble action **DM** opens a direct thread with that sender (same key resolver as Favorite — prefix / roster / prior messages; toast when no pubkey yet)
 - Bubble **DM**: clearer ambiguous-vs-missing key errors; if missing, quietly sync companion contacts and retry (covers renames); contact sync backfills `sender_pubkey` on recent name-only channel rows when the roster uniquely matches
 

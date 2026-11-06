@@ -14,6 +14,9 @@ use crate::db::Db;
 static QR_TX: OnceLock<UnboundedSender<String>> = OnceLock::new();
 static QR_DIR: OnceLock<PathBuf> = OnceLock::new();
 
+/// Well-known MeshCore Public channel secret (`docs.meshcore.io` QR codes).
+pub const PUBLIC_CHANNEL_SECRET_HEX: &str = "8b3387e9c5cdea6ac9e5edbaa115cd72";
+
 /// Build `meshcore://contact/add?name=…&public_key=…&type=N`.
 pub fn contact_add_uri(name: &str, pubkey_hex: &str, contact_type: u8) -> String {
     let key = pubkey_hex.trim().to_ascii_lowercase();
@@ -27,6 +30,57 @@ pub fn contact_add_uri(name: &str, pubkey_hex: &str, contact_type: u8) -> String
         urlencode_component(&key),
         ty
     )
+}
+
+/// Build `meshcore://channel/add?name=…&secret=…` (32 hex chars).
+pub fn channel_add_uri(name: &str, secret: &[u8; 16]) -> String {
+    format!(
+        "meshcore://channel/add?name={}&secret={}",
+        urlencode_component(name.trim()),
+        hex::encode(secret)
+    )
+}
+
+/// Parse a `meshcore://channel/add?…` URI into `(name, secret)`.
+pub fn parse_channel_add_uri(uri: &str) -> Option<(String, [u8; 16])> {
+    let uri = uri.trim();
+    let rest = uri
+        .strip_prefix("meshcore://channel/add?")
+        .or_else(|| uri.strip_prefix("MESHCORE://channel/add?"))?;
+    let mut name = String::new();
+    let mut secret_hex = String::new();
+    for pair in rest.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        let key = parts.next().unwrap_or("");
+        let value = urldecode_component(parts.next().unwrap_or(""));
+        match key {
+            "name" => name = value,
+            "secret" => secret_hex = value.trim().to_ascii_lowercase(),
+            _ => {}
+        }
+    }
+    if name.trim().is_empty() {
+        return None;
+    }
+    let secret_hex = secret_hex.trim_start_matches("0x");
+    if secret_hex.len() != 32 || !secret_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let bytes = hex::decode(secret_hex).ok()?;
+    if bytes.len() != 16 {
+        return None;
+    }
+    let mut secret = [0u8; 16];
+    secret.copy_from_slice(&bytes);
+    Some((name.trim().to_string(), secret))
+}
+
+/// MeshCore Public channel secret bytes.
+pub fn public_channel_secret() -> [u8; 16] {
+    let bytes = hex::decode(PUBLIC_CHANNEL_SECRET_HEX).expect("Public secret hex");
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&bytes);
+    out
 }
 
 /// Parse a `meshcore://contact/add?…` URI into `(name, pubkey, type)`.
@@ -299,6 +353,19 @@ mod tests {
         assert_eq!(pubkey, key);
         assert_eq!(ty, 2);
         assert!(parse_contact_add_uri("meshcore://aabbcc").is_none());
+    }
+
+    #[test]
+    fn channel_uri_round_trip() {
+        let secret = public_channel_secret();
+        let uri = channel_add_uri("Public", &secret);
+        assert!(uri.starts_with("meshcore://channel/add?"));
+        assert!(uri.contains("name=Public"));
+        assert!(uri.contains(&format!("secret={PUBLIC_CHANNEL_SECRET_HEX}")));
+        let (name, got) = parse_channel_add_uri(&uri).expect("parse");
+        assert_eq!(name, "Public");
+        assert_eq!(got, secret);
+        assert!(parse_channel_add_uri("meshcore://contact/add?name=x").is_none());
     }
 
     #[test]

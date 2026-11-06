@@ -2975,6 +2975,48 @@ pub fn pin_contact_from_message(pubkey: &str, label: &str) -> Result<bool, Strin
     Ok(name_only)
 }
 
+/// Join a channel from a received `meshcore://channel/add` link.
+pub fn join_channel_from_message(name: &str, secret: &[u8; 16]) -> Result<String, String> {
+    let st = state();
+    let linked = st.radio.snapshot().state == "connected";
+    if name.eq_ignore_ascii_case("Public") {
+        let row = st
+            .db
+            .restore_public_channel()
+            .map_err(|e| e.to_string())?;
+        if linked {
+            st.radio
+                .push_channel(row.slot as u8, row.name.clone());
+        }
+        return Ok(format!("{} is ready on slot {}", row.name, row.slot));
+    }
+    if st
+        .db
+        .list_channels()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .any(|ch| ch.name.eq_ignore_ascii_case(name))
+    {
+        return Ok(format!("{name} is already on this HQ"));
+    }
+    let hash = crate::mesh_regions::hash_channel_secret(name);
+    let row = if *secret == hash {
+        st.db
+            .join_hash_channel(name, &st.secrets)
+            .map_err(|e| e.to_string())?
+    } else {
+        let secret_hex = hex::encode(secret);
+        st.db
+            .join_private_channel(name, &secret_hex, &st.secrets)
+            .map_err(|e| e.to_string())?
+    };
+    if linked {
+        st.radio
+            .push_channel(row.slot as u8, row.name.clone());
+    }
+    Ok(format!("Joined {} on slot {}", row.name, row.slot))
+}
+
 /// Toggle Pinned Contacts (+ DM favorite flag) for a sender.
 /// Returns `(now_pinned, name_only)` — `name_only` when the sender has no pubkey yet.
 pub fn toggle_contact_favorite(pubkey: &str, label: &str) -> Result<(bool, bool), String> {

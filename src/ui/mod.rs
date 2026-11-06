@@ -3616,7 +3616,7 @@ fn ComposePlusDialogs(
                 match open {
                     Some(ComposePlusDialog::ShareChannel) => rsx! {
                         p { class: "text-sm text-muted-foreground",
-                            "Inserts the channel name into your message. Secrets are never shared in chat — use Roster → Invite for private-channel secrets."
+                            "Inserts a meshcore://channel/add link for Public and hash channels. Private channels insert the name only — use Roster → Invite when someone needs the secret."
                         }
                         SelectInput {
                             id: "compose-plus-channel".to_string(),
@@ -3637,7 +3637,12 @@ fn ComposePlusDialogs(
                                 disabled: pick_value().trim().is_empty(),
                                 onclick: move |_| {
                                     let name = pick_value();
-                                    let text = format_channel_share(&name);
+                                    let role = channels
+                                        .iter()
+                                        .find(|ch| ch.name == name)
+                                        .map(|ch| ch.role.as_str())
+                                        .unwrap_or("general");
+                                    let text = format_channel_share(&name, role);
                                     if text.is_empty() {
                                         return;
                                     }
@@ -7019,14 +7024,14 @@ fn MessageBody(text: String, #[props(default)] outgoing: bool) -> Element {
         "underline decoration-signal/70 underline-offset-2 hover:text-signal"
     };
     let mesh_box = if outgoing {
-        "my-1 flex max-w-full items-start gap-2 rounded-md border border-sky-400/30 bg-sky-950/40 px-2 py-1.5"
+        "mesh-link-chip mesh-link-chip-out"
     } else {
-        "my-1 flex max-w-full items-start gap-2 rounded-md border border-border bg-background/70 px-2 py-1.5"
+        "mesh-link-chip"
     };
     let mesh_btn = if outgoing {
-        "inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[0.65rem] text-sky-100 hover:bg-sky-400/15 cursor-pointer"
+        "mesh-link-chip-btn mesh-link-chip-btn-out"
     } else {
-        "inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[0.65rem] text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
+        "mesh-link-chip-btn"
     };
     rsx! {
         // `div` so meshcore:// chips can be block-level without invalid nesting.
@@ -7058,50 +7063,72 @@ fn MessageBody(text: String, #[props(default)] outgoing: bool) -> Element {
                             let url_copy = url.clone();
                             let label = shorten_mesh_link(&url);
                             let contact = crate::contact_qr::parse_contact_add_uri(&url);
+                            let channel = crate::contact_qr::parse_channel_add_uri(&url);
                             rsx! {
                                 div {
                                     key: "{idx}",
                                     class: "{mesh_box}",
                                     title: "{url}",
-                                    code {
-                                        class: "min-w-0 flex-1 break-all font-mono text-[0.7rem] leading-snug text-foreground/90",
-                                        "{label}"
-                                    }
-                                    if let Some((name, pubkey, _ty)) = contact {
+                                    code { class: "mesh-link-chip-uri", "{label}" }
+                                    div { class: "mesh-link-chip-actions",
+                                        if let Some((name, pubkey, _ty)) = contact {
+                                            button {
+                                                class: "{mesh_btn}",
+                                                title: "Add this contact to Contacts",
+                                                onclick: move |_| {
+                                                    match messages_rail::pin_contact_from_message(
+                                                        &pubkey,
+                                                        &name,
+                                                    ) {
+                                                        Ok(_) => crate::toast::push(
+                                                            crate::toast::ToastKind::Success,
+                                                            format!("Added {name} to Contacts"),
+                                                        ),
+                                                        Err(err) => crate::toast::push(
+                                                            crate::toast::ToastKind::Error,
+                                                            err,
+                                                        ),
+                                                    }
+                                                },
+                                                Icon { name: IconName::Users, size: 14 }
+                                                "Add"
+                                            }
+                                        }
+                                        if let Some((name, secret)) = channel {
+                                            button {
+                                                class: "{mesh_btn}",
+                                                title: "Join this channel on HQ",
+                                                onclick: move |_| {
+                                                    match messages_rail::join_channel_from_message(
+                                                        &name, &secret,
+                                                    ) {
+                                                        Ok(msg) => crate::toast::push(
+                                                            crate::toast::ToastKind::Success,
+                                                            msg,
+                                                        ),
+                                                        Err(err) => crate::toast::push(
+                                                            crate::toast::ToastKind::Error,
+                                                            err,
+                                                        ),
+                                                    }
+                                                },
+                                                Icon { name: IconName::Messages, size: 14 }
+                                                "Join"
+                                            }
+                                        }
                                         button {
                                             class: "{mesh_btn}",
-                                            title: "Add this contact to Contacts",
+                                            title: "Copy meshcore link",
                                             onclick: move |_| {
-                                                match messages_rail::pin_contact_from_message(
-                                                    &pubkey,
-                                                    &name,
-                                                ) {
-                                                    Ok(_) => crate::toast::push(
-                                                        crate::toast::ToastKind::Success,
-                                                        format!("Added {name} to Contacts"),
-                                                    ),
-                                                    Err(err) => crate::toast::push(
-                                                        crate::toast::ToastKind::Error,
-                                                        err,
-                                                    ),
-                                                }
+                                                copy_text_to_clipboard(&url_copy);
+                                                crate::toast::push(
+                                                    crate::toast::ToastKind::Success,
+                                                    "Copied meshcore link",
+                                                );
                                             },
-                                            Icon { name: IconName::Users, size: 12 }
-                                            "Add"
+                                            Icon { name: IconName::Copy, size: 14 }
+                                            "Copy"
                                         }
-                                    }
-                                    button {
-                                        class: "{mesh_btn}",
-                                        title: "Copy meshcore link",
-                                        onclick: move |_| {
-                                            copy_text_to_clipboard(&url_copy);
-                                            crate::toast::push(
-                                                crate::toast::ToastKind::Success,
-                                                "Copied meshcore link",
-                                            );
-                                        },
-                                        Icon { name: IconName::Copy, size: 12 }
-                                        "Copy"
                                     }
                                 }
                             }
@@ -7124,6 +7151,12 @@ fn copy_text_to_clipboard(text: &str) {
 
 /// Shorten long meshcore:// URIs for the bubble; full value stays in title + Copy.
 fn shorten_mesh_link(url: &str) -> String {
+    if let Some((name, _)) = crate::contact_qr::parse_channel_add_uri(url) {
+        return format!("channel · {name}");
+    }
+    if let Some((name, ..)) = crate::contact_qr::parse_contact_add_uri(url) {
+        return format!("contact · {name}");
+    }
     const KEEP_HEAD: usize = 22;
     const KEEP_TAIL: usize = 10;
     if url.len() <= KEEP_HEAD + KEEP_TAIL + 3 {

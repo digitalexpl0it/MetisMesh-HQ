@@ -1241,11 +1241,25 @@ pub fn format_position_share(label: &str, lat: f64, lon: f64) -> Option<String> 
     Some(clamp_mesh_text(body))
 }
 
-/// Channel name only — never a secret.
-pub fn format_channel_share(name: &str) -> String {
+/// Share text for a channel.
+///
+/// Public and hash channels become a `meshcore://channel/add?…` URI (joinable
+/// well-known / derived secret). Private channels stay `Channel: {name}` —
+/// never put a private secret in mesh text; use Invite for that.
+pub fn format_channel_share(name: &str, role: &str) -> String {
     let name = name.trim();
     if name.is_empty() {
         return String::new();
+    }
+    if name.eq_ignore_ascii_case("Public") {
+        return clamp_mesh_text(crate::contact_qr::channel_add_uri(
+            "Public",
+            &crate::contact_qr::public_channel_secret(),
+        ));
+    }
+    if role.eq_ignore_ascii_case("hash") {
+        let secret = crate::mesh_regions::hash_channel_secret(name);
+        return clamp_mesh_text(crate::contact_qr::channel_add_uri(name, &secret));
     }
     clamp_mesh_text(format!("Channel: {name}"))
 }
@@ -1785,10 +1799,26 @@ mod compose_share_tests {
     }
 
     #[test]
-    fn channel_share_never_includes_secret_word() {
-        let text = format_channel_share("highdesert");
+    fn channel_share_private_is_name_only() {
+        let text = format_channel_share("highdesert", "general");
         assert_eq!(text, "Channel: highdesert");
-        assert!(!text.to_ascii_lowercase().contains("secret"));
+        assert!(!text.contains("meshcore://"));
+    }
+
+    #[test]
+    fn channel_share_public_is_add_uri() {
+        let text = format_channel_share("Public", "general");
+        assert!(text.starts_with("meshcore://channel/add?"));
+        assert!(text.contains("name=Public"));
+        assert!(text.contains("secret=8b3387e9c5cdea6ac9e5edbaa115cd72"));
+    }
+
+    #[test]
+    fn channel_share_hash_is_add_uri() {
+        let text = format_channel_share("highdesert", "hash");
+        assert!(text.starts_with("meshcore://channel/add?"));
+        assert!(text.contains("name=highdesert"));
+        assert!(text.contains("secret="));
     }
 
     #[test]

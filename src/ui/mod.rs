@@ -12102,7 +12102,10 @@ fn SettingsPage(
                                 },
                                 "{ready.summary}"
                             }
-                        } else if sync_busy {
+                        }
+                        // Sync progress / errors stay visible even when the readiness
+                        // banner is up (previously last_error was hidden behind it).
+                        if sync_busy {
                             p { class: "flasher-lib__meta", "Syncing · {sync.detail}" }
                         } else if !sync.last_error.is_empty() {
                             p { class: "flasher-lib__meta flasher-lib__meta-warn", "Last error · {sync.last_error}" }

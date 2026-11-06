@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.1.10 — 2026-11-06
+
+Package version `0.1.10` (Cargo / About). Windows Details may show `0.1.10.0`.
+
+### HTTPS / downloads
+
+- Fix “Unknown Scheme / cannot make HTTPS request because no TLS backend is configured” on map place lookup, firmware Sync, presets, and other `ureq::get` calls. 0.1.9 enabled only ureq’s `native-tls` feature, which does not attach a backend to the crate-level helpers; 0.1.10 uses `tls` + `native-certs` (rustls with the OS trust store, including Zscaler roots Windows already trusts)
+- Firmware Sync toasts on success or failure; last sync error stays visible under the library banner (it used to be hidden whenever readiness was shown)
+
+## 0.1.9 — 2026-11-06
+
+Package version `0.1.9` (Cargo / About). Windows Details may show `0.1.9.0`.
+
 ### Log file
 
 - HQ writes its log to `logs/` in the data folder (Windows `%APPDATA%\MetisMeshHQ\logs`), so you can read it outside the app. Each launch starts a new `metis-hq.log` and older ones move to `metis-hq.1.log` through `metis-hq.4.log`. At most 5 files of 5 MB each are kept (25 MB at most), and a file that fills up mid-session rotates too
@@ -17,7 +30,6 @@
 
 - Outline basemap + PMTiles use `http://metis.localhost/…` on Windows (WebView2 will not fetch `metis://` for MapLibre sources) so land outlines show and Place on map works without a ZIP first
 - Download card keeps status after Working… ends; ZIP/place downloads toast on success or error instead of going silent
-- HTTP downloads (map packs, firmware sync, presets) use OS native TLS so Zscaler / corporate roots in the Windows trust store work — no cert-ignore option
 
 ### Windows BLE
 

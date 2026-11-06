@@ -1512,9 +1512,22 @@ pub fn start_sync(db: Arc<Db>) {
                 let _ = db.set_setting("firmware_last_sync_at", &now_unix().to_string());
             }
             match result {
-                Ok(()) => {}
+                Ok(()) => {
+                    let detail = sync_status().detail;
+                    crate::toast::push(
+                        crate::toast::ToastKind::Success,
+                        if detail.is_empty() {
+                            "Firmware library synced.".into()
+                        } else {
+                            format!("Firmware synced · {detail}")
+                        },
+                    );
+                }
                 Err(err) => {
-                    hq_log!(warn, "firmware sync: {err}");
+                    crate::toast::push(
+                        crate::toast::ToastKind::Error,
+                        format!("Firmware sync failed: {err}"),
+                    );
                     finish_sync_err(err);
                     refresh_status_from_disk();
                 }

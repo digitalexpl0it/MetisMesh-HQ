@@ -23,9 +23,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Ubuntu 26.04
+          - name: Linux
             os: ubuntu-26.04
-            artifact: metis-mesh-hq-ubuntu-26.04-x86_64
+            artifact: metis-mesh-hq-linux-x86_64
             binary: target/release/metis-mesh-hq
           - name: Windows
             os: windows-latest
@@ -50,7 +50,8 @@ jobs:
             libdbus-1-dev \
             libudev-dev \
             file \
-            desktop-file-utils
+            desktop-file-utils \
+            dpkg-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -67,8 +68,13 @@ jobs:
           base="${{ matrix.artifact }}"
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             echo "name=${base}-${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            ver="${{ github.ref_name }}"
+            ver="${ver#v}"
+            echo "version=${ver}" >> "$GITHUB_OUTPUT"
           else
             echo "name=${base}" >> "$GITHUB_OUTPUT"
+            ver="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+            echo "version=${ver}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Test
@@ -77,21 +83,32 @@ jobs:
       - name: Build release
         run: cargo build --release
 
-      - name: Package artifact (Linux tarball)
+      - name: Package Linux tarball
         if: runner.os == 'Linux'
         run: |
           mkdir -p dist
-          cp "${{ matrix.binary }}" "dist/${{ steps.art.outputs.name }}"
-          chmod +x "dist/${{ steps.art.outputs.name }}"
-          # Keep assets/ next to the binary for any remaining dioxus asset!() URLs.
+          cp "${{ matrix.binary }}" "dist/metis-mesh-hq"
+          chmod +x "dist/metis-mesh-hq"
           cp -a assets "dist/assets"
           (
             cd dist
-            tar -czf "../${{ steps.art.outputs.name }}.tar.gz" "${{ steps.art.outputs.name }}" assets
+            tar -czf "../${{ steps.art.outputs.name }}.tar.gz" metis-mesh-hq assets
           )
           ls -lh "${{ steps.art.outputs.name }}.tar.gz"
 
-      - name: Package AppImage
+      - name: Package Ubuntu 26.04 deb
+        if: runner.os == 'Linux'
+        run: |
+          chmod +x packaging/linux/build-deb.sh
+          ver="${{ steps.art.outputs.version }}"
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            out="metis-mesh-hq_${ver}_amd64.deb"
+          else
+            out="metis-mesh-hq_${ver}_amd64.deb"
+          fi
+          VERSION="$ver" OUT_NAME="$out" ./packaging/linux/build-deb.sh
+
+      - name: Package Linux AppImage
         if: runner.os == 'Linux'
         run: |
           chmod +x packaging/linux/build-appimage.sh
@@ -102,7 +119,7 @@ jobs:
           fi
           OUT_NAME="$out" ./packaging/linux/build-appimage.sh
 
-      - name: Package artifact (Windows)
+      - name: Package Windows zip
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -119,6 +136,7 @@ jobs:
           path: |
             ${{ steps.art.outputs.name }}.tar.gz
             ${{ steps.art.outputs.name }}.zip
+            metis-mesh-hq_*_amd64.deb
             metis-mesh-hq-x86_64*.AppImage
           if-no-files-found: error
           retention-days: 30
@@ -138,7 +156,12 @@ jobs:
       - name: Flatten artifacts
         run: |
           mkdir -p upload
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.AppImage' \) -exec cp {} upload/ \;
+          find artifacts -type f \( \
+            -name '*.tar.gz' -o \
+            -name '*.zip' -o \
+            -name '*.AppImage' -o \
+            -name '*.deb' \
+          \) -exec cp {} upload/ \;
           ls -lh upload
 
       - name: Publish release

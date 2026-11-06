@@ -28,19 +28,22 @@ Communities stay separate until both headquarters agree to link. That bridge is 
 
 ## Install (standalone binary)
 
-Supported release targets are **Windows** (`x86_64`) and **Linux** (`x86_64`). macOS is not shipped. GitHub Actions builds on every push to `main` and on version tags:
+Supported release targets are **Windows** (`x86_64`) and **Linux** (`x86_64`). macOS is not shipped. Each GitHub Release (and `main` Actions artifacts) includes:
 
-- **Windows** — `.zip` with the `.exe` and `assets/`
-- **Ubuntu 26.04 tarball** — thin binary for Ubuntu 26.04+ (install the runtime packages below)
-- **AppImage** — portable Linux build with GTK/WebKit bundled; prefer this on Fedora, Arch, Debian, older Ubuntu, etc.
+| Artifact | Use when |
+|---|---|
+| **Windows** `.zip` | Windows 10/11 |
+| **Ubuntu 26.04** `.deb` | Ubuntu 26.04+ (`dpkg -i` / apt) |
+| **Linux** `.tar.gz` | Unpack-and-run on Ubuntu 26.04+ (install runtime libs below) |
+| **Linux** `.AppImage` | Portable — Fedora, Arch, Debian, older Ubuntu, etc. |
 
-1. Download the file for your OS from a [GitHub Release](https://github.com/digitalexpl0it/MetisMesh-HQ/releases) (preferred), or from the Actions tab artifacts on `main`.
-2. **Windows / Ubuntu tarball:** unpack into a folder you own (for example `~/metis-hq/` or `C:\MetisHQ\`).
-3. Run:
+1. Download from a [GitHub Release](https://github.com/digitalexpl0it/MetisMesh-HQ/releases) (preferred), or from the Actions tab on `main`.
+2. Install / run:
+   - **Ubuntu `.deb`:** `sudo apt install ./metis-mesh-hq_*_amd64.deb` (or `sudo dpkg -i …` then `sudo apt -f install`)
    - **Linux AppImage:** `chmod +x metis-mesh-hq-x86_64.AppImage && ./metis-mesh-hq-x86_64.AppImage`
-   - **Ubuntu tarball:** `./metis-mesh-hq-ubuntu-26.04-x86_64`
-   - **Windows:** double-click or run `metis-mesh-hq-windows-x86_64.exe`
-4. First launch creates the per-user data folder (SQLite, firmware cache, backups, QR files):
+   - **Linux tarball:** unpack, then `./metis-mesh-hq` (keep `assets/` beside it)
+   - **Windows:** unpack the zip, then run `metis-mesh-hq-windows-x86_64.exe`
+3. First launch creates the per-user data folder (SQLite, firmware cache, backups, QR files):
    - Linux: `~/.MetisMeshHQ`
    - Windows: `%APPDATA%\MetisMeshHQ`
    
@@ -48,14 +51,15 @@ Supported release targets are **Windows** (`x86_64`) and **Linux** (`x86_64`). m
 
    The live store is `metis.db` (WAL mode) plus optional `metis.db-wal` and `metis.db-shm` beside it. Prefer **Settings → Backup** for copies. If you copy the data folder by hand, include all three files — or stop HQ first so SQLite can checkpoint into `metis.db`.
 
-5. First launch opens a **setup wizard**: checks Bluetooth / USB serial access, can install missing pieces (may prompt for admin / `pkexec`), and optionally connects a companion (BLE / USB / TCP). You can skip and finish later under Settings → Connect. Settings → About has version, license, GitHub, and data-folder path; **Run setup again** reopens the wizard.
+4. First launch opens a **setup wizard**: checks Bluetooth / USB serial access, can install missing pieces (may prompt for admin / `pkexec`), and optionally connects a companion (BLE / USB / TCP). You can skip and finish later under Settings → Connect. Settings → About has version, license, GitHub, and data-folder path; **Run setup again** reopens the wizard.
 
 ### Runtime libraries
 
 Critical UI libraries are probed before the window opens. On Debian/Ubuntu the app will try `pkexec apt-get install` for WebKitGTK/GTK if they are missing; on Windows it can download the WebView2 Evergreen bootstrapper. You can still install manually:
 
-- **Linux AppImage:** GTK/WebKit travel inside the image. You still need host **BlueZ** for Bluetooth and membership in `dialout` (or equivalent) for USB serial.
-- **Linux (Ubuntu 26.04+ tarball):**
+- **Ubuntu `.deb`:** Depends pulls WebKit/GTK. You still want **BlueZ** for Bluetooth and membership in `dialout` for USB serial (log out/in after the wizard adds you).
+- **Linux AppImage:** GTK/WebKit travel inside the image. Host still needs **BlueZ** and `dialout` (or equivalent).
+- **Linux tarball (Ubuntu 26.04+):**
 
   ```bash
   sudo apt-get update
@@ -65,8 +69,6 @@ Critical UI libraries are probed before the window opens. On Debian/Ubuntu the a
     libjavascriptcoregtk-4.1-0 libdbus-1-3
   ```
 
-  Bluetooth needs BlueZ. USB serial needs membership in `dialout` (log out/in after the wizard adds you).
-
 - **Windows:** Edge WebView2 runtime (usually already present on current Windows 10/11). If missing, HQ downloads the Evergreen bootstrapper with PowerShell and runs a silent install. Optional flashers (`esptool`, `adafruit-nrfutil`) install the same way (winget Python if needed, then `pip --user`).
 
 ### Publishing a GitHub Release
@@ -74,11 +76,11 @@ Critical UI libraries are probed before the window opens. On Debian/Ubuntu the a
 Releases are created only from version tags (not every `main` push):
 
 ```bash
-git tag v0.1.6
-git push origin v0.1.6
+git tag v0.1.12
+git push origin v0.1.12
 ```
 
-That runs the Build workflow and attaches the Windows `.zip`, Ubuntu `.tar.gz`, and Linux `.AppImage` to the new release. If the tag already exists on an older commit, move it after the release commit (`git tag -f v0.1.11` then `git push --force origin v0.1.11`) or use the next patch version.
+That attaches the Windows `.zip`, Ubuntu `.deb`, Linux `.tar.gz`, and Linux `.AppImage`. If the tag already exists on an older commit, move it after the release commit (`git tag -f v0.1.12` then `git push --force origin v0.1.12`) or use the next patch version.
 
 ## Requirements (build from source)
 
@@ -126,10 +128,11 @@ cargo build --release
 
 Binary lands at `target/release/metis-mesh-hq` (`.exe` on Windows). Map scripts/CSS are embedded and served over the `metis` protocol; keep `assets/` next to the binary for any remaining dioxus `asset!()` URLs.
 
-Linux AppImage (needs network once to fetch linuxdeploy):
+Linux packages (needs a release build first):
 
 ```bash
-./packaging/linux/build-appimage.sh
+./packaging/linux/build-deb.sh        # Ubuntu 26.04+ .deb
+./packaging/linux/build-appimage.sh   # portable AppImage (fetches linuxdeploy once)
 ```
 
 Desktop window icon uses the mesh-head mark from the brand logo (`assets/app_icon.png`). On Windows builds, `build.rs` / `winres` also embeds that `.ico` plus VERSIONINFO so Explorer **Properties → Details** shows File description, Product name/version, and Copyright (needs a native Windows or properly tooled cross-compile — plain Linux hosts skip embedding with a warning).

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.1.12 — 2026-11-06
+
+Package version `0.1.12` (Cargo / About). Windows Details may show `0.1.12.0`.
+
+### Platforms / packaging
+
+- Release artifacts: **Windows** `.zip`, **Ubuntu 26.04** `.deb`, **Linux** `.tar.gz`, **Linux** `.AppImage`
+- New `packaging/linux/build-deb.sh` — installs under `/usr/lib/metis-mesh-hq` with a `/usr/bin/metis-mesh-hq` launcher, desktop entry, and Depends on Ubuntu 26.04 WebKit/GTK packages
+- CI job renamed to **Linux** / **Windows**; Linux job builds deb + tarball + AppImage on `ubuntu-26.04`
+
 ## 0.1.11 — 2026-11-06
 
 Package version `0.1.11` (Cargo / About). Windows Details may show `0.1.11.0`.

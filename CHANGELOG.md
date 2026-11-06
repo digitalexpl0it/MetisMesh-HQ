@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.1.13 — 2026-11-06
+
+Package version `0.1.13` (Cargo / About). Windows Details may show `0.1.13.0`.
+
+### Map
+
+- Fix broken contact QR on map pin popups: QR `<img>` URLs now use the OS-aware `metis` asset helper (`http://metis.localhost/…` on Windows). Plain `metis://` never loads in WebView2 image tags
+
 ## 0.1.12 — 2026-11-06
 
 Package version `0.1.12` (Cargo / About). Windows Details may show `0.1.12.0`.

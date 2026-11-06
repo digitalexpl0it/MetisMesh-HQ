@@ -552,12 +552,23 @@
     );
   }
 
+  function isMetisQrUrl(url) {
+    var s = String(url || "");
+    return (
+      s.indexOf("metis://") === 0 ||
+      s.indexOf("http://metis.localhost/") === 0 ||
+      s.indexOf("https://metis.localhost/") === 0
+    );
+  }
+
   function hydrateDetailQr(root) {
     if (!root) return;
     var img = root.querySelector(".metis-map-detail-qr-img");
     if (!img) return;
     var src = img.getAttribute("src") || "";
-    if (src.indexOf("metis://") !== 0) return;
+    // Prefer a data: URL so the popup QR works even when the custom protocol
+    // is flaky as a raw <img src> (Windows WebView2 + metis://).
+    if (!isMetisQrUrl(src)) return;
     fetch(src)
       .then(function (res) {
         if (!res.ok) throw new Error("qr " + res.status);
@@ -1169,8 +1180,8 @@
         var pending = root.querySelector(".metis-map-detail-qr-pending");
         if (pending) pending.remove();
       }
-      // metis:// often fails as a raw <img src>; fetch then use a data URL.
-      if (String(url).indexOf("metis://") === 0) {
+      // Custom-protocol URLs often fail as a raw <img src>; fetch → data URL.
+      if (isMetisQrUrl(url)) {
         fetch(url)
           .then(function (res) {
             if (!res.ok) throw new Error("qr fetch " + res.status);

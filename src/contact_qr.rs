@@ -147,9 +147,12 @@ fn urldecode_component(raw: &str) -> String {
 }
 
 /// Public URL for a stored QR file name (`{pubkey}.svg`).
+///
+/// Uses [`crate::brand::metis_asset_url`] so Windows WebView2 gets
+/// `http://metis.localhost/…` (plain `metis://` fails as `<img src>`).
 pub fn qr_public_url(qr_file: &str) -> Option<String> {
     let name = sanitize_qr_filename(qr_file)?;
-    Some(format!("metis://localhost/qr/{name}"))
+    Some(crate::brand::metis_asset_url(&format!("qr/{name}")))
 }
 
 /// Absolute path under the app data dir for a QR file name.
@@ -376,6 +379,17 @@ mod tests {
             sanitize_qr_filename("ABCDEF.svg").as_deref(),
             Some("abcdef.svg")
         );
+    }
+
+    #[test]
+    fn qr_public_url_uses_metis_asset_helper() {
+        let url = qr_public_url("ABCDEF.svg").expect("url");
+        assert!(url.contains("/qr/abcdef.svg"), "{url}");
+        #[cfg(target_os = "windows")]
+        assert!(url.starts_with("http://metis.localhost/"), "{url}");
+        #[cfg(not(target_os = "windows"))]
+        assert!(url.starts_with("metis://localhost/"), "{url}");
+        assert!(qr_public_url("../x.svg").is_none());
     }
 
     #[test]

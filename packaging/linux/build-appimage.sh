@@ -19,7 +19,8 @@ fi
 
 mkdir -p "$TOOLS"
 linuxdeploy="$TOOLS/linuxdeploy-x86_64.AppImage"
-gtk_plugin="$TOOLS/linuxdeploy-plugin-gtk-x86_64.AppImage"
+# linuxdeploy-plugin-gtk has no AppImage release — use the upstream shell plugin.
+gtk_plugin="$TOOLS/linuxdeploy-plugin-gtk"
 if [[ ! -x "$linuxdeploy" ]]; then
   curl -fsSL -o "$linuxdeploy" \
     "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
@@ -27,9 +28,11 @@ if [[ ! -x "$linuxdeploy" ]]; then
 fi
 if [[ ! -x "$gtk_plugin" ]]; then
   curl -fsSL -o "$gtk_plugin" \
-    "https://github.com/linuxdeploy/linuxdeploy-plugin-gtk/releases/download/continuous/linuxdeploy-plugin-gtk-x86_64.AppImage"
+    "https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh"
   chmod +x "$gtk_plugin"
 fi
+# linuxdeploy finds plugins named linuxdeploy-plugin-<name> on PATH.
+export PATH="$TOOLS:$PATH"
 
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" \
@@ -58,13 +61,16 @@ export DEPLOY_GTK_VERSION=3
 
 # linuxdeploy names the image from the desktop Name= field.
 shopt -s nullglob
-built=(Metis_Mesh_HQ*.AppImage Metis*.AppImage *.AppImage)
+built=(Metis_Mesh_HQ*.AppImage)
+if [[ ${#built[@]} -eq 0 ]]; then
+  built=(Metis*.AppImage)
+fi
 if [[ ${#built[@]} -eq 0 ]]; then
   echo "linuxdeploy did not produce an AppImage" >&2
+  ls -la ./*.AppImage 2>/dev/null || true
   exit 1
 fi
 mv -f "${built[0]}" "$OUT_NAME"
-# Drop extras if the glob matched more than one.
 for extra in "${built[@]:1}"; do
   rm -f "$extra"
 done

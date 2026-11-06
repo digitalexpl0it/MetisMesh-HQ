@@ -14,7 +14,7 @@ Package version `0.1.11` (Cargo / About). Windows Details may show `0.1.11.0`.
 ### Platforms / packaging
 
 - Supported releases are **Windows** and **Linux** only — macOS CI and release artifacts are dropped
-- Linux AppImage (`metis-mesh-hq-x86_64.AppImage`) built with linuxdeploy + GTK plugin so GTK/WebKit ship inside the image; use this on non-Ubuntu or older distros. Host still needs BlueZ (Bluetooth) and dialout/udev for USB serial
+- Linux AppImage (`metis-mesh-hq-x86_64.AppImage`) built with linuxdeploy + GTK shell plugin so GTK/WebKit ship inside the image; use this on non-Ubuntu or older distros. Host still needs BlueZ (Bluetooth) and dialout/udev for USB serial
 - Ubuntu 26.04 `.tar.gz` remains for thin installs that already have the system WebKit/GTK packages
 
 ## 0.1.10 — 2026-11-06

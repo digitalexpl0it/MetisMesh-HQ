@@ -28,16 +28,20 @@ Communities stay separate until both headquarters agree to link. That bridge is 
 
 ## Install (standalone binary)
 
-GitHub Actions builds Ubuntu 26.04 (`x86_64`), Windows (`x86_64`), and macOS (`aarch64`) on every push to `main` and on version tags. Linux support is Ubuntu 26.04+ only.
+Supported release targets are **Windows** (`x86_64`) and **Linux** (`x86_64`). macOS is not shipped. GitHub Actions builds on every push to `main` and on version tags:
 
-1. Download the archive for your OS from a [GitHub Release](https://github.com/digitalexpl0it/MetisMesh-HQ/releases) (preferred), or from the Actions tab artifacts on `main`.
-2. Unpack into a folder you own (for example `~/metis-hq/` or `C:\MetisHQ\`).
-3. Run the binary from that folder:
-   - Ubuntu / macOS: `./metis-mesh-hq-ubuntu-26.04-x86_64` (or the macOS name from the archive)
-   - Windows: double-click or run `metis-mesh-hq-windows-x86_64.exe`
+- **Windows** — `.zip` with the `.exe` and `assets/`
+- **Ubuntu 26.04 tarball** — thin binary for Ubuntu 26.04+ (install the runtime packages below)
+- **AppImage** — portable Linux build with GTK/WebKit bundled; prefer this on Fedora, Arch, Debian, older Ubuntu, etc.
+
+1. Download the file for your OS from a [GitHub Release](https://github.com/digitalexpl0it/MetisMesh-HQ/releases) (preferred), or from the Actions tab artifacts on `main`.
+2. **Windows / Ubuntu tarball:** unpack into a folder you own (for example `~/metis-hq/` or `C:\MetisHQ\`).
+3. Run:
+   - **Linux AppImage:** `chmod +x metis-mesh-hq-x86_64.AppImage && ./metis-mesh-hq-x86_64.AppImage`
+   - **Ubuntu tarball:** `./metis-mesh-hq-ubuntu-26.04-x86_64`
+   - **Windows:** double-click or run `metis-mesh-hq-windows-x86_64.exe`
 4. First launch creates the per-user data folder (SQLite, firmware cache, backups, QR files):
    - Linux: `~/.MetisMeshHQ`
-   - macOS: `~/Library/Application Support/MetisMeshHQ`
    - Windows: `%APPDATA%\MetisMeshHQ`
    
    Override with `METIS_DATA_DIR=/path/to/dir` if you want the data elsewhere.
@@ -50,7 +54,8 @@ GitHub Actions builds Ubuntu 26.04 (`x86_64`), Windows (`x86_64`), and macOS (`a
 
 Critical UI libraries are probed before the window opens. On Debian/Ubuntu the app will try `pkexec apt-get install` for WebKitGTK/GTK if they are missing; on Windows it can download the WebView2 Evergreen bootstrapper. You can still install manually:
 
-- **Linux (Ubuntu 26.04+):**
+- **Linux AppImage:** GTK/WebKit travel inside the image. You still need host **BlueZ** for Bluetooth and membership in `dialout` (or equivalent) for USB serial.
+- **Linux (Ubuntu 26.04+ tarball):**
 
   ```bash
   sudo apt-get update
@@ -63,7 +68,6 @@ Critical UI libraries are probed before the window opens. On Debian/Ubuntu the a
   Bluetooth needs BlueZ. USB serial needs membership in `dialout` (log out/in after the wizard adds you).
 
 - **Windows:** Edge WebView2 runtime (usually already present on current Windows 10/11). If missing, HQ downloads the Evergreen bootstrapper with PowerShell and runs a silent install. Optional flashers (`esptool`, `adafruit-nrfutil`) install the same way (winget Python if needed, then `pip --user`).
-- **macOS:** system WebKit (no extra install). First open may need right-click → Open if Gatekeeper blocks an unsigned binary.
 
 ### Publishing a GitHub Release
 
@@ -74,7 +78,7 @@ git tag v0.1.6
 git push origin v0.1.6
 ```
 
-That runs the Build workflow and attaches `metis-mesh-hq-*-v0.1.6.tar.gz` / `.zip` to the new release. If `v0.1.6` already exists on an older commit, move it after the release commit (`git tag -f v0.1.6` then `git push --force origin v0.1.6`) or use the next patch version.
+That runs the Build workflow and attaches the Windows `.zip`, Ubuntu `.tar.gz`, and Linux `.AppImage` to the new release. If the tag already exists on an older commit, move it after the release commit (`git tag -f v0.1.11` then `git push --force origin v0.1.11`) or use the next patch version.
 
 ## Requirements (build from source)
 
@@ -120,7 +124,13 @@ On first launch it creates the per-user data folder (`~/.MetisMeshHQ` on Linux �
 cargo build --release
 ```
 
-Binary lands at `target/release/metis-mesh-hq` (`.exe` on Windows). MapLibre and other `assets/` files are embedded via Dioxus `asset!()`.
+Binary lands at `target/release/metis-mesh-hq` (`.exe` on Windows). Map scripts/CSS are embedded and served over the `metis` protocol; keep `assets/` next to the binary for any remaining dioxus `asset!()` URLs.
+
+Linux AppImage (needs network once to fetch linuxdeploy):
+
+```bash
+./packaging/linux/build-appimage.sh
+```
 
 Desktop window icon uses the mesh-head mark from the brand logo (`assets/app_icon.png`). On Windows builds, `build.rs` / `winres` also embeds that `.ico` plus VERSIONINFO so Explorer **Properties → Details** shows File description, Product name/version, and Copyright (needs a native Windows or properly tooled cross-compile — plain Linux hosts skip embedding with a warning).
 

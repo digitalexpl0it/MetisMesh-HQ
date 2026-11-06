@@ -31,10 +31,6 @@ jobs:
             os: windows-latest
             artifact: metis-mesh-hq-windows-x86_64
             binary: target/release/metis-mesh-hq.exe
-          - name: macOS
-            os: macos-15
-            artifact: metis-mesh-hq-macos-aarch64
-            binary: target/release/metis-mesh-hq
 
     steps:
       - uses: actions/checkout@v4
@@ -52,7 +48,9 @@ jobs:
             libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev \
             libdbus-1-dev \
-            libudev-dev
+            libudev-dev \
+            file \
+            desktop-file-utils
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -79,8 +77,8 @@ jobs:
       - name: Build release
         run: cargo build --release
 
-      - name: Package artifact (Unix)
-        if: runner.os != 'Windows'
+      - name: Package artifact (Linux tarball)
+        if: runner.os == 'Linux'
         run: |
           mkdir -p dist
           cp "${{ matrix.binary }}" "dist/${{ steps.art.outputs.name }}"
@@ -92,6 +90,17 @@ jobs:
             tar -czf "../${{ steps.art.outputs.name }}.tar.gz" "${{ steps.art.outputs.name }}" assets
           )
           ls -lh "${{ steps.art.outputs.name }}.tar.gz"
+
+      - name: Package AppImage
+        if: runner.os == 'Linux'
+        run: |
+          chmod +x packaging/linux/build-appimage.sh
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            out="metis-mesh-hq-x86_64-${{ github.ref_name }}.AppImage"
+          else
+            out="metis-mesh-hq-x86_64.AppImage"
+          fi
+          OUT_NAME="$out" ./packaging/linux/build-appimage.sh
 
       - name: Package artifact (Windows)
         if: runner.os == 'Windows'
@@ -110,6 +119,7 @@ jobs:
           path: |
             ${{ steps.art.outputs.name }}.tar.gz
             ${{ steps.art.outputs.name }}.zip
+            metis-mesh-hq-x86_64*.AppImage
           if-no-files-found: error
           retention-days: 30
 
@@ -128,7 +138,7 @@ jobs:
       - name: Flatten artifacts
         run: |
           mkdir -p upload
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} upload/ \;
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.AppImage' \) -exec cp {} upload/ \;
           ls -lh upload
 
       - name: Publish release

@@ -2,10 +2,20 @@
 
 ## Unreleased
 
+## 0.1.11 — 2026-11-06
+
+Package version `0.1.11` (Cargo / About). Windows Details may show `0.1.11.0`.
+
 ### Map
 
 - Fix “MetisMap bridge missing” on Windows release builds: MapLibre / PMTiles / map_bridge are served from the embedded `metis` protocol (same as outline GeoJSON). GitHub `.exe` zips never shipped an `assets/` folder, so dioxus `asset!()` script URLs 404’d and the map never started. Init also waits up to 20s for the bridge instead of failing after 180ms
 - Release packages now include the `assets/` folder next to the binary as a backup for any remaining `asset!()` URLs
+
+### Platforms / packaging
+
+- Supported releases are **Windows** and **Linux** only — macOS CI and release artifacts are dropped
+- Linux AppImage (`metis-mesh-hq-x86_64.AppImage`) built with linuxdeploy + GTK plugin so GTK/WebKit ship inside the image; use this on non-Ubuntu or older distros. Host still needs BlueZ (Bluetooth) and dialout/udev for USB serial
+- Ubuntu 26.04 `.tar.gz` remains for thin installs that already have the system WebKit/GTK packages
 
 ## 0.1.10 — 2026-11-06
 

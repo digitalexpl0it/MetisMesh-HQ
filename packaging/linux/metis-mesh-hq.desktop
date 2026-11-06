@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Metis Mesh HQ
+Comment=Offline emergency headquarters for MeshCore communities
+Exec=metis-mesh-hq
+Icon=metis-mesh-hq
+Terminal=false
+Categories=Network;Utility;
+Keywords=mesh;meshcore;radio;emergency;
+StartupWMClass=metis-mesh-hq

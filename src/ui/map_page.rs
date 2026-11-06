@@ -1785,11 +1785,17 @@ pub fn MapPage() -> Element {
         "Fetch advert path locally (airtime). Does not post to channels or DMs."
     };
 
+    // Served from the embedded metis protocol (release .exe has no assets/ folder;
+    // dioxus asset!() URLs 404 on Windows GitHub builds).
+    let maplibre_css = crate::brand::metis_asset_url("map/maplibre-gl.css");
+    let maplibre_js = crate::brand::metis_asset_url("map/maplibre-gl.js");
+    let pmtiles_js = crate::brand::metis_asset_url("map/pmtiles.js");
+    let bridge_js = crate::brand::metis_asset_url("map/map_bridge.js");
     rsx! {
-        document::Stylesheet { href: asset!("/assets/maplibre-gl.css") }
-        document::Script { src: asset!("/assets/maplibre-gl.js") }
-        document::Script { src: asset!("/assets/pmtiles.js") }
-        document::Script { src: asset!("/assets/map_bridge.js") }
+        document::Stylesheet { href: "{maplibre_css}" }
+        document::Script { src: "{maplibre_js}" }
+        document::Script { src: "{pmtiles_js}" }
+        document::Script { src: "{bridge_js}" }
         div { class: "map-page flex h-full min-h-0 flex-col gap-3 overflow-hidden",
             div { class: "map-heading-row",
                 div { class: "map-heading-copy",

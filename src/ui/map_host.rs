@@ -62,11 +62,35 @@ async fn eval_value(expr: &str) -> Result<Value, String> {
         .map_err(|err| format!("{err:?}"))
 }
 
+/// Wait until `map_bridge.js` has assigned `window.MetisMap` (scripts load async).
+async fn ensure_map_bridge() -> Result<(), String> {
+    let js = r#"(async () => {
+  var deadline = Date.now() + 20000;
+  while (!window.MetisMap) {
+    if (Date.now() > deadline) {
+      throw new Error(
+        "MetisMap bridge missing (maplibregl=" +
+          !!window.maplibregl +
+          ", pmtiles=" +
+          !!window.pmtiles +
+          ", scripts=" +
+          document.scripts.length +
+          ")"
+      );
+    }
+    await new Promise(function (r) { setTimeout(r, 50); });
+  }
+  return true;
+})()"#;
+    eval_value(js).await?;
+    Ok(())
+}
+
 pub async fn map_init(style: &Value, lng: f64, lat: f64, zoom: f64) -> Result<(), String> {
+    ensure_map_bridge().await?;
     let style_json = style.to_string();
     let js = format!(
         r#"(async () => {{
-  if (!window.MetisMap) throw new Error("MetisMap bridge missing");
   await window.MetisMap.init({id}, {container}, {style}, {lng}, {lat}, {zoom});
   return true;
 }})()"#,
@@ -127,6 +151,7 @@ pub async fn map_set_nodes(data: &Value, cluster: bool) {
 }
 
 pub async fn map_set_style(style: &Value, camera: Option<MapCamera>) -> Result<(), String> {
+    ensure_map_bridge().await?;
     let cam_json = match camera {
         Some(cam) => format!(
             r#"{{"lng":{},"lat":{},"zoom":{}}}"#,
@@ -136,7 +161,6 @@ pub async fn map_set_style(style: &Value, camera: Option<MapCamera>) -> Result<(
     };
     let js = format!(
         r#"(async () => {{
-  if (!window.MetisMap) throw new Error("MetisMap bridge missing");
   await window.MetisMap.setStyle({id}, {style}, {cam});
   return true;
 }})()"#,

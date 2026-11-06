@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Map
+
+- Fix “MetisMap bridge missing” on Windows release builds: MapLibre / PMTiles / map_bridge are served from the embedded `metis` protocol (same as outline GeoJSON). GitHub `.exe` zips never shipped an `assets/` folder, so dioxus `asset!()` script URLs 404’d and the map never started. Init also waits up to 20s for the bridge instead of failing after 180ms
+- Release packages now include the `assets/` folder next to the binary as a backup for any remaining `asset!()` URLs
+
 ## 0.1.10 — 2026-11-06
 
 Package version `0.1.10` (Cargo / About). Windows Details may show `0.1.10.0`.

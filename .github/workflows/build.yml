@@ -85,9 +85,11 @@ jobs:
           mkdir -p dist
           cp "${{ matrix.binary }}" "dist/${{ steps.art.outputs.name }}"
           chmod +x "dist/${{ steps.art.outputs.name }}"
+          # Keep assets/ next to the binary for any remaining dioxus asset!() URLs.
+          cp -a assets "dist/assets"
           (
             cd dist
-            tar -czf "../${{ steps.art.outputs.name }}.tar.gz" "${{ steps.art.outputs.name }}"
+            tar -czf "../${{ steps.art.outputs.name }}.tar.gz" "${{ steps.art.outputs.name }}" assets
           )
           ls -lh "${{ steps.art.outputs.name }}.tar.gz"
 
@@ -97,7 +99,8 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item "${{ matrix.binary }}" "dist/${{ steps.art.outputs.name }}.exe"
-          Compress-Archive -Path "dist/${{ steps.art.outputs.name }}.exe" -DestinationPath "${{ steps.art.outputs.name }}.zip" -Force
+          Copy-Item -Recurse assets "dist/assets"
+          Compress-Archive -Path @("dist/${{ steps.art.outputs.name }}.exe", "dist/assets") -DestinationPath "${{ steps.art.outputs.name }}.zip" -Force
           Get-Item "${{ steps.art.outputs.name }}.zip"
 
       - name: Upload build

@@ -260,6 +260,53 @@ fn serve_metis_protocol(
             .unwrap_or_else(|_| Response::new(Cow::Borrowed(b"brand not found" as &[u8])));
     }
 
+    // MapLibre / PMTiles / bridge scripts (release .exe has no assets/ folder;
+    // document::Script asset!() URLs 404 without these embedded routes).
+    let map_name = path
+        .strip_prefix("/map/")
+        .or_else(|| {
+            path.rsplit_once("/map/")
+                .map(|(_, rest)| rest.trim_start_matches('/'))
+        })
+        .map(|s| s.split(['?', '#']).next().unwrap_or(s))
+        .filter(|s| !s.is_empty());
+    if let Some(name) = map_name {
+        let (body, ctype): (&'static [u8], &str) = match name {
+            "maplibre-gl.js" => (
+                include_bytes!("../assets/maplibre-gl.js").as_slice(),
+                "text/javascript; charset=utf-8",
+            ),
+            "maplibre-gl.css" => (
+                include_bytes!("../assets/maplibre-gl.css").as_slice(),
+                "text/css; charset=utf-8",
+            ),
+            "pmtiles.js" => (
+                include_bytes!("../assets/pmtiles.js").as_slice(),
+                "text/javascript; charset=utf-8",
+            ),
+            "map_bridge.js" => (
+                include_bytes!("../assets/map_bridge.js").as_slice(),
+                "text/javascript; charset=utf-8",
+            ),
+            _ => {
+                return Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body(Cow::Borrowed(b"map asset not found" as &[u8]))
+                    .unwrap_or_else(|_| {
+                        Response::new(Cow::Borrowed(b"map asset not found" as &[u8]))
+                    });
+            }
+        };
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, ctype)
+            .header(header::CONTENT_LENGTH, body.len().to_string())
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header(header::CACHE_CONTROL, "public, max-age=86400")
+            .body(Cow::Borrowed(body))
+            .unwrap_or_else(|_| Response::new(Cow::Borrowed(body)));
+    }
+
     // Bundled outline GeoJSON (tiny style JSON references these URLs).
     let geojson_name = path
         .strip_prefix("/geojson/")

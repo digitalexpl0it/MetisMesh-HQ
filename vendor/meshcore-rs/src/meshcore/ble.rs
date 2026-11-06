@@ -124,6 +124,17 @@ impl MeshCore {
             .await
             .map_err(|e| Error::connection(format!("Failed to discover services: {}", e)))?;
 
+        // Windows negotiates ATT MTU asynchronously after connect. SelfInfo is
+        // ~60+ bytes — wait briefly so MaxPduSize has a chance to rise above 23
+        // before we subscribe and send APPSTART.
+        for _ in 0..25 {
+            if peripheral.mtu() > 23 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(80)).await;
+        }
+        tracing::info!("BLE ATT MTU after connect: {}", peripheral.mtu());
+
         // Find the MeshCore service and characteristics
         let services = peripheral.services();
         let meshcore_service = services
@@ -155,7 +166,11 @@ impl MeshCore {
                     break;
                 }
                 Err(e) => {
-                    tracing::warn!("BLE subscribe attempt {attempt}/3 failed: {e}");
+                    let msg = e.to_string();
+                    tracing::warn!("BLE subscribe attempt {attempt}/3 failed: {msg}");
+                    if is_link_security_error(&msg) {
+                        return Err(Error::connection(not_paired_message(&msg)));
+                    }
                     sub_err = Some(e);
                     tokio::time::sleep(Duration::from_millis(400 * attempt as u64)).await;
                 }
@@ -167,7 +182,7 @@ impl MeshCore {
 
         tracing::info!("Subscribed to MeshCore notifications");
         // Windows often needs a beat after CCCD write before ValueChanged fires.
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
 
         let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
         Ok((MeshCore::new_with_sender(tx), rx, tx_char))
@@ -257,7 +272,9 @@ impl MeshCore {
     }
 
     /// Prefer write-with-response (MeshCore docs). Fall back to without-response
-    /// when the characteristic does not support WRITE, or when with-response fails.
+    /// when the characteristic does not support WRITE, or when with-response fails
+    /// for a reason other than link security (a without-response write on an
+    /// unbonded link is accepted locally and silently dropped by the firmware).
     fn ble_write_types(tx_char: &Characteristic) -> [WriteType; 2] {
         let props = tx_char.properties;
         if props.contains(CharPropFlags::WRITE) {
@@ -334,12 +351,14 @@ impl MeshCore {
 
         // Spawn write task
         // BLE does NOT use framing - send raw payload directly (unlike serial which uses [0x3c][len][payload])
+        let write_dispatcher = meshcore.dispatcher.clone();
         let write_task = tokio::spawn(async move {
             while let Some(data) = rx.recv().await {
                 tracing::debug!("BLE TX: {} bytes: {:02x?}", data.len(), &data);
                 // BLE has MTU limits, so we may need to chunk the data
                 for chunk in data.chunks(244) {
                     let mut wrote = false;
+                    let mut security_err = None;
                     for write_type in write_types {
                         match peripheral_write
                             .write(&tx_char, chunk, write_type)
@@ -354,12 +373,23 @@ impl MeshCore {
                                 break;
                             }
                             Err(e) => {
+                                let msg = e.to_string();
                                 tracing::warn!(
-                                    "BLE TX {write_type:?} failed ({} bytes): {e}",
+                                    "BLE TX {write_type:?} failed ({} bytes): {msg}",
                                     chunk.len()
                                 );
+                                if is_link_security_error(&msg) {
+                                    security_err = Some(msg);
+                                    break;
+                                }
                             }
                         }
+                    }
+                    if let Some(msg) = security_err {
+                        let detail = not_paired_message(&msg);
+                        tracing::error!("BLE TX refused: {detail}");
+                        write_dispatcher.emit(MeshCoreEvent::error(detail)).await;
+                        break;
                     }
                     if !wrote {
                         tracing::error!("BLE TX error: all write types failed");
@@ -377,5 +407,50 @@ impl MeshCore {
         meshcore.setup_event_handlers().await;
 
         Ok(meshcore)
+    }
+}
+
+/// The OS refused a GATT operation because the link is not encrypted with a
+/// PIN bond. MeshCore companions protect the UART service with ENC_MITM.
+/// btleplug on Windows reports `GattCommunicationStatus(2)` (ProtocolError,
+/// carrying ATT insufficient authentication/encryption) or `(3)` (AccessDenied).
+fn is_link_security_error(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("gattcommunicationstatus(2)")
+        || lower.contains("gattcommunicationstatus(3)")
+        || lower.contains("insufficient authentication")
+        || lower.contains("insufficient encryption")
+}
+
+fn not_paired_message(raw: &str) -> String {
+    format!(
+        "{}: the system refused access to the MeshCore service ({raw}). \
+The companion requires a PIN bond — click Pair, enter the radio's six-digit PIN, then Connect.",
+        crate::BLE_NOT_PAIRED
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_link_security_error, not_paired_message};
+
+    #[test]
+    fn detects_windows_protection_failures() {
+        assert!(is_link_security_error(
+            "Other: Windows UWP threw error on write: GattCommunicationStatus(2)"
+        ));
+        assert!(is_link_security_error(
+            "Other: Windows UWP threw error on subscribe: GattCommunicationStatus(3)"
+        ));
+        assert!(is_link_security_error("Insufficient Authentication"));
+        assert!(!is_link_security_error(
+            "Other: Windows UWP threw error on write: GattCommunicationStatus(1)"
+        ));
+        assert!(!is_link_security_error("Not connected"));
+    }
+
+    #[test]
+    fn not_paired_message_starts_with_marker() {
+        assert!(not_paired_message("x").starts_with(crate::BLE_NOT_PAIRED));
     }
 }

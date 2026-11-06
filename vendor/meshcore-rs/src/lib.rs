@@ -73,6 +73,10 @@ pub const CHANNEL_SECRET_LEN: usize = 16;
 /// Total length of channel info payload (idx + name + secret)
 pub const CHANNEL_INFO_LEN: usize = 1 + CHANNEL_NAME_LEN + CHANNEL_SECRET_LEN;
 
+/// Prefix of the BLE error raised when the OS refuses GATT access because the
+/// link is not bonded with the companion PIN. Callers match on this text.
+pub const BLE_NOT_PAIRED: &str = "Bluetooth link is not paired";
+
 pub use error::Error;
 pub use events::{
     ChannelMessage, ContactMessage, EventDispatcher, EventPayload, EventType, MeshCoreEvent,

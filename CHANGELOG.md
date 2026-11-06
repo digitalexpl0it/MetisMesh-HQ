@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Log file
+
+- HQ writes its log to `logs/` in the data folder (Windows `%APPDATA%\MetisMeshHQ\logs`), so you can read it outside the app. Each launch starts a new `metis-hq.log` and older ones move to `metis-hq.1.log` through `metis-hq.4.log`. At most 5 files of 5 MB each are kept (25 MB at most), and a file that fills up mid-session rotates too
+- Settings → Diagnostics → Log file: a "Save log to disk" switch (on by default; turning it off stops writing at once), the current file path with Copy, file count and size on disk, Open log folder, and Delete older logs
+- Info, warning, and error lines from `meshcore-rs` and `btleplug` now show in the App log and the file. Debug output from these libraries is never captured because it contains raw radio frames with channel secrets. App lines are redacted the same way as the in-app log
+- Panics are written to the log file before the app exits, so a crash leaves a record
+
 ### Windows install / profile
 
 - WebView2 cache uses a stable `%LOCALAPPDATA%\MetisMeshHQ\webview` path (dioxus default was `%LOCALAPPDATA%\<exe-name>`, so each `metis-mesh-hq-0.1.x.exe` created a new folder). Old versioned folders under Local are safe to delete. HQ data stays in `%APPDATA%\MetisMeshHQ`
@@ -21,6 +28,9 @@
 - APPSTART / device query listen before write (meshcore-rs race dropped fast SelfInfo → “Reading companion identity…” timeout); longer Windows settle
 - Windows BLE: stop auto-reconnect after APPSTART / device-not-found (reconnect loop was resetting companions and hiding them from Scan); drop GATT so the radio can advertise again; single APPSTART attempt + longer post-GATT settle
 - Vendored `meshcore-rs` BLE: write-with-response (MeshCore-recommended; WithoutResponse often silent-fails on Win11), arm notify stream before any write, subscribe retry, 8s device find + known-peripheral match
+- **Windows Bluetooth pairing (root cause of “never answered APPSTART”):** MeshCore firmware (ESP32 and nRF52) ignores every frame until the link is encrypted with a PIN bond, and HQ never paired on Windows. Pair with PIN now runs WinRT custom pairing with the operator’s PIN (EncryptionAndAuthentication); an existing bond without PIN protection is removed and re-made; pairing results map to clear messages (wrong PIN, radio held by phone, timeout)
+- Vendored `meshcore-rs` BLE: a refused write/subscribe on an unbonded link (`GattCommunicationStatus` ProtocolError/AccessDenied) now fails at once with “Bluetooth link is not paired…” instead of falling back to write-without-response (silently dropped by the firmware) and timing out; auto-reconnect stops on it
+- APPSTART bytes match meshcore_py (firmware ignores bytes 1–7); wait for ATT MTU after connect; log SelfInfo parse failures
 
 ## 0.1.6 — 2026-11-06
 

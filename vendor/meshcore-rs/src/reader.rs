@@ -224,10 +224,20 @@ impl MessageReader {
             }
 
             PacketType::SelfInfo => {
-                if let Ok(info) = parse_self_info(payload) {
-                    let event =
-                        MeshCoreEvent::new(EventType::SelfInfo, EventPayload::SelfInfo(info));
-                    self.dispatcher.emit(event).await;
+                match parse_self_info(payload) {
+                    Ok(info) => {
+                        let event =
+                            MeshCoreEvent::new(EventType::SelfInfo, EventPayload::SelfInfo(info));
+                        self.dispatcher.emit(event).await;
+                    }
+                    Err(err) => {
+                        // Previously silent — looked like APPSTART "never answered"
+                        // when the notify payload was truncated / incomplete.
+                        tracing::error!(
+                            "SelfInfo parse failed ({} bytes): {err}",
+                            payload.len()
+                        );
+                    }
                 }
             }
 

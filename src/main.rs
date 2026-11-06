@@ -15,6 +15,7 @@ mod contact_qr;
 mod db;
 mod deps;
 mod firmware;
+mod log_file;
 mod map_tiles;
 mod mesh_regions;
 mod mesh_text;
@@ -42,6 +43,8 @@ use secrets::Secrets;
 use ui::{install, App, AppState};
 
 fn main() {
+    app_log::install_library_bridge();
+    install_panic_logger();
     #[cfg(target_os = "windows")]
     set_windows_app_user_model_id();
     let data = data_dir();
@@ -60,6 +63,10 @@ fn main() {
         eprintln!("unable to prepare the headquarters database: {err}");
         std::process::exit(1);
     }
+    log_file::init(
+        data.join("logs"),
+        services::setting_bool(&db, log_file::SETTING_KEY, true),
+    );
     map_tiles::sync_active_path(&db);
     if pmtiles_path::current_pmtiles_path().is_none() {
         if let Ok(Some(path)) = db.setting("pmtiles_path") {
@@ -80,6 +87,17 @@ fn main() {
         std::process::exit(1);
     }
     launch_window();
+}
+
+/// Record panics in the app log and write them to disk synchronously: the
+/// background log writer may not get to flush before the process exits.
+fn install_panic_logger() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = app_log::redact(&format!("panic: {info}"));
+        log_file::write_line_now(app_log::LogLevel::Error, &message);
+        previous(info);
+    }));
 }
 
 #[cfg(feature = "desktop")]

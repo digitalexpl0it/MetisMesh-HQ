@@ -1,6 +1,6 @@
 [package]
 name = "metis-mesh-hq"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 description = "Offline emergency headquarters for MeshCore communities"
 license = "MIT"
@@ -20,6 +20,8 @@ ed25519-dalek = "2"
 futures-util = "0.3"
 hex = "0.4"
 keyring = "3"
+# Bridge btleplug (`log`) and meshcore-rs (`tracing`) into the HQ app log / log file.
+log = "0.4"
 # Path pin: vendored 0.2.0 with Windows BLE fixes (write-with-response, notify
 # ready before APPSTART, longer find, subscribe retry). Drop when upstream lands.
 meshcore-rs = { path = "vendor/meshcore-rs", default-features = false, features = ["ble", "serial", "tcp"] }
@@ -35,6 +37,8 @@ serialport = "4"
 sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 unicode-segmentation = "1"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 # native-tls → Windows SChannel / macOS Security / OpenSSL so corporate MITM
@@ -51,6 +55,8 @@ gtk = "0.18"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_UI_Shell", "Win32_Foundation"] }
+# WinRT custom pairing (PIN bond). Same major as btleplug 0.12 so only one copy links.
+windows = { version = "0.62", features = ["Devices_Bluetooth", "Devices_Enumeration", "Foundation"] }
 
 [features]
 default = ["desktop"]

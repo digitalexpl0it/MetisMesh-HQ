@@ -7613,6 +7613,9 @@ fn SettingsPage(
     let mut log_filter = use_signal(|| "all".to_string());
     let mut log_query = use_signal(String::new);
     let mut log_autoscroll = use_signal(|| true);
+    let mut log_file_on = use_signal(|| {
+        crate::services::setting_bool(&state().db, crate::log_file::SETTING_KEY, true)
+    });
     let mut svc_weather = use_signal(|| {
         crate::services::setting_bool(&state().db, "svc_weather_enabled", true)
     });
@@ -8042,6 +8045,8 @@ fn SettingsPage(
         Vec::new()
     };
     let log_count = log_rows.len();
+    let log_file_status = (settings_tab() == SettingsTab::Diagnostics)
+        .then(crate::log_file::status);
     use_effect(move || {
         let _ = log_tick();
         let _ = log_count;
@@ -13025,10 +13030,114 @@ fn SettingsPage(
             }
             }
 
+            if let Some(file_status) = log_file_status {
+                Card { title: "Log file".to_string(), icon: Some(IconName::Folder),
+                    p { class: "mb-3 text-sm text-muted-foreground",
+                        {
+                            format!(
+                                "Saves the app log to disk so you can read it outside HQ. A new file starts each launch; HQ keeps the last {} files of up to {} each ({} max) and deletes the oldest. Secrets and PINs are redacted.",
+                                crate::log_file::MAX_FILES,
+                                crate::log_file::format_bytes(crate::log_file::MAX_FILE_BYTES),
+                                crate::log_file::format_bytes(
+                                    crate::log_file::MAX_FILE_BYTES * crate::log_file::MAX_FILES as u64
+                                ),
+                            )
+                        }
+                    }
+                    ToggleSwitch {
+                        checked: log_file_on(),
+                        label: "Save log to disk".to_string(),
+                        hint: Some(if file_status.enabled {
+                            "Writing now.".to_string()
+                        } else {
+                            "Off — lines stay in memory only and are lost when HQ closes.".to_string()
+                        }),
+                        onchange: move |next: bool| {
+                            log_file_on.set(next);
+                            crate::services::set_setting_bool(
+                                &state().db,
+                                crate::log_file::SETTING_KEY,
+                                next,
+                            );
+                            crate::log_file::set_enabled(next);
+                        }
+                    }
+                    if let Some(err) = file_status.last_error.as_ref() {
+                        p { class: "mt-2 text-sm text-red-200", "{err}" }
+                    }
+                    {
+                        let dir_text = file_status
+                            .dir
+                            .as_ref()
+                            .map(|dir| crate::log_file::current_path(dir).display().to_string())
+                            .unwrap_or_else(|| "Not set up".to_string());
+                        let dir_copy = dir_text.clone();
+                        let usage = format!(
+                            "{} file{} · {}",
+                            file_status.files,
+                            if file_status.files == 1 { "" } else { "s" },
+                            crate::log_file::format_bytes(file_status.total_bytes),
+                        );
+                        rsx! {
+                            div { class: "about-meta mt-3",
+                                div { class: "about-row",
+                                    span { class: "about-key", "Current file" }
+                                    span { class: "about-val", "{dir_text}" }
+                                    Button {
+                                        kind: ButtonKind::Ghost,
+                                        onclick: move |_| copy_text_to_clipboard(&dir_copy),
+                                        Icon { name: IconName::Copy, size: 12 }
+                                        "Copy"
+                                    }
+                                }
+                                div { class: "about-row",
+                                    span { class: "about-key", "On disk" }
+                                    span { class: "about-val", "{usage}" }
+                                    span {}
+                                }
+                            }
+                        }
+                    }
+                    div { class: "mt-3 flex flex-wrap gap-2",
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| match crate::log_file::open_folder() {
+                                Ok(()) => status_note("Opening log folder…"),
+                                Err(err) => {
+                                    hq_log!(warn, "open log folder: {err}");
+                                    status_note(format!("Open folder failed: {err}"));
+                                }
+                            },
+                            Icon { name: IconName::Folder, size: 14 }
+                            "Open log folder"
+                        }
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| match crate::log_file::delete_old() {
+                                Ok(0) => status_note("No older log files to delete."),
+                                Ok(count) => {
+                                    hq_log!(info, "Deleted {count} older log file(s).");
+                                    status_note(format!(
+                                        "Deleted {count} older log file{}.",
+                                        if count == 1 { "" } else { "s" }
+                                    ));
+                                }
+                                Err(err) => {
+                                    hq_log!(warn, "delete old logs: {err}");
+                                    status_note(format!("Delete failed: {err}"));
+                                }
+                            },
+                            Icon { name: IconName::Trash, size: 14 }
+                            "Delete older logs"
+                        }
+                    }
+                }
+            }
+
             if settings_tab() == SettingsTab::Diagnostics {
                 Card { title: "App log".to_string(), icon: Some(IconName::Messages),
                     p { class: "mb-3 text-sm text-muted-foreground",
-                        "Live diagnostic lines from radio connect, sync, send, and CLI. Separate from the security audit trail. Secrets and PINs are redacted. Keeps the last 1000 lines."
+                        "Live diagnostic lines from radio connect, sync, send, CLI, and the Bluetooth / MeshCore libraries. Separate from the security audit trail. Secrets and PINs are redacted. Shows the last 1000 lines; Clear empties this view only, not the log file."
                     }
                     div { class: "mb-3 flex flex-wrap items-end gap-2",
                         div { class: "min-w-[10rem]",

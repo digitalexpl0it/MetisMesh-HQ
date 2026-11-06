@@ -284,23 +284,22 @@ impl CommandHandler {
     ///
     /// Format: [CMD_APP_START=0x01][reserved: 7 bytes][app_name: "mccli"]
     pub async fn send_appstart(&self) -> Result<SelfInfo> {
-        // Byte 0: CMD_APP_START (0x01)
-        // Bytes 1-7: reserved (zeros)
-        // Bytes 8+: app name
+        // Same bytes as meshcore_py. Firmware requires len >= 8 and ignores
+        // bytes 1–7; bytes 8+ are the app name it logs.
         let data = [
             CMD_APP_START,
-            0x00,
-            0x00,
-            0x00,
-            0x00,
-            0x00,
-            0x00,
-            0x00, // reserved
+            0x03,
+            b' ',
+            b' ',
+            b' ',
+            b' ',
+            b' ',
+            b' ',
             b'm',
             b'c',
             b'c',
             b'l',
-            b'i', // app name TODO review this
+            b'i',
         ];
         let event = self.send(&data, Some(EventType::SelfInfo)).await?;
 

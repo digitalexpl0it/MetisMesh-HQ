@@ -1615,7 +1615,7 @@ fn spawn_detached(mut cmd: Command) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-fn open_folder_detached(path: &Path) -> Result<(), String> {
+pub(crate) fn open_folder_detached(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         return spawn_detached({

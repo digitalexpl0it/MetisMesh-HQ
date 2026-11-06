@@ -1021,11 +1021,12 @@ impl PoolShared {
         tokio::spawn(async move {
             pool.notify(
                 "pairing",
-                "Pairing with the radio. If Windows or macOS shows a Bluetooth PIN prompt, enter the same six-digit PIN there.",
+                "Pairing with the radio using the PIN you entered. If the system shows its own Bluetooth PIN prompt, enter the same six-digit PIN there.",
             );
-            match crate::ble_pair::ensure_paired(&target, pin).await {
+            // Windows pairing needs the scanned MAC, not the advertised name.
+            let address = stable_radio_address(&pool.idle, &target);
+            match crate::ble_pair::ensure_paired(&address, pin).await {
                 Ok(()) => {
-                    let address = stable_radio_address(&pool.idle, &target);
                     let label = scanned_label(&pool.idle, &target);
                     let _ = pool.ctl.send(PoolCmd::ConnectBle { address, label });
                 }
@@ -2304,6 +2305,7 @@ fn is_ble_handshake_failure(err: &str) -> bool {
                 || lower.contains("reading companion")))
         || lower.contains("device not found")
         || lower.contains("meshcore device not found")
+        || err.contains(meshcore_rs::BLE_NOT_PAIRED)
 }
 
 fn clarify_usb_connect_error(raw: &str) -> String {
@@ -2679,10 +2681,14 @@ async fn slot_loop(
                 // Do not auto-reconnect after APPSTART / not-found — that loop
                 // overloaded companions and hid them from Scan until app restart.
                 if ctx.transport == "ble" && is_ble_handshake_failure(&error) {
-                    let detail = format!(
-                        "{error} Auto-reconnect stopped so the radio can recover. \
+                    let detail = if error.contains(meshcore_rs::BLE_NOT_PAIRED) {
+                        error
+                    } else {
+                        format!(
+                            "{error} Auto-reconnect stopped so the radio can recover. \
 Wait ~10 seconds, Scan, then Connect once."
-                    );
+                        )
+                    };
                     end_slot_disconnected(&ctx, detail);
                     return;
                 }
@@ -2847,12 +2853,29 @@ async fn request_listening_first(
             loop {
                 match early_rx.recv().await {
                     Ok(event) if expected.contains(&event.event_type) => return Ok(event),
-                    Ok(_) => {}
+                    Ok(event) => {
+                        if let Some(err) = ble_not_paired_error(&event) {
+                            return Err(err);
+                        }
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                     Err(_) => return Err("Companion event stream closed.".to_string()),
                 }
             }
         } => event,
+    }
+}
+
+/// The BLE write task reports a refused (unbonded) link as an Error event so
+/// the handshake fails at once instead of waiting out the APPSTART timeout.
+fn ble_not_paired_error(event: &MeshCoreEvent) -> Option<String> {
+    match (&event.event_type, &event.payload) {
+        (EventType::Error, EventPayload::String(msg))
+            if msg.starts_with(meshcore_rs::BLE_NOT_PAIRED) =>
+        {
+            Some(msg.clone())
+        }
+        _ => None,
     }
 }
 
@@ -3550,10 +3573,11 @@ struct SelfIdentity {
     raw: serde_json::Value,
 }
 
-/// APPSTART frame (same bytes as meshcore-rs `send_appstart`).
+/// APPSTART frame, same bytes as meshcore_py. Firmware requires len >= 8 and
+/// ignores bytes 1–7; bytes 8+ are the app name it logs.
 const APPSTART_FRAME: [u8; 13] = [
     1, // CMD_APP_START
-    0, 0, 0, 0, 0, 0, 0, // reserved
+    3, b' ', b' ', b' ', b' ', b' ', b' ', // reserved (meshcore_py shape)
     b'm', b'c', b'c', b'l', b'i',
 ];
 
@@ -3584,8 +3608,9 @@ fn clarify_appstart_timeout(transport: &str, raw: &str) -> String {
     if transport == "ble" {
         return format!(
             "{raw} Bluetooth linked, but the companion never answered APPSTART. \
-Close the phone MeshCore app, wait ~10s for the radio to advertise again, then Connect once \
-(do not spam Connect). Avoid running HQ elevated (admin)."
+Close the phone MeshCore app so it is not holding the radio. If the radio was re-flashed or its PIN \
+changed, remove it from the system Bluetooth settings, then click Pair and enter the PIN. \
+Wait ~10s, then Connect once. Avoid running HQ elevated (admin)."
         );
     }
     clarify_usb_session_error(raw)
@@ -3624,7 +3649,11 @@ async fn companion_appstart(
     let timeout = appstart_timeout(transport);
     match companion_appstart_once(commands, dispatcher, timeout).await {
         Ok(info) => Ok(info),
-        Err(err) if transport == "ble" && !cfg!(target_os = "windows") => {
+        Err(err)
+            if transport == "ble"
+                && !cfg!(target_os = "windows")
+                && !err.contains(meshcore_rs::BLE_NOT_PAIRED) =>
+        {
             hq_log!(warn, "appstart: {err}; settling and retrying once");
             tokio::time::sleep(Duration::from_millis(600)).await;
             companion_appstart_once(commands, dispatcher, timeout)
@@ -6824,7 +6853,20 @@ mod tests {
             "Timeout waiting for response Bluetooth linked, but the companion never answered APPSTART."
         ));
         assert!(is_ble_handshake_failure("MeshCore device not found"));
+        assert!(is_ble_handshake_failure(&format!(
+            "Connection error: {}: the system refused access",
+            meshcore_rs::BLE_NOT_PAIRED
+        )));
         assert!(!is_ble_handshake_failure("Radio event stream ended."));
+    }
+
+    #[test]
+    fn ble_not_paired_event_ends_handshake_wait() {
+        let msg = format!("{}: refused", meshcore_rs::BLE_NOT_PAIRED);
+        let event = MeshCoreEvent::error(msg.clone());
+        assert_eq!(ble_not_paired_error(&event), Some(msg));
+        assert_eq!(ble_not_paired_error(&MeshCoreEvent::error("ERR 2")), None);
+        assert_eq!(ble_not_paired_error(&MeshCoreEvent::ok()), None);
     }
 
     #[test]

@@ -3647,7 +3647,7 @@ dependencies = [
 
 [[package]]
 name = "metis-mesh-hq"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "argon2",
  "base64",
@@ -3661,6 +3661,7 @@ dependencies = [
  "gtk",
  "hex",
  "keyring",
+ "log",
  "meshcore-rs",
  "qrcode",
  "rand 0.8.8",
@@ -3675,10 +3676,13 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
+ "tracing",
+ "tracing-subscriber",
  "unicode-segmentation",
  "ureq",
  "uuid",
  "webpki-roots 0.26.11",
+ "windows 0.62.2",
  "windows-sys 0.59.0",
  "winres",
  "zip",

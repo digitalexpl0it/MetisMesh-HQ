@@ -93,6 +93,7 @@ pub fn WelcomeWizard(
                 || detail_lower.contains("timeout")
                 || detail_lower.contains("failed")
                 || detail_lower.contains("not connected")
+                || detail_lower.contains("not paired")
                 || detail_lower.contains("appstart")));
     let linked_name = radio.connected_name.trim().to_string();
     let ble_target_now = ble_target();

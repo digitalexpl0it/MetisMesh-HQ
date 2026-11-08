@@ -302,6 +302,33 @@ pub async fn map_pulse_at(lng: f64, lat: f64, color: Option<&str>, kind: &str) {
     let _ = document::eval(&js).await;
 }
 
+/// Durable spotlight pin for a chat-shared location (until cleared/replaced).
+pub async fn map_set_temp_pin(lng: f64, lat: f64, label: &str) {
+    let js = format!(
+        r#"(() => {{
+  if (!window.MetisMap || !window.MetisMap.setTempPin) return false;
+  return window.MetisMap.setTempPin({id}, {lng}, {lat}, {label});
+}})()"#,
+        id = escape_js_string(MAP_ID),
+        lng = lng,
+        lat = lat,
+        label = escape_js_string(label),
+    );
+    let _ = document::eval(&js).await;
+}
+
+pub async fn map_clear_temp_pin() {
+    let js = format!(
+        r#"(() => {{
+  if (!window.MetisMap || !window.MetisMap.clearTempPin) return false;
+  window.MetisMap.clearTempPin({id});
+  return true;
+}})()"#,
+        id = escape_js_string(MAP_ID),
+    );
+    let _ = document::eval(&js).await;
+}
+
 async fn eval_string(js: &str) -> Option<String> {
     match eval_value(js).await {
         Ok(value) => {

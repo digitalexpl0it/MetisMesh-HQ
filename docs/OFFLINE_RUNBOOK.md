@@ -9,9 +9,10 @@ One page for church / community volunteers running **Metis Mesh HQ** when the WA
 
 1. Install Metis Mesh HQ and finish the setup wizard (Bluetooth / USB dialout / optional flashers).
 2. Connect the MeshCore companion radio (BLE, USB, or TCP).
-3. **Settings → Flasher → Manage firmware**: select the boards and roles you actually own → **Save & sync**.
+3. **Settings → Flasher → Manage firmware**: select the boards and roles you actually own → **Save & sync**. Sync also pulls OTAFIX bootloader / erase images for selected nRF boards when the catalog lists them.
 4. Wait until the Flasher page says **Ready for outage**. Optionally **Check integrity**, then **Export pack** to a `MetisMeshHQ-firmware-*.zip` on a USB stick.
-5. Leave the laptop plugged into a UPS or wall power; disable sleep while HQ is the desk radio.
+5. Optional: enable the **LAN flash locker** (Settings → Flasher) while you still have LAN peers who need to flash from another laptop — they use the room PIN over HTTPS (self-signed cert). Web Serial needs Chrome/Edge; OTAFIX remains UF2 drag-drop.
+6. Leave the laptop plugged into a UPS or wall power; disable sleep while HQ is the desk radio.
 
 ## First hour offline
 
@@ -21,7 +22,7 @@ One page for church / community volunteers running **Metis Mesh HQ** when the WA
 4. **Map** — open Map; confirm local pins / last-heard nodes (self-reported GPS only).
 5. **Channel** — open Messages → Channels; post a short check-in on your community channel so volunteers know HQ is live. Speakers who post appear under the channel for this session only.
 6. **Roster / Contacts** — approve pending enrollments only for people you trust; secrets are never shown in the log. DMs need a contact card or companion contact key — not a channel display name alone.
-7. **Flash only from cache** — Settings → Flasher. Flash is blocked if a file fails checksum. If the locker is empty, **Import pack** and pick the USB `.zip`.
+7. **Flash only from cache** — Settings → Flasher on the HQ machine, or the LAN locker page from a PIN session. Indexed flash is blocked if a file fails checksum. Custom local files on the LAN page are operator-supplied (not HQ-verified). If the locker is empty, **Import pack** and pick the USB `.zip`.
 
 ## What the HQ computer needs on battery / UPS
 

@@ -85,6 +85,7 @@ Mirror MeshCore community firmware while online; flash over USB when the interne
 - [x] **G3** Settings → Flasher: device/role/version/port; ESP32 via esptool; nRF52 via adafruit-nrfutil or UF2 path; erase off by default
 - [x] **G4** Selective locker + Manage overlay: `selection.json`, Download-all (~1 GB), Latest/Previous, fuzzy/zebra/pills; sync downloads only the checked set and prunes orphans
 - [x] **G5** Outage readiness: Flasher “Ready for outage” banner; SHA-256 flash guard; Check integrity; Export/Import locker pack (`.zip`); offline runbook (About + `docs/OFFLINE_RUNBOOK.md`)
+- [x] **G6** LAN flash locker (opt-in HTTPS + room PIN): catalog browse, trusted download, ESP SLIP + nRF Adafruit DFU Web Serial, OTAFIX/erase sync + Download menu, Enter DFU, Custom local `.bin`/`.zip`, Repeater/Room setup wizard, in-locker Help
 
 ## Phase H — Standalone desktop ship
 
@@ -185,7 +186,7 @@ Do **not**: send compose text to a network spell service; spellcheck PIN/token/p
 
 7. F1 → F3 (USB + multi-radio; primary companion owns bot)  
 8. E1 → E3 (backup first), then E4 / F4–F5b polish  
-9. G1 → G4 (offline firmware locker + selective Manage overlay + USB flasher)  
+9. G1 → G6 (offline firmware locker + selective Manage + USB flasher + LAN PIN locker)  
 10. H1 → H3 (standalone Linux/Windows/macOS + WAL-safe SQLite)  
 11. I1 → I5 (claimed infrastructure + verify-on-claim + gated Overview)  
 12. J1 → J6 (nav order, fuzzy jump, zebra, heard-week icon, shell layout, Help page)  
@@ -196,6 +197,7 @@ Do **not**: send compose text to a network spell service; spellcheck PIN/token/p
 
 ## Success checks
 
+- [x] LAN locker: PIN session, ESP + nRF Web Serial flash, OTAFIX/erase in Download after Sync, Custom local flash, Repeater/Room setup wizard
 - [x] Shared-GPS mover on whitelist: pin updates, trail grows
 - [x] Whitelisted but not sharing: last-known + stale, no fake motion
 - [x] Message from mapped node: two rings, no pan jank

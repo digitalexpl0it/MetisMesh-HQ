@@ -7,7 +7,10 @@ use crate::radio::RadioStatus;
 
 use super::icons::{Icon, IconName};
 use super::state;
-use super::widgets::{Button, ButtonKind, SelectInput, TextInput, Throbber};
+use super::widgets::{
+    name_emoji_count, validate_advert_name_draft, ADVERT_NAME_MAX_BYTES, Button, ButtonKind,
+    EmojiPickerButton, SelectInput, TextInput, Throbber,
+};
 
 const WELCOME_DONE_KEY: &str = "welcome_done";
 
@@ -16,6 +19,8 @@ enum WelcomeStep {
     Intro,
     System,
     Companion,
+    /// Only reached after a successful companion link.
+    NameCompanion,
     Done,
 }
 
@@ -46,6 +51,15 @@ pub fn reopen_welcome() {
     set_welcome_done(false);
 }
 
+fn looks_like_bt_address(value: &str) -> bool {
+    let trimmed = value.trim();
+    let parts: Vec<_> = trimmed.split([':', '-']).collect();
+    parts.len() == 6
+        && parts.iter().all(|part| {
+            part.len() == 2 && part.chars().all(|ch| ch.is_ascii_hexdigit())
+        })
+}
+
 /// True when a scanned BLE row is the radio we are linking / linked to.
 fn device_matches_link(address: &str, name: &str, linked_name: &str) -> bool {
     let linked = linked_name.trim();
@@ -56,10 +70,115 @@ fn device_matches_link(address: &str, name: &str, linked_name: &str) -> bool {
         || (!name.trim().is_empty() && name.eq_ignore_ascii_case(linked))
 }
 
+/// Advert / display name for the name step (never prefer a raw MAC when a better label exists).
+fn welcome_advert_name(radio: &RadioStatus) -> String {
+    let connected = radio.connected_name.trim();
+    if !connected.is_empty() && !looks_like_bt_address(connected) {
+        return connected.to_string();
+    }
+    if let Ok(Some(hq)) = state().db.setting("hq_name") {
+        let hq = hq.trim();
+        if !hq.is_empty() && !looks_like_bt_address(hq) {
+            return hq.to_string();
+        }
+    }
+    if !connected.is_empty() {
+        if let Some(device) = radio
+            .devices
+            .iter()
+            .find(|device| device.address.eq_ignore_ascii_case(connected))
+        {
+            let name = device.name.trim();
+            if !name.is_empty() && name != "Unnamed device" && !looks_like_bt_address(name) {
+                return name.to_string();
+            }
+        }
+        // connected_name may already be the GAP/advert label while scan still lists the MAC.
+        if let Some(device) = radio
+            .devices
+            .iter()
+            .find(|device| device.name.eq_ignore_ascii_case(connected))
+        {
+            let name = device.name.trim();
+            if !name.is_empty() && name != "Unnamed device" {
+                return name.to_string();
+            }
+        }
+    }
+    connected.to_string()
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum WelcomeFinishAction {
     Dismiss,
     OpenAbout,
+}
+
+#[derive(Clone, Copy)]
+struct WelcomeStripStep {
+    step: WelcomeStep,
+    icon: IconName,
+    label: &'static str,
+}
+
+fn welcome_strip_steps(include_name: bool) -> Vec<WelcomeStripStep> {
+    let mut steps = vec![
+        WelcomeStripStep {
+            step: WelcomeStep::Intro,
+            icon: IconName::Radio,
+            label: "Welcome",
+        },
+        WelcomeStripStep {
+            step: WelcomeStep::System,
+            icon: IconName::Settings,
+            label: "System",
+        },
+        WelcomeStripStep {
+            step: WelcomeStep::Companion,
+            icon: IconName::Bluetooth,
+            label: "Companion",
+        },
+    ];
+    if include_name {
+        steps.push(WelcomeStripStep {
+            step: WelcomeStep::NameCompanion,
+            icon: IconName::Emoji,
+            label: "Name",
+        });
+    }
+    steps.push(WelcomeStripStep {
+        step: WelcomeStep::Done,
+        icon: IconName::Check,
+        label: "Done",
+    });
+    steps
+}
+
+#[component]
+fn WelcomeStepStrip(current: WelcomeStep, include_name: bool) -> Element {
+    let steps = welcome_strip_steps(include_name);
+    rsx! {
+        nav {
+            class: "welcome-step-strip",
+            aria_label: "Setup progress",
+            for (idx, item) in steps.iter().enumerate() {
+                if idx > 0 {
+                    span { class: "welcome-step-arrow", aria_hidden: "true",
+                        Icon { name: IconName::ChevronRight, size: 12 }
+                    }
+                }
+                span {
+                    class: if current == item.step {
+                        "welcome-step-icon welcome-step-icon-active"
+                    } else {
+                        "welcome-step-icon"
+                    },
+                    title: "{item.label}",
+                    Icon { name: item.icon, size: 16 }
+                }
+            }
+        }
+    }
 }
 
 #[component]
@@ -77,6 +196,8 @@ pub fn WelcomeWizard(
     let mut usb_path = use_signal(String::new);
     let mut tcp_host = use_signal(String::new);
     let mut tcp_port = use_signal(|| crate::tcp_radio::DEFAULT_TCP_PORT.to_string());
+    let mut name_draft = use_signal(String::new);
+    let mut name_note = use_signal(String::new);
     let _ = soft_tick();
     let report = deps::soft_status();
     let ble_scanning = radio.state == "scanning" || radio.state == "pairing";
@@ -95,11 +216,19 @@ pub fn WelcomeWizard(
                 || detail_lower.contains("not connected")
                 || detail_lower.contains("not paired")
                 || detail_lower.contains("appstart")));
-    let linked_name = radio.connected_name.trim().to_string();
+    let link_key = radio.connected_name.trim().to_string();
+    let linked_name = welcome_advert_name(&radio);
     let ble_target_now = ble_target();
+    let selected_scan_name = radio
+        .devices
+        .iter()
+        .find(|device| device.address == ble_target_now)
+        .map(|device| device.name.clone())
+        .unwrap_or_default();
     let selected_is_linked = companion_linked
         && !ble_target_now.is_empty()
-        && device_matches_link(&ble_target_now, "", &linked_name);
+        && (device_matches_link(&ble_target_now, &selected_scan_name, &link_key)
+            || device_matches_link(&ble_target_now, &selected_scan_name, &linked_name));
     let pair_button_label = if companion_linked && (selected_is_linked || ble_target_now.is_empty())
     {
         "Connected"
@@ -110,6 +239,22 @@ pub fn WelcomeWizard(
     } else {
         "Pair with PIN"
     };
+    let include_name_strip = companion_linked || step() == WelcomeStep::NameCompanion;
+    let emoji_locked = name_emoji_count(&name_draft()) >= 1;
+    // Prefer MeshCore companion adverts when the scan can detect them; otherwise
+    // keep the full list so a quiet advert still remains selectable.
+    let companion_devices: Vec<_> = radio
+        .devices
+        .iter()
+        .filter(|device| device.companion)
+        .cloned()
+        .collect();
+    let ble_list: Vec<_> = if companion_devices.is_empty() {
+        radio.devices.clone()
+    } else {
+        companion_devices
+    };
+    let ble_list_filtered = !radio.devices.is_empty() && ble_list.len() < radio.devices.len();
 
     let finish = move |action: WelcomeFinishAction| {
         set_welcome_done(true);
@@ -128,6 +273,7 @@ pub fn WelcomeWizard(
                     span { class: "welcome-app-name", "Metis Mesh HQ" }
                 }
 
+                div { class: "welcome-body",
                 match step() {
                     WelcomeStep::Intro => rsx! {
                         h1 { class: "welcome-title", "Welcome" }
@@ -322,32 +468,44 @@ pub fn WelcomeWizard(
                                     if radio.devices.is_empty() {
                                         p { class: "welcome-copy-muted", "No Bluetooth devices listed yet. Scan with the phone app disconnected from the radio." }
                                     } else {
-                                        div { class: "welcome-device-list",
-                                            for device in radio.devices.clone() {
+                                        if ble_list_filtered {
+                                            p { class: "welcome-copy-muted",
+                                                "Showing {ble_list.len()} MeshCore companion(s); other Bluetooth devices are hidden."
+                                            }
+                                        }
+                                        div {
+                                            class: "welcome-device-list",
+                                            role: "radiogroup",
+                                            aria_label: "MeshCore companions",
+                                            for device in ble_list.clone() {
                                                 {
                                                     let addr = device.address.clone();
                                                     let name = device.name.clone();
-                                                    let label = if device.name.trim().is_empty() {
-                                                        device.address.clone()
+                                                    let title = if device.name.trim().is_empty()
+                                                        || device.name == "Unnamed device"
+                                                    {
+                                                        None
                                                     } else {
-                                                        format!("{} ({})", device.name, device.address)
+                                                        Some(device.name.clone())
                                                     };
                                                     let selected = ble_target() == addr;
                                                     let linked = (companion_linked || companion_linking)
-                                                        && device_matches_link(
-                                                            &addr,
-                                                            &name,
-                                                            &linked_name,
-                                                        );
+                                                        && (device_matches_link(
+                                                            &addr, &name, &link_key,
+                                                        ) || device_matches_link(
+                                                            &addr, &name, &linked_name,
+                                                        ));
                                                     let row_busy = companion_linking
                                                         && (selected
                                                             || device_matches_link(
-                                                                &addr,
-                                                                &name,
-                                                                &linked_name,
+                                                                &addr, &name, &link_key,
+                                                            )
+                                                            || device_matches_link(
+                                                                &addr, &name, &linked_name,
                                                             )
                                                             || (!ble_target_now.is_empty()
                                                                 && addr == ble_target_now));
+                                                    let checked = selected || (linked && companion_linked);
                                                     let class = if linked && companion_linked {
                                                         "welcome-device welcome-device-linked"
                                                     } else if selected || row_busy {
@@ -358,10 +516,28 @@ pub fn WelcomeWizard(
                                                     rsx! {
                                                         button {
                                                             class: "{class}",
+                                                            role: "radio",
+                                                            aria_checked: if checked { "true" } else { "false" },
                                                             disabled: companion_linking,
                                                             onclick: move |_| ble_target.set(addr.clone()),
                                                             span { class: "welcome-device-main",
-                                                                span { class: "welcome-device-label", "{label}" }
+                                                                span { class: "welcome-device-lead",
+                                                                    span {
+                                                                        class: "welcome-device-check",
+                                                                        aria_hidden: "true",
+                                                                        if checked {
+                                                                            Icon { name: IconName::Check, size: 12 }
+                                                                        }
+                                                                    }
+                                                                    span { class: "welcome-device-copy",
+                                                                        if let Some(title) = title {
+                                                                            span { class: "welcome-device-label", "{title}" }
+                                                                            span { class: "welcome-device-addr", "{device.address}" }
+                                                                        } else {
+                                                                            span { class: "welcome-device-label", "{device.address}" }
+                                                                        }
+                                                                    }
+                                                                }
                                                                 if linked && companion_linked {
                                                                     span { class: "welcome-device-badge welcome-device-badge-ok",
                                                                         Icon { name: IconName::Check, size: 12 }
@@ -376,8 +552,6 @@ pub fn WelcomeWizard(
                                                                             "Connecting…"
                                                                         }
                                                                     }
-                                                                } else if selected {
-                                                                    span { class: "welcome-device-badge", "Selected" }
                                                                 }
                                                             }
                                                         }
@@ -517,7 +691,15 @@ pub fn WelcomeWizard(
                             Button {
                                 kind: ButtonKind::Primary,
                                 disabled: companion_linking,
-                                onclick: move |_| step.set(WelcomeStep::Done),
+                                onclick: move |_| {
+                                    if companion_linked {
+                                        name_draft.set(linked_name.clone());
+                                        name_note.set(String::new());
+                                        step.set(WelcomeStep::NameCompanion);
+                                    } else {
+                                        step.set(WelcomeStep::Done);
+                                    }
+                                },
                                 if companion_linked {
                                     "Continue"
                                 } else if companion_linking {
@@ -525,6 +707,79 @@ pub fn WelcomeWizard(
                                 } else {
                                     "Continue without radio"
                                 }
+                            }
+                        }
+                    },
+                    WelcomeStep::NameCompanion => rsx! {
+                        h1 { class: "welcome-title", "Name this companion" }
+                        p { class: "welcome-copy",
+                            "Set the advert name shown on the mesh. At most one emoji when renaming here."
+                        }
+                        p { class: "welcome-copy-muted",
+                            if linked_name.is_empty() {
+                                "Current name: (none yet)"
+                            } else {
+                                "Current name: {linked_name}"
+                            }
+                        }
+                        div { class: "welcome-name-row",
+                            TextInput {
+                                value: name_draft(),
+                                placeholder: "Companion name",
+                                oninput: move |event: FormEvent| {
+                                    name_note.set(String::new());
+                                    name_draft.set(event.value());
+                                },
+                            }
+                            EmojiPickerButton {
+                                disabled: emoji_locked,
+                                align_end: true,
+                                // Open upward so the panel clears the step strip.
+                                drop_down: false,
+                                on_pick: move |emoji: String| {
+                                    if name_emoji_count(&name_draft()) >= 1 {
+                                        return;
+                                    }
+                                    let draft = name_draft();
+                                    if draft.len().saturating_add(emoji.len()) > ADVERT_NAME_MAX_BYTES
+                                    {
+                                        name_note.set(
+                                            "Name is too long for another character.".into(),
+                                        );
+                                        return;
+                                    }
+                                    name_note.set(String::new());
+                                    name_draft.set(format!("{draft}{emoji}"));
+                                },
+                            }
+                        }
+                        if !name_note().is_empty() {
+                            p { class: "welcome-note welcome-note-warn", "{name_note()}" }
+                        }
+                        div { class: "welcome-actions",
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| step.set(WelcomeStep::Companion),
+                                "Back"
+                            }
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| step.set(WelcomeStep::Done),
+                                "Keep current name"
+                            }
+                            Button {
+                                kind: ButtonKind::Primary,
+                                onclick: move |_| {
+                                    match validate_advert_name_draft(&name_draft()) {
+                                        Ok(name) => {
+                                            name_note.set(String::new());
+                                            state().radio.apply_name(name);
+                                            step.set(WelcomeStep::Done);
+                                        }
+                                        Err(msg) => name_note.set(msg),
+                                    }
+                                },
+                                "Save and continue"
                             }
                         }
                     },
@@ -550,6 +805,12 @@ pub fn WelcomeWizard(
                             }
                         }
                     },
+                }
+                }
+
+                WelcomeStepStrip {
+                    current: step(),
+                    include_name: include_name_strip,
                 }
             }
         }

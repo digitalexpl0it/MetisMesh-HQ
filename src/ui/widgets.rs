@@ -1212,6 +1212,47 @@ pub fn append_emoji(draft: &str, emoji: &str) -> String {
     }
 }
 
+/// Companion advert name budget (UTF-8 bytes). Keeps `CMD_SET_ADVERT_NAME` frames short.
+pub const ADVERT_NAME_MAX_BYTES: usize = 32;
+
+/// Truncate to at most [`ADVERT_NAME_MAX_BYTES`] UTF-8 bytes on a char boundary.
+pub fn clamp_advert_name(s: impl Into<String>) -> String {
+    let s = s.into();
+    if s.len() <= ADVERT_NAME_MAX_BYTES {
+        return s;
+    }
+    let mut end = ADVERT_NAME_MAX_BYTES;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
+/// Count emoji grapheme clusters in a display name (ZWJ sequences count as one).
+pub fn name_emoji_count(name: &str) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+    name.graphemes(true).filter(|g| grapheme_is_emoji(g)).count()
+}
+
+/// Validate a companion name the operator wants to set (welcome / future forms).
+///
+/// Empty names are rejected. At most one emoji may be *set* here; names already
+/// on the radio with more emojis are left alone elsewhere.
+pub fn validate_advert_name_draft(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Enter a companion name.".into());
+    }
+    if name_emoji_count(trimmed) > 1 {
+        return Err("Use at most one emoji in the companion name.".into());
+    }
+    let clamped = clamp_advert_name(trimmed);
+    if clamped.trim().is_empty() {
+        return Err("Enter a companion name.".into());
+    }
+    Ok(clamped)
+}
+
 /// Insert a share snippet into the compose draft (space-separated, 160-byte clamp).
 pub fn insert_mesh_snippet(draft: &str, snippet: &str) -> String {
     let snippet = snippet.trim();
@@ -1226,10 +1267,7 @@ pub fn insert_mesh_snippet(draft: &str, snippet: &str) -> String {
 
 /// HQ / node position line for mesh share (never 0,0).
 pub fn format_position_share(label: &str, lat: f64, lon: f64) -> Option<String> {
-    if !lat.is_finite() || !lon.is_finite() {
-        return None;
-    }
-    if lat.abs() < 1e-9 && lon.abs() < 1e-9 {
+    if !valid_share_coords(lat, lon) {
         return None;
     }
     let label = label.trim();
@@ -1239,6 +1277,57 @@ pub fn format_position_share(label: &str, lat: f64, lon: f64) -> Option<String> 
         format!("{label}: {lat:.5}, {lon:.5}")
     };
     Some(clamp_mesh_text(body))
+}
+
+/// True for finite lat/lon in range, excluding the 0,0 placeholder.
+pub fn valid_share_coords(lat: f64, lon: f64) -> bool {
+    lat.is_finite()
+        && lon.is_finite()
+        && (-90.0..=90.0).contains(&lat)
+        && (-180.0..=180.0).contains(&lon)
+        && !(lat.abs() < 1e-9 && lon.abs() < 1e-9)
+}
+
+/// Parse a `{label}: lat, lon` or bare `lat, lon` share (same shape as [`format_position_share`]).
+pub fn parse_position_share(text: &str) -> Option<(String, f64, f64)> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Prefer "Label: lat, lon" so names with digits do not steal the coords.
+    if let Some((label, rest)) = trimmed.rsplit_once(':') {
+        if let Some((lat, lon)) = parse_lat_lon_pair(rest.trim()) {
+            return Some((label.trim().to_string(), lat, lon));
+        }
+    }
+    parse_lat_lon_pair(trimmed).map(|(lat, lon)| (String::new(), lat, lon))
+}
+
+fn parse_lat_lon_pair(text: &str) -> Option<(f64, f64)> {
+    let (lat_s, lon_s) = text.split_once(',')?;
+    let lat_s = lat_s.trim();
+    let lon_s = lon_s.trim();
+    let lat: f64 = lat_s.parse().ok()?;
+    let lon: f64 = lon_s.parse().ok()?;
+    // Shares use decimal degrees; require a few fraction digits to avoid "1, 2" noise.
+    if frac_digits(lat_s) < 3 || frac_digits(lon_s) < 3 {
+        return None;
+    }
+    if !valid_share_coords(lat, lon) {
+        return None;
+    }
+    Some((lat, lon))
+}
+
+fn frac_digits(num: &str) -> usize {
+    num.split_once('.')
+        .map(|(_, frac)| frac.chars().take_while(|c| c.is_ascii_digit()).count())
+        .unwrap_or(0)
+}
+
+/// Approx. match for "same map pin" (~55 m at the equator).
+pub fn coords_near(a_lat: f64, a_lon: f64, b_lat: f64, b_lon: f64) -> bool {
+    (a_lat - b_lat).abs() < 5e-4 && (a_lon - b_lon).abs() < 5e-4
 }
 
 /// Share text for a channel.
@@ -1770,6 +1859,35 @@ mod gauge_tests {
         assert!((gauge_fraction(-10.0, 0.0, 100.0) - 0.0).abs() < 0.001);
         assert!((gauge_fraction(200.0, 0.0, 100.0) - 1.0).abs() < 0.001);
         assert!((gauge_fraction(5.0, 10.0, 10.0) - 0.0).abs() < 0.001);
+    }
+}
+
+#[cfg(test)]
+mod advert_name_tests {
+    use super::{
+        clamp_advert_name, name_emoji_count, validate_advert_name_draft, ADVERT_NAME_MAX_BYTES,
+    };
+
+    #[test]
+    fn emoji_count_treats_zwj_as_one() {
+        assert_eq!(name_emoji_count("HQ"), 0);
+        assert_eq!(name_emoji_count("HQ🔥"), 1);
+        assert_eq!(name_emoji_count("🔥HQ⭐"), 2);
+    }
+
+    #[test]
+    fn validate_allows_one_emoji() {
+        let ok = validate_advert_name_draft("  Metis🔥  ").unwrap();
+        assert_eq!(ok, "Metis🔥");
+        assert!(validate_advert_name_draft("").is_err());
+        assert!(validate_advert_name_draft("🔥⭐").is_err());
+    }
+
+    #[test]
+    fn clamp_advert_respects_budget() {
+        let long = "a".repeat(ADVERT_NAME_MAX_BYTES + 8);
+        let out = clamp_advert_name(long);
+        assert!(out.len() <= ADVERT_NAME_MAX_BYTES);
     }
 }
 

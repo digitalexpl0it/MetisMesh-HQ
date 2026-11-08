@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Metis Mesh HQ · Firmware locker</title>
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body data-authed="__AUTHED__">
+  <main class="shell">
+    <header class="hero">
+      <p class="eyebrow">Metis Mesh HQ</p>
+      <h1>Firmware locker</h1>
+      <p class="lede" id="hq-name">LAN flash table</p>
+    </header>
+
+    <section id="login-panel" class="panel" __LOGIN_HIDDEN__>
+      <h2>Enter PIN</h2>
+      <p class="hint">Ask the HQ operator for the room PIN. Use Chrome or Edge for Web Serial flash.</p>
+      <form id="login-form">
+        <label class="field">
+          <span>PIN</span>
+          <input id="pin" name="pin" type="password" autocomplete="current-password" required minlength="4" maxlength="64" />
+        </label>
+        <div class="actions" style="margin-top:0.75rem">
+          <button type="submit" class="btn primary">Unlock</button>
+          <button type="button" id="login-help-btn" class="btn ghost">Help</button>
+        </div>
+      </form>
+      <p id="login-error" class="error" hidden></p>
+    </section>
+
+    <section id="locker-panel" class="panel" __LOCKER_HIDDEN__>
+      <div class="toolbar">
+        <p id="session-note" class="hint"></p>
+        <div class="toolbar-actions">
+          <button type="button" id="help-btn" class="btn ghost">Help</button>
+          <button type="button" id="custom-btn" class="btn ghost">Custom</button>
+          <button type="button" id="console-btn" class="btn ghost">Console</button>
+          <button type="button" id="logout-btn" class="btn ghost">Lock</button>
+        </div>
+      </div>
+
+      <div class="mode-tabs" role="tablist">
+        <button type="button" class="mode-tab active" data-mode="all" id="tab-all">All boards</button>
+        <button type="button" class="mode-tab" data-mode="web" id="tab-web">Web Serial</button>
+        <button type="button" class="mode-tab" data-mode="download" id="tab-download">Download only</button>
+      </div>
+
+      <div class="filters">
+        <label class="field grow">
+          <span>Search</span>
+          <input id="filter" type="search" placeholder="Maker, model, role…" />
+        </label>
+        <label class="field">
+          <span>Maker</span>
+          <select id="maker-filter">
+            <option value="">All makers</option>
+          </select>
+        </label>
+      </div>
+
+      <p id="locker-status" class="hint">Loading firmware catalog…</p>
+      <p id="locker-empty" class="hint" hidden>No firmware on this HQ yet. Sync the locker on the desktop Flasher tab.</p>
+      <div id="device-grid" class="device-grid"></div>
+    </section>
+  </main>
+
+  <div id="sheet-backdrop" class="sheet-backdrop" hidden></div>
+  <aside id="device-sheet" class="sheet" hidden aria-hidden="true">
+    <div class="sheet-head">
+      <button type="button" id="sheet-back" class="btn ghost sheet-back">← Back</button>
+      <div class="sheet-titles">
+        <p class="sheet-crumb" id="sheet-crumb"></p>
+        <h2 id="sheet-title">Choose role</h2>
+      </div>
+    </div>
+    <div id="sheet-body" class="sheet-body"></div>
+    <div id="sheet-flash" class="sheet-flash" hidden>
+      <div id="flash-progress" class="flash-progress" hidden>
+        <div class="flash-progress-head">
+          <span id="flash-progress-label">Flashing…</span>
+          <span id="flash-progress-pct">0%</span>
+        </div>
+        <div class="flash-progress-track">
+          <div id="flash-progress-bar" class="flash-progress-bar"></div>
+        </div>
+      </div>
+      <pre id="flash-log" class="log" hidden></pre>
+    </div>
+  </aside>
+
+  <script src="/vendor/jszip.min.js" defer></script>
+  <script src="/vendor/nrf_dfu.js" defer></script>
+  <script src="/app.js" defer></script>
+</body>
+</html>

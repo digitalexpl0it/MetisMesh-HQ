@@ -192,7 +192,7 @@ fn ensure_dirs() -> Result<(), String> {
 
 // ---------- Catalog (flasher config.json) ----------
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct FlasherCatalog {
     #[serde(default)]
     pub role: BTreeMap<String, CatalogRoleMeta>,
@@ -200,6 +200,9 @@ pub struct FlasherCatalog {
     pub maker: BTreeMap<String, CatalogMaker>,
     #[serde(default)]
     pub device: Vec<CatalogDevice>,
+    /// HTML notice templates keyed by id (`otafixNeeded`, …).
+    #[serde(default)]
+    pub notice: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -225,6 +228,12 @@ pub struct CatalogDevice {
     pub name: String,
     #[serde(default)]
     pub r#type: String,
+    /// OTAFIX / board bootloader filenames on the flasher CDN (`.uf2` / `.zip`).
+    #[serde(default)]
+    pub bootloader: Vec<String>,
+    /// Optional nRF erase image filename on the CDN.
+    #[serde(default)]
+    pub erase: Option<String>,
     #[serde(default)]
     pub firmware: Vec<CatalogFirmware>,
 }
@@ -235,6 +244,9 @@ pub struct CatalogFirmware {
     pub class: String,
     #[serde(default)]
     pub role: String,
+    /// Notice template key (`otafixNeeded`, `otafixRecommended`, …).
+    #[serde(default)]
+    pub notice: Option<String>,
     #[serde(default)]
     pub github: Option<CatalogGithub>,
     /// Static CDN-style version map (kiss modem etc.).
@@ -270,6 +282,8 @@ pub struct DeviceChoice {
     pub name: String,
     pub maker: String,
     pub platform: String,
+    pub bootloader: Vec<String>,
+    pub erase: Option<String>,
     pub roles: Vec<RoleChoice>,
 }
 
@@ -279,6 +293,7 @@ pub struct RoleChoice {
     pub label: String,
     pub tooltip: String,
     pub family: String,
+    pub notice: Option<String>,
     /// flash-wipe / flash-update / flash / download regex or exact name patterns
     pub patterns: BTreeMap<String, String>,
     /// When role uses static version map instead of GitHub regex.
@@ -301,18 +316,26 @@ pub fn load_catalog() -> Result<FlasherCatalog, String> {
 
 pub fn community_devices(catalog: &FlasherCatalog) -> Vec<DeviceChoice> {
     let mut by_device: BTreeMap<String, DeviceChoice> = BTreeMap::new();
+    let device_meta: BTreeMap<&str, &CatalogDevice> =
+        catalog.device.iter().map(|d| (d.name.as_str(), d)).collect();
     for offer in community_offers(catalog) {
-        let entry = by_device.entry(offer.device.clone()).or_insert_with(|| DeviceChoice {
-            name: offer.device.clone(),
-            maker: offer.maker_id.clone(),
-            platform: offer.platform.clone(),
-            roles: Vec::new(),
+        let entry = by_device.entry(offer.device.clone()).or_insert_with(|| {
+            let meta = device_meta.get(offer.device.as_str());
+            DeviceChoice {
+                name: offer.device.clone(),
+                maker: offer.maker_id.clone(),
+                platform: offer.platform.clone(),
+                bootloader: meta.map(|d| d.bootloader.clone()).unwrap_or_default(),
+                erase: meta.and_then(|d| d.erase.clone()),
+                roles: Vec::new(),
+            }
         });
         entry.roles.push(RoleChoice {
             role: offer.role.clone(),
             label: offer.role_label.clone(),
             tooltip: offer.tooltip.clone(),
             family: offer.family.clone(),
+            notice: offer.notice.clone(),
             patterns: offer.patterns.clone(),
             static_versions: offer.static_versions.clone(),
         });
@@ -320,6 +343,48 @@ pub fn community_devices(catalog: &FlasherCatalog) -> Vec<DeviceChoice> {
     let mut out: Vec<_> = by_device.into_values().collect();
     out.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
     out
+}
+
+/// Prefer a `.uf2` bootloader name from the catalog list (fallback: first entry).
+pub fn preferred_bootloader_uf2(names: &[String]) -> Option<String> {
+    names
+        .iter()
+        .find(|n| n.to_ascii_lowercase().ends_with(".uf2"))
+        .cloned()
+        .or_else(|| names.first().cloned())
+}
+
+/// Plain-text notice for the locker UI (no HTML injection).
+pub fn notice_plain(catalog: &FlasherCatalog, notice_key: &str, bootloader_name: &str) -> String {
+    let raw = catalog.notice.get(notice_key).cloned().unwrap_or_default();
+    if raw.is_empty() {
+        return match notice_key {
+            "otafixNeeded" => format!(
+                "WARNING: Install the OTAFIX bootloader ({bootloader_name}) before relying on Bluetooth OTA. Factory bootloaders often lack OTA DFU."
+            ),
+            "otafixRecommended" => format!(
+                "Recommended: install the OTAFIX bootloader ({bootloader_name}) for more reliable Bluetooth OTA DFU."
+            ),
+            _ => String::new(),
+        };
+    }
+    // Resolve ${bootloader} before stripping tags (placeholder often sits in href=).
+    let raw = raw.replace("${bootloader}", bootloader_name);
+    let mut out = String::new();
+    let mut in_tag = false;
+    for ch in raw.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    let mut plain = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    if !bootloader_name.is_empty() && !plain.contains(bootloader_name) {
+        plain = format!("{plain} ({bootloader_name})");
+    }
+    plain
 }
 
 /// One catalog row: board × community role (Manage overlay / selective sync).
@@ -334,6 +399,7 @@ pub struct FirmwareOffer {
     pub role_label: String,
     pub role_pill: String,
     pub tooltip: String,
+    pub notice: Option<String>,
     pub family: String,
     pub patterns: BTreeMap<String, String>,
     pub static_versions: Vec<StaticVersion>,
@@ -457,6 +523,7 @@ pub fn community_offers(catalog: &FlasherCatalog) -> Vec<FirmwareOffer> {
                     role_label: label,
                     role_pill: role_pill(&fw.role),
                     tooltip,
+                    notice: fw.notice.clone(),
                     family: gh.family.clone(),
                     patterns: gh.files.clone(),
                     static_versions: Vec::new(),
@@ -484,6 +551,7 @@ pub fn community_offers(catalog: &FlasherCatalog) -> Vec<FirmwareOffer> {
                     role_label: label,
                     role_pill: role_pill(&fw.role),
                     tooltip,
+                    notice: fw.notice.clone(),
                     family: String::new(),
                     patterns: BTreeMap::new(),
                     static_versions,
@@ -1290,6 +1358,38 @@ fn run_sync(_db: &Db) -> Result<(), String> {
                 .or_insert_with(|| (offer.family.clone(), gh));
         }
     }
+
+    // OTAFIX bootloader + optional erase images for selected boards (CDN static).
+    // Pull every catalog bootloader name (.uf2 and .zip) so the locker Download menu
+    // matches MeshCore's erase / OTAFIX links — not only the preferred UF2.
+    let selected_devices: BTreeSet<&str> =
+        selection.entries.iter().map(|e| e.device.as_str()).collect();
+    for device in &catalog.device {
+        if !selected_devices.contains(device.name.as_str()) {
+            continue;
+        }
+        for name in &device.bootloader {
+            let name = name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            needed
+                .entry(("catalog-static".into(), name.to_string()))
+                .or_insert_with(|| ("bootloader".into(), None));
+        }
+        if let Some(erase) = device.erase.as_ref().filter(|n| !n.trim().is_empty()) {
+            needed
+                .entry(("catalog-static".into(), erase.clone()))
+                .or_insert_with(|| ("erase".into(), None));
+            // MeshCore also ships a .uf2 sibling for the common nRF soft-device wipe.
+            if erase.to_ascii_lowercase().ends_with(".zip") {
+                let uf2 = format!("{}uf2", &erase[..erase.len() - 3]);
+                needed
+                    .entry(("catalog-static".into(), uf2))
+                    .or_insert_with(|| ("erase".into(), None));
+            }
+        }
+    }
     let _ = save_unavailable_keys(&unavailable);
 
     let mut next_assets: Vec<IndexAsset> = Vec::new();
@@ -1313,7 +1413,7 @@ fn run_sync(_db: &Db) -> Result<(), String> {
                 Ok((sha, _)) => {
                     let meta = fs::metadata(&dest).map_err(|e| e.to_string())?;
                     next_assets.push(IndexAsset {
-                        family: "static".into(),
+                        family: family.clone(),
                         tag: static_tag.into(),
                         name,
                         bytes: meta.len(),
@@ -1336,7 +1436,7 @@ fn run_sync(_db: &Db) -> Result<(), String> {
                 Ok(sha) => {
                     let meta = fs::metadata(&dest).map_err(|e| e.to_string())?;
                     next_assets.push(IndexAsset {
-                        family: "static".into(),
+                        family: family.clone(),
                         tag: static_tag.into(),
                         name,
                         bytes: meta.len(),
@@ -2379,6 +2479,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn preferred_bootloader_prefers_uf2() {
+        let names = vec![
+            "board_bootloader-0.9.2.zip".into(),
+            "board_bootloader-0.9.2.uf2".into(),
+        ];
+        assert_eq!(
+            preferred_bootloader_uf2(&names).as_deref(),
+            Some("board_bootloader-0.9.2.uf2")
+        );
+    }
+
+    #[test]
+    fn notice_plain_strips_html_and_resolves_bootloader() {
+        let mut catalog = FlasherCatalog::default();
+        catalog.notice.insert(
+            "otafixNeeded".into(),
+            "<article>WARNING: install <a href='/firmware/${bootloader}'>OTAFIX</a> now</article>"
+                .into(),
+        );
+        let text = notice_plain(&catalog, "otafixNeeded", "sensecap.uf2");
+        assert!(text.contains("WARNING"));
+        assert!(text.contains("sensecap.uf2"));
+        assert!(!text.contains('<'));
+    }
+
+    #[test]
     fn keep_tags_takes_latest_two_per_family() {
         let ordered = vec![
             ("companion".into(), "companion-v1.18.0".into()),
@@ -2568,6 +2694,7 @@ mod tests {
             platform: "esp32".into(),
             role: "companionBle".into(),
             role_label: "Companion (BLE)".into(),
+            notice: None,
             role_pill: "BLE".into(),
             tooltip: String::new(),
             family: "companion".into(),

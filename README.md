@@ -19,7 +19,7 @@ Churches, neighborhoods, and volunteer groups run this on a regular computer sit
 - **Infrastructure** — claim and admin-verify repeaters, rooms, and sensors; probe and remote CLI through the primary companion
 - **Tracker** — whitelist of devices expected to share GPS; trails and stale styling on the map
 - **CLI** — companion and remote device console for operators
-- **Firmware locker** — mirror community firmware while online; flash over USB when the internet is gone (Ready-for-outage, checksums, export/import pack)
+- **Firmware locker** — mirror community firmware while online; flash over USB on the HQ machine when the internet is gone (Ready-for-outage, checksums, export/import pack). Optional **LAN flash locker** (Settings → Flasher): HTTPS + room PIN so other laptops download synced builds and flash via Web Serial (ESP SLIP / nRF DFU zip), plus OTAFIX UF2 downloads, Enter DFU, Custom local files, and Repeater/Room setup CLI
 - **Backup** — passphrase-encrypted HQ archive (SQLite + channel secrets); restore with confirm
 - **Local-first storage** — SQLite under the per-user data folder; channel secrets in the OS keyring when possible (otherwise a locked-down file)
 - **Help** — in-app operator guide, shareable radio-user signup steps, and the full offline runbook (Settings → About links here; `docs/OFFLINE_RUNBOOK.md` mirrors Help for GitHub)
@@ -76,11 +76,11 @@ Critical UI libraries are probed before the window opens. On Debian/Ubuntu the a
 Releases are created only from version tags (not every `main` push):
 
 ```bash
-git tag v0.1.12
-git push origin v0.1.12
+git tag v0.1.14
+git push origin v0.1.14
 ```
 
-That attaches the Windows `.zip`, Ubuntu `.deb`, Linux `.tar.gz`, and Linux `.AppImage`. If the tag already exists on an older commit, move it after the release commit (`git tag -f v0.1.12` then `git push --force origin v0.1.12`) or use the next patch version.
+That attaches the Windows `.zip`, Ubuntu `.deb`, Linux `.tar.gz`, and Linux `.AppImage`. If the tag already exists on an older commit, move it after the release commit (`git tag -f v0.1.14` then `git push --force origin v0.1.14`) or use the next patch version.
 
 ## Requirements (build from source)
 

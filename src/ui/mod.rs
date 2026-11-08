@@ -1,3 +1,4 @@
+mod broadcast_page;
 mod cli_page;
 mod emoji_catalog;
 mod help_page;
@@ -23,7 +24,9 @@ use dioxus::prelude::*;
 use crate::contact_qr::{
     contact_add_uri, enqueue_contact_qr, qr_data_url_from_file, qr_public_url,
 };
-use crate::db::{unix_now, ChannelRow, Db, DmThreadRow, SystemChannel, TelemetryPoint};
+use crate::db::{
+    is_broadcast_pubkey, unix_now, ChannelRow, Db, DmThreadRow, SystemChannel, TelemetryPoint,
+};
 use crate::radio::{
     channel_sender_and_body, prefix_channel_sender, BleRadio, RadioHandle, RadioStatus,
 };
@@ -34,17 +37,19 @@ use crate::radio_presets::{
 use crate::secrets::Secrets;
 use crate::signup::Enrollment;
 
+use broadcast_page::BroadcastPage;
 use cli_page::CliPage;
 use help_page::HelpPage;
 use icons::{Icon, IconName};
 use infra_page::InfraPage;
-use map_page::MapPage;
+use map_page::{take_want_map_page, MapPage};
 use tracker_page::TrackerPage;
 use weather_page::WeatherPage;
 use welcome::{reopen_welcome, welcome_is_done, WelcomeFinishAction, WelcomeWizard};
 use widgets::{
     append_emoji, clamp_mesh_text, conversation_avatar_tone, format_channel_share,
-    format_position_share, heard_icon_class, heard_within_week, insert_mesh_snippet, Badge, BarMix,
+    format_position_share, heard_icon_class, heard_within_week, insert_mesh_snippet,
+    parse_position_share, Badge, BarMix,
     BarMixRow, BatteryChart, BatteryPill, BatterySample, Button, ButtonKind, Card, ChartSeries,
     ComposePlusAction, ComposePlusButton, ConversationAvatar, Dialog, EmojiPickerButton, LineChart,
     MeshTextCount, PageHeading, PinSlideDown, PopoverDismissLayer, SelectInput, SlideDownPanel,
@@ -84,6 +89,7 @@ enum Page {
     Roster,
     Inbox,
     Messages,
+    Broadcast,
     Cli,
     Help,
     Settings,
@@ -133,6 +139,20 @@ const NAV_SEARCH_INDEX: &[NavSearchEntry] = &[
             "chat",
             "unread",
             "channel secret",
+        ],
+    },
+    NavSearchEntry {
+        page: Page::Broadcast,
+        title: "Broadcast",
+        icon: IconName::Broadcast,
+        topics: &[
+            "broadcast",
+            "mass message",
+            "contact group",
+            "channel group",
+            "canned",
+            "blast",
+            "fan-out",
         ],
     },
     NavSearchEntry {
@@ -472,6 +492,9 @@ pub fn App() -> Element {
     }
     let _ = tick();
     let toast_frame = toast_tick();
+    if take_want_map_page() {
+        page.set(Page::Map);
+    }
     let radio = state().radio.snapshot();
     let pending_signups = state().db.pending_nodes().unwrap_or_default().len();
     let pending_alerts = state()
@@ -652,6 +675,13 @@ pub fn App() -> Element {
                                         },
                                     }
                                     NavButton {
+                                        icon: IconName::Broadcast,
+                                        label: "Broadcast".to_string(),
+                                        expanded,
+                                        active: page() == Page::Broadcast,
+                                        onclick: move |_| page.set(Page::Broadcast),
+                                    }
+                                    NavButton {
                                         icon: IconName::Inbox,
                                         label: "Inbox".to_string(),
                                         expanded,
@@ -764,6 +794,7 @@ pub fn App() -> Element {
                             Page::Inbox => rsx! { InboxPage {} },
                             // key remounts Messages on each nav click → root list, no mid-render signal writes.
                             Page::Messages => rsx! { MessagesPage { key: "{messages_root_epoch()}" } },
+                            Page::Broadcast => rsx! { BroadcastPage { radio: radio.clone() } },
                             Page::Cli => rsx! { CliPage { radio: radio.clone() } },
                             Page::Help => rsx! { HelpPage {} },
                             Page::Settings => rsx! {
@@ -2167,6 +2198,7 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
                                             MessageBody {
                                                 text: message.text.clone(),
                                                 outgoing: message.direction == "tx",
+                                                sender_pubkey: message.sender_pubkey.clone(),
                                             }
                                         }
                                     }
@@ -2390,9 +2422,16 @@ fn OverviewStat(
     }
 }
 
-#[component]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RosterTab {
+    Contacts,
+    Roster,
+}
+
+#[allow(non_snake_case)]
 fn RosterPage() -> Element {
     let nodes = state().db.list_nodes().unwrap_or_default();
+    let pinned_contacts = state().db.list_pinned_contacts().unwrap_or_default();
     let private_channels: Vec<_> = state()
         .db
         .list_channels()
@@ -2401,6 +2440,7 @@ fn RosterPage() -> Element {
         .filter(|row| row.visibility == "private")
         .collect();
     let secrets = state().secrets.clone();
+    let mut tab = use_signal(|| RosterTab::Contacts);
     let mut query = use_signal(String::new);
     let mut note = use_signal(String::new);
     let mut dm_target = use_signal(|| None::<(String, String)>);
@@ -2447,6 +2487,21 @@ fn RosterPage() -> Element {
         })
         .collect();
     ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.to_lowercase().cmp(&b.2.to_lowercase())));
+    let mut ranked_contacts: Vec<_> = pinned_contacts
+        .into_iter()
+        .filter_map(|row| {
+            let short: String = row.pubkey.chars().take(12).collect();
+            let score = fuzzy_score(
+                &needle,
+                &[row.label.as_str(), row.pubkey.as_str(), short.as_str()],
+            )?;
+            Some((score, row))
+        })
+        .collect();
+    ranked_contacts.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.label.to_lowercase().cmp(&b.1.label.to_lowercase()))
+    });
     let claimed_keys = state()
         .db
         .claimed_pubkey_set()
@@ -2633,6 +2688,7 @@ fn RosterPage() -> Element {
                                                 MessageBody {
                                                     text: msg.text.clone(),
                                                     outgoing: msg.direction == "tx",
+                                                    sender_pubkey: details_key.clone(),
                                                 }
                                             }
                                         }
@@ -2659,7 +2715,41 @@ fn RosterPage() -> Element {
                 }
             }
             PageHeading { icon: IconName::Users, title: "Roster".to_string(),
-                "Search heard nodes, send a direct message, or manually share a private channel secret."
+                "Contacts you added from a contact card, plus every node heard on the mesh."
+            }
+            div { class: "settings-tabs", role: "tablist", aria_label: "Roster sections",
+                button {
+                    r#type: "button",
+                    role: "tab",
+                    class: if tab() == RosterTab::Contacts {
+                        "settings-tab settings-tab-active"
+                    } else {
+                        "settings-tab"
+                    },
+                    aria_selected: if tab() == RosterTab::Contacts { "true" } else { "false" },
+                    onclick: move |_| {
+                        tab.set(RosterTab::Contacts);
+                        query.set(String::new());
+                    },
+                    Icon { name: IconName::Star, size: 14 }
+                    "Contacts"
+                }
+                button {
+                    r#type: "button",
+                    role: "tab",
+                    class: if tab() == RosterTab::Roster {
+                        "settings-tab settings-tab-active"
+                    } else {
+                        "settings-tab"
+                    },
+                    aria_selected: if tab() == RosterTab::Roster { "true" } else { "false" },
+                    onclick: move |_| {
+                        tab.set(RosterTab::Roster);
+                        query.set(String::new());
+                    },
+                    Icon { name: IconName::Radio, size: 14 }
+                    "Roster"
+                }
             }
             Dialog {
                 open: confirm_clear_new(),
@@ -2736,6 +2826,160 @@ fn RosterPage() -> Element {
                     }
                 }
             }
+            if !note().is_empty() {
+                p { class: "text-xs text-amber-200", "{note}" }
+            }
+            match tab() {
+                RosterTab::Contacts => rsx! {
+                    div { class: "flex flex-col gap-3",
+                        div { class: "flex flex-col gap-2 sm:flex-row sm:items-center",
+                            div { class: "min-w-0 flex-1",
+                                TextInput {
+                                    value: query(),
+                                    placeholder: "Fuzzy search name or pubkey…".to_string(),
+                                    kind: "text".to_string(),
+                                    oninput: move |event: FormEvent| query.set(event.value()),
+                                }
+                            }
+                            p { class: "text-xs text-muted-foreground",
+                                "{ranked_contacts.len()} contact(s)"
+                            }
+                        }
+                        p { class: "text-sm text-muted-foreground",
+                            "People you added from a contact card (Messages). Full public keys are ready for DMs and broadcast groups."
+                        }
+                        if ranked_contacts.is_empty() {
+                            div { class: "rounded-lg border border-dashed border-border px-4 py-10 text-center",
+                                span { class: "mx-auto mb-2 inline-flex text-sky-300",
+                                    Icon { name: IconName::Star, size: 28 }
+                                }
+                                p { class: "text-sm font-medium",
+                                    if needle.trim().is_empty() {
+                                        "No contacts yet"
+                                    } else {
+                                        "No contacts match that search"
+                                    }
+                                }
+                                p { class: "mt-1 text-sm text-muted-foreground",
+                                    if needle.trim().is_empty() {
+                                        "When someone shares a meshcore://contact/add card, tap Add — they appear here with their public key."
+                                    } else {
+                                        "Try another name or pubkey fragment."
+                                    }
+                                }
+                            }
+                        } else {
+                            div { class: "flex flex-col overflow-hidden rounded-md",
+                                for (row_i, (_score, row)) in ranked_contacts.into_iter().enumerate() {
+                                    {
+                                        let pubkey = row.pubkey.clone();
+                                        let label = if row.label.trim().is_empty() {
+                                            row.pubkey.chars().take(12).collect::<String>()
+                                        } else {
+                                            row.label.clone()
+                                        };
+                                        let has_key = is_broadcast_pubkey(&pubkey);
+                                        let short: String = if has_key {
+                                            pubkey.chars().take(12).collect()
+                                        } else {
+                                            "Awaiting public key".into()
+                                        };
+                                        let added = format_time(Some(row.added_at));
+                                        let zebra = if row_i % 2 == 1 { " row-zebra" } else { "" };
+                                        let in_roster = has_key
+                                            && state().db.get_node(&pubkey).ok().flatten().is_some();
+                                        rsx! {
+                                            div { class: "flex flex-wrap items-center justify-between gap-3 px-3 py-2.5{zebra}",
+                                                div { class: "flex min-w-0 flex-1 items-center gap-3",
+                                                    ConversationAvatar {
+                                                        label: label.clone(),
+                                                        seed: pubkey.clone(),
+                                                    }
+                                                    div { class: "min-w-0",
+                                                        div { class: "mb-0.5 flex flex-wrap items-center gap-2",
+                                                            p { class: "truncate font-medium", "{label}" }
+                                                            if has_key {
+                                                                Badge { tone: "ok".to_string(), "DM ready" }
+                                                            } else {
+                                                                Badge { tone: "pending".to_string(), "No key yet" }
+                                                            }
+                                                        }
+                                                        p { class: "truncate font-mono text-xs text-muted-foreground",
+                                                            "{short}"
+                                                        }
+                                                        p { class: "text-xs text-muted-foreground",
+                                                            "Added {added}"
+                                                        }
+                                                    }
+                                                }
+                                                div { class: "flex shrink-0 flex-wrap items-center gap-1",
+                                                    if in_roster {
+                                                        button {
+                                                            r#type: "button",
+                                                            class: "roster-icon-btn roster-icon-btn-details",
+                                                            title: "Details",
+                                                            "aria-label": "Details",
+                                                            onclick: {
+                                                                let pubkey = pubkey.clone();
+                                                                move |_| {
+                                                                    let _ = state().db.mark_node_noticed(&pubkey);
+                                                                    details_pubkey.set(Some(pubkey.clone()));
+                                                                }
+                                                            },
+                                                            Icon { name: IconName::ChevronRight, size: 15 }
+                                                        }
+                                                    }
+                                                    if has_key {
+                                                        button {
+                                                            r#type: "button",
+                                                            class: "roster-icon-btn roster-icon-btn-message",
+                                                            title: "Direct message",
+                                                            "aria-label": "Direct message",
+                                                            onclick: {
+                                                                let pubkey = pubkey.clone();
+                                                                let label = label.clone();
+                                                                move |_| {
+                                                                    dm_body.set(String::new());
+                                                                    note.set(String::new());
+                                                                    dm_target.set(Some((
+                                                                        pubkey.clone(),
+                                                                        label.clone(),
+                                                                    )));
+                                                                }
+                                                            },
+                                                            Icon { name: IconName::Messages, size: 15 }
+                                                        }
+                                                    }
+                                                    button {
+                                                        r#type: "button",
+                                                        class: "roster-icon-btn roster-icon-btn-revoke",
+                                                        title: "Remove contact",
+                                                        "aria-label": "Remove contact",
+                                                        onclick: {
+                                                            let pubkey = pubkey.clone();
+                                                            let label = label.clone();
+                                                            move |_| {
+                                                                match state().db.unpin_contact(&pubkey) {
+                                                                    Ok(()) => note.set(format!(
+                                                                        "Removed {label} from Contacts."
+                                                                    )),
+                                                                    Err(err) => note.set(err.to_string()),
+                                                                }
+                                                            }
+                                                        },
+                                                        Icon { name: IconName::Trash, size: 15 }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                RosterTab::Roster => rsx! {
+            div { class: "flex flex-col gap-3",
             div { class: "flex flex-col gap-2 sm:flex-row sm:items-center",
                 div { class: "min-w-0 flex-1",
                     TextInput {
@@ -2760,9 +3004,6 @@ fn RosterPage() -> Element {
                     }
                     p { class: "text-xs text-muted-foreground", "{ranked.len()} shown" }
                 }
-            }
-            if !note().is_empty() {
-                p { class: "text-xs text-amber-200", "{note}" }
             }
             div { class: "overflow-hidden rounded-lg border border-border",
                 table { class: "w-full text-left text-sm",
@@ -2870,7 +3111,11 @@ fn RosterPage() -> Element {
                                                 Icon { name: IconName::Key, size: 15 }
                                             }
                                         }
-                                        if node.enrollment != Enrollment::Hq {
+                                        // DMs / channel invites only make sense for chat companions
+                                        // (not repeaters, room servers, or sensors).
+                                        if node.enrollment != Enrollment::Hq
+                                            && !matches!(node.contact_type, 2 | 3 | 4)
+                                        {
                                             button {
                                                 r#type: "button",
                                                 class: "roster-icon-btn roster-icon-btn-message",
@@ -2932,6 +3177,9 @@ fn RosterPage() -> Element {
                             }
                         }
                     }
+                }
+            }
+            }
                 }
             }
             Dialog {
@@ -4474,16 +4722,65 @@ fn MessagesPage() -> Element {
                     {
                         let peer = dm_pubkey.clone();
                         let label = title.clone();
-                        let already = state().db.is_blocked(&peer).unwrap_or(false);
+                        let already_blocked = state().db.is_blocked(&peer).unwrap_or(false);
+                        let in_contacts = state()
+                            .db
+                            .list_pinned_contacts()
+                            .ok()
+                            .into_iter()
+                            .flatten()
+                            .any(|row| row.pubkey.eq_ignore_ascii_case(&peer));
                         rsx! {
-                            Button {
-                                kind: ButtonKind::Ghost,
-                                disabled: already,
-                                onclick: move |_| {
-                                    block_confirm.set(Some((peer.clone(), label.clone())));
-                                },
-                                Icon { name: IconName::Ban, size: 14 }
-                                if already { "Blocked" } else { "Block" }
+                            div { class: "flex flex-wrap items-center gap-2",
+                                Button {
+                                    kind: ButtonKind::Ghost,
+                                    onclick: {
+                                        let peer = peer.clone();
+                                        let label = label.clone();
+                                        move |_| {
+                                            match messages_rail::toggle_contact_favorite(
+                                                &peer, &label,
+                                            ) {
+                                                Ok((on, name_only)) => {
+                                                    refresh.set(refresh() + 1);
+                                                    let msg = if on && name_only {
+                                                        "Saved to Contacts (no public key yet — upgrades when they advert)."
+                                                    } else if on {
+                                                        "Added to Contacts."
+                                                    } else {
+                                                        "Removed from Contacts."
+                                                    };
+                                                    crate::toast::push(
+                                                        crate::toast::ToastKind::Success,
+                                                        msg,
+                                                    );
+                                                }
+                                                Err(err) => crate::toast::push(
+                                                    crate::toast::ToastKind::Error,
+                                                    err,
+                                                ),
+                                            }
+                                        }
+                                    },
+                                    Icon {
+                                        name: if in_contacts {
+                                            IconName::Check
+                                        } else {
+                                            IconName::Users
+                                        },
+                                        size: 14
+                                    }
+                                    if in_contacts { "In Contacts" } else { "Add to Contacts" }
+                                }
+                                Button {
+                                    kind: ButtonKind::Ghost,
+                                    disabled: already_blocked,
+                                    onclick: move |_| {
+                                        block_confirm.set(Some((peer.clone(), label.clone())));
+                                    },
+                                    Icon { name: IconName::Ban, size: 14 }
+                                    if already_blocked { "Blocked" } else { "Block" }
+                                }
                             }
                         }
                     }
@@ -4614,6 +4911,7 @@ fn MessagesPage() -> Element {
                                                 MessageBody {
                                                     text: message.text.clone(),
                                                     outgoing,
+                                                    sender_pubkey: Some(dm_pubkey.clone()),
                                                 }
                                                 if !outgoing {
                                                     div { class: "message-actions",
@@ -5276,6 +5574,7 @@ fn MessagesPage() -> Element {
                                             MessageBody {
                                                 text: bubble_text.clone(),
                                                 outgoing,
+                                                sender_pubkey: known_pk.clone(),
                                             }
                                             div {
                                                 class: if outgoing {
@@ -6745,7 +7044,13 @@ fn begin_channel_send(
 }
 
 #[component]
-fn MessageBody(text: String, #[props(default)] outgoing: bool) -> Element {
+fn MessageBody(
+    text: String,
+    #[props(default)] outgoing: bool,
+    /// Sender / peer pubkey used to skip the temp pin when their device pin already covers the spot.
+    #[props(default)]
+    sender_pubkey: Option<String>,
+) -> Element {
     let parts = parse_message_parts(&text);
     let mention_style = if outgoing {
         "display:inline-flex;align-items:center;max-width:100%;margin:0 0.2rem;padding:0.2rem 0.55rem;border-radius:999px;border:1px solid rgba(125,211,252,0.4);background:rgba(56,189,248,0.16);color:#e0f2fe;font-size:0.75rem;font-weight:600;line-height:1.2;vertical-align:baseline;"
@@ -6756,6 +7061,11 @@ fn MessageBody(text: String, #[props(default)] outgoing: bool) -> Element {
         "underline decoration-sky-200/70 underline-offset-2 hover:text-sky-100"
     } else {
         "underline decoration-signal/70 underline-offset-2 hover:text-signal"
+    };
+    let position_chip = if outgoing {
+        "position-share-chip position-share-chip-out"
+    } else {
+        "position-share-chip"
     };
     let mesh_box = if outgoing {
         "mesh-link-chip mesh-link-chip-out"
@@ -6783,6 +7093,36 @@ fn MessageBody(text: String, #[props(default)] outgoing: bool) -> Element {
                                 "@{name}"
                             }
                         },
+                        TextPart::Position { label, lat, lon } => {
+                            let pk = sender_pubkey.clone();
+                            let title = if label.is_empty() {
+                                format!("Open on map · {lat:.5}, {lon:.5}")
+                            } else {
+                                format!("Open on map · {label}")
+                            };
+                            let coords = format!("{lat:.5}, {lon:.5}");
+                            rsx! {
+                                button {
+                                    key: "{idx}",
+                                    r#type: "button",
+                                    class: "{position_chip}",
+                                    title: "{title}",
+                                    onclick: move |_| {
+                                        map_page::open_map_focus(
+                                            lat,
+                                            lon,
+                                            label.clone(),
+                                            pk.as_deref(),
+                                        );
+                                    },
+                                    Icon { name: IconName::Locate, size: 12 }
+                                    if !label.is_empty() {
+                                        span { class: "position-share-chip-label", "{label}" }
+                                    }
+                                    span { class: "position-share-chip-coords", "{coords}" }
+                                }
+                            }
+                        }
                         TextPart::Link(url) => rsx! {
                             a {
                                 key: "{idx}",
@@ -6899,10 +7239,16 @@ fn shorten_mesh_link(url: &str) -> String {
     format!("{}…{}", &url[..KEEP_HEAD], &url[url.len() - KEEP_TAIL..])
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 enum TextPart {
     Text(String),
     Mention(String),
+    /// Shared lat/lon from compose position actions (or matching plain text).
+    Position {
+        label: String,
+        lat: f64,
+        lon: f64,
+    },
     /// http(s) — open in browser.
     Link(String),
     /// meshcore:// — copy chip (no shell / unconfigured URL open).
@@ -6913,7 +7259,14 @@ fn parse_message_parts(input: &str) -> Vec<TextPart> {
     let mut parts = Vec::new();
     for chunk in split_mentions(input) {
         match chunk {
-            TextPart::Text(text) => parts.extend(linkify_text(&text)),
+            TextPart::Text(text) => {
+                for linked in linkify_text(&text) {
+                    match linked {
+                        TextPart::Text(plain) => parts.extend(positionify_text(&plain)),
+                        other => parts.push(other),
+                    }
+                }
+            }
             other => parts.push(other),
         }
     }
@@ -6921,6 +7274,117 @@ fn parse_message_parts(input: &str) -> Vec<TextPart> {
         parts.push(TextPart::Text(String::new()));
     }
     parts
+}
+
+/// Turn `{label}: lat, lon` / bare `lat, lon` runs into clickable map chips.
+fn positionify_text(input: &str) -> Vec<TextPart> {
+    // Fast path: the whole trimmed message is a position share (compose / inbound).
+    let trimmed = input.trim();
+    if !trimmed.is_empty() {
+        if let Some((label, lat, lon)) = parse_position_share(trimmed) {
+            let start = input.find(trimmed).unwrap_or(0);
+            let end = start + trimmed.len();
+            let mut parts = Vec::new();
+            if start > 0 {
+                parts.push(TextPart::Text(input[..start].to_string()));
+            }
+            parts.push(TextPart::Position { label, lat, lon });
+            if end < input.len() {
+                parts.push(TextPart::Text(input[end..].to_string()));
+            }
+            return parts;
+        }
+    }
+
+    let mut parts = Vec::new();
+    let mut rest = input;
+    let mut base = 0usize;
+    while !rest.is_empty() {
+        let Some((rel_start, rel_end, label, lat, lon)) = next_embedded_position(rest) else {
+            parts.push(TextPart::Text(rest.to_string()));
+            break;
+        };
+        if rel_start > 0 {
+            parts.push(TextPart::Text(rest[..rel_start].to_string()));
+        }
+        parts.push(TextPart::Position { label, lat, lon });
+        base += rel_end;
+        rest = &input[base..];
+    }
+    if parts.is_empty() {
+        parts.push(TextPart::Text(String::new()));
+    }
+    parts
+}
+
+/// Find the next `lat, lon` (optional same-line `Label:`) inside a longer message.
+fn next_embedded_position(hay: &str) -> Option<(usize, usize, String, f64, f64)> {
+    let mut search = 0usize;
+    while let Some(rel) = hay[search..].find(',') {
+        let comma = search + rel;
+        let mut left = comma;
+        while left > 0 {
+            let ch = hay[..left].chars().next_back()?;
+            if ch.is_ascii_digit() || ch == '.' || ch == '-' || ch == '+' {
+                left -= ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        let mut right = comma + 1;
+        while right < hay.len() && hay.as_bytes()[right] == b' ' {
+            right += 1;
+        }
+        let lon_start = right;
+        if right < hay.len() && matches!(hay.as_bytes()[right], b'-' | b'+') {
+            right += 1;
+        }
+        while right < hay.len() {
+            let b = hay.as_bytes()[right];
+            if b.is_ascii_digit() || b == b'.' {
+                right += 1;
+            } else {
+                break;
+            }
+        }
+        if right == lon_start {
+            search = comma + 1;
+            continue;
+        }
+        let pair = &hay[left..right];
+        if let Some((_, lat, lon)) = parse_position_share(pair) {
+            let mut start = left;
+            let mut label = String::new();
+            if let Some((label_start, prefix)) = label_prefix_before(hay, left) {
+                start = label_start;
+                label = prefix;
+            }
+            return Some((start, right, label, lat, lon));
+        }
+        search = comma + 1;
+    }
+    None
+}
+
+/// If `hay[..coord_start]` ends with `Label:` on the same line, return that span.
+fn label_prefix_before(hay: &str, coord_start: usize) -> Option<(usize, String)> {
+    let before = &hay[..coord_start];
+    let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line = &before[line_start..];
+    let trimmed = line.trim_end();
+    if !trimmed.ends_with(':') {
+        return None;
+    }
+    let without_colon = trimmed[..trimmed.len() - 1].trim_end();
+    let label = without_colon.trim_start();
+    if label.is_empty() || label.len() > 48 {
+        return None;
+    }
+    if parse_position_share(label).is_some() {
+        return None;
+    }
+    let pad = without_colon.len() - without_colon.trim_start().len();
+    Some((line_start + pad, label.to_string()))
 }
 
 fn split_mentions(input: &str) -> Vec<TextPart> {
@@ -7057,6 +7521,33 @@ mod message_body_tests {
         assert!(short.starts_with("meshcore://"));
         assert!(short.ends_with("861c849") || short.len() < url.len());
     }
+
+    #[test]
+    fn parses_labeled_and_bare_position_shares() {
+        let (label, lat, lon) =
+            super::parse_position_share("HQ: 34.10000, -117.20000").expect("labeled");
+        assert_eq!(label, "HQ");
+        assert!((lat - 34.1).abs() < 1e-6);
+        assert!((lon + 117.2).abs() < 1e-6);
+        let (label, _, _) = super::parse_position_share("34.10000, -117.20000").expect("bare");
+        assert!(label.is_empty());
+        assert!(super::parse_position_share("1, 2").is_none());
+        assert!(super::parse_position_share("0.00000, 0.00000").is_none());
+    }
+
+    #[test]
+    fn message_body_turns_position_into_chip() {
+        let parts = parse_message_parts("HQ: 34.10000, -117.20000");
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            TextPart::Position { label, lat, lon } => {
+                assert_eq!(label, "HQ");
+                assert!((lat - 34.1).abs() < 1e-6);
+                assert!((lon + 117.2).abs() < 1e-6);
+            }
+            other => panic!("expected Position, got {other:?}"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -7066,6 +7557,13 @@ enum SettingsTab {
     Flasher,
     Diagnostics,
     About,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FlasherSubTab {
+    Library,
+    UsbFlash,
+    LanLocker,
 }
 
 /// Heavy Flasher panel data — rebuilt only when the cache key changes (not every 350ms poll).
@@ -7570,6 +8068,7 @@ fn SettingsPage(
     }
     let mut hq_tab = use_signal(|| HqTab::Connect);
     let mut services_tab = use_signal(|| ServicesTab::Site);
+    let mut flasher_subtab = use_signal(|| FlasherSubTab::Library);
     let mut usb_scanned = use_signal(|| false);
     let mut flasher_tick = use_signal(|| 0u32);
     let mut flasher_pack_note = use_signal(String::new);
@@ -7843,6 +8342,36 @@ fn SettingsPage(
             .unwrap_or_else(|| "120".into())
     });
     let mut local_api_token_reveal = use_signal(String::new);
+    let mut flash_locker_enabled = use_signal(|| {
+        crate::services::setting_bool(&state().db, "flash_locker_enabled", false)
+    });
+    let mut flash_locker_bind = use_signal(|| {
+        state()
+            .db
+            .setting("flash_locker_bind")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "0.0.0.0".into())
+    });
+    let mut flash_locker_port = use_signal(|| {
+        state()
+            .db
+            .setting("flash_locker_port")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "443".into())
+    });
+    let mut flash_locker_session = use_signal(|| {
+        state()
+            .db
+            .setting("flash_locker_session_mins")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "60".into())
+    });
+    let mut flash_locker_pin = use_signal(String::new);
+    let mut flash_locker_pin2 = use_signal(String::new);
+    let mut flash_locker_pin_note = use_signal(String::new);
     let mut ha_mqtt_enabled = use_signal(|| {
         crate::services::setting_bool(&state().db, "ha_mqtt_enabled", false)
     });
@@ -12086,6 +12615,24 @@ fn SettingsPage(
                     )
                 };
                 rsx! {
+                    div { class: "settings-subtabs",
+                        button {
+                            class: if flasher_subtab() == FlasherSubTab::Library { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
+                            onclick: move |_| flasher_subtab.set(FlasherSubTab::Library),
+                            "Firmware library"
+                        }
+                        button {
+                            class: if flasher_subtab() == FlasherSubTab::UsbFlash { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
+                            onclick: move |_| flasher_subtab.set(FlasherSubTab::UsbFlash),
+                            "USB flash"
+                        }
+                        button {
+                            class: if flasher_subtab() == FlasherSubTab::LanLocker { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
+                            onclick: move |_| flasher_subtab.set(FlasherSubTab::LanLocker),
+                            "LAN flash locker"
+                        }
+                    }
+                    if flasher_subtab() == FlasherSubTab::Library {
                     Card { title: "Firmware library".to_string(), icon: Some(IconName::Radio),
                         div { class: "flasher-lib",
                         p { class: "flasher-lib__intro",
@@ -12820,6 +13367,8 @@ fn SettingsPage(
                             }
                         }
                     }
+                    } // FlasherSubTab::Library
+                    if flasher_subtab() == FlasherSubTab::UsbFlash {
                     Card { title: "USB flash".to_string(), icon: Some(IconName::Radio),
                         p { class: "mb-3 text-sm text-muted-foreground",
                             "Flash from the local cache only. ESP32 needs esptool on PATH; nRF52 needs adafruit-nrfutil or a manual UF2 copy. Disconnect the phone MeshCore app. Leave Erase off to keep the device identity."
@@ -13029,6 +13578,214 @@ fn SettingsPage(
                             }
                         }
                     }
+                    } // FlasherSubTab::UsbFlash
+                    if flasher_subtab() == FlasherSubTab::LanLocker {
+                    {
+                        let locker_status = crate::services::flash_locker_status_line(&state().db);
+                        let pin_set = crate::services::flash_locker_pin_is_set(&crate::data_dir());
+                        let fp = crate::services::cert_fingerprint_short(&crate::data_dir());
+                        let urls = crate::services::flash_locker_urls(&state().db);
+                        let url_line = if urls.is_empty() {
+                            format!("https://<lan-ip>/")
+                        } else {
+                            urls.join(" · ")
+                        };
+                        rsx! {
+                            Card { title: "LAN flash locker".to_string(), icon: Some(IconName::Radio),
+                                p { class: "text-sm text-muted-foreground mb-2",
+                                    "Opt-in HTTPS page so laptops on Wi‑Fi can unlock with a room PIN, download locker builds, and flash ESP boards via Web Serial (Chrome/Edge). Default port 443; HTTP port 80 redirects here. Does not flash USB plugged into this HQ."
+                                }
+                                p { class: "text-xs text-muted-foreground mb-2", "{locker_status}" }
+                                ToggleSwitch {
+                                    checked: flash_locker_enabled(),
+                                    label: "Enable LAN flash locker".to_string(),
+                                    hint: Some("Self-signed HTTPS on port 443 (HTTP 80 redirects). Linux may show a permission dialog once; or use Port 8443. Set a PIN before sharing.".to_string()),
+                                    onchange: move |next| {
+                                        if next {
+                                            match crate::services::ensure_flash_locker_tls(&crate::data_dir(), false) {
+                                                Ok(_) => {}
+                                                Err(err) => {
+                                                    crate::toast::push(
+                                                        crate::toast::ToastKind::Error,
+                                                        format!("TLS cert: {err}"),
+                                                    );
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                        flash_locker_enabled.set(next);
+                                        crate::services::set_setting_bool(
+                                            &state().db,
+                                            "flash_locker_enabled",
+                                            next,
+                                        );
+                                        let _ = state().db.audit(
+                                            if next { "flash_locker_enable" } else { "flash_locker_disable" },
+                                            "",
+                                            "",
+                                        );
+                                        crate::services::bump_flash_locker_config();
+                                    }
+                                }
+                                if flash_locker_enabled() {
+                                    p { class: "text-xs text-amber-200 mb-2",
+                                        "Anyone on this LAN with the PIN can download synced firmware and flash their USB device. Prefer a strong room PIN; rotate after the event."
+                                    }
+                                }
+                                div { class: "grid gap-2 sm:grid-cols-3 mb-2",
+                                    div { class: "flex flex-col gap-1",
+                                        label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Bind" }
+                                        TextInput {
+                                            value: flash_locker_bind(),
+                                            placeholder: "0.0.0.0".to_string(),
+                                            oninput: move |event: FormEvent| {
+                                                let value = event.value();
+                                                flash_locker_bind.set(value.clone());
+                                                let _ = state().db.set_setting("flash_locker_bind", value.trim());
+                                                crate::services::bump_flash_locker_config();
+                                            }
+                                        }
+                                    }
+                                    div { class: "flex flex-col gap-1",
+                                        label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Port" }
+                                        TextInput {
+                                            value: flash_locker_port(),
+                                            placeholder: "443".to_string(),
+                                            oninput: move |event: FormEvent| {
+                                                let value = event.value();
+                                                flash_locker_port.set(value.clone());
+                                                if value.trim().parse::<u16>().is_ok() {
+                                                    let _ = state().db.set_setting("flash_locker_port", value.trim());
+                                                    crate::services::bump_flash_locker_config();
+                                                }
+                                            }
+                                        }
+                                    }
+                                    div { class: "flex flex-col gap-1",
+                                        label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Session (min)" }
+                                        TextInput {
+                                            value: flash_locker_session(),
+                                            placeholder: "60".to_string(),
+                                            oninput: move |event: FormEvent| {
+                                                let value = event.value();
+                                                flash_locker_session.set(value.clone());
+                                                if let Ok(n) = value.trim().parse::<u32>() {
+                                                    let n = crate::services::clamp_flash_locker_session_mins(n);
+                                                    flash_locker_session.set(n.to_string());
+                                                    let _ = state().db.set_setting(
+                                                        "flash_locker_session_mins",
+                                                        &n.to_string(),
+                                                    );
+                                                    crate::services::bump_flash_locker_config();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                p { class: "text-xs text-muted-foreground mb-1", "URL · {url_line}" }
+                                if !fp.is_empty() {
+                                    p { class: "text-xs font-mono text-muted-foreground mb-2", "Cert · {fp}" }
+                                }
+                                div { class: "flex flex-wrap gap-2 mb-3",
+                                    Button {
+                                        kind: ButtonKind::Ghost,
+                                        onclick: move |_| {
+                                            match crate::services::ensure_flash_locker_tls(&crate::data_dir(), true) {
+                                                Ok(_) => {
+                                                    let short = crate::services::cert_fingerprint_short(
+                                                        &crate::data_dir(),
+                                                    );
+                                                    crate::toast::push(
+                                                        crate::toast::ToastKind::Success,
+                                                        format!("New cert · {short}"),
+                                                    );
+                                                    crate::services::bump_flash_locker_config();
+                                                }
+                                                Err(err) => crate::toast::push(
+                                                    crate::toast::ToastKind::Error,
+                                                    format!("Regenerate cert: {err}"),
+                                                ),
+                                            }
+                                        },
+                                        "Regenerate TLS cert"
+                                    }
+                                    Button {
+                                        kind: ButtonKind::Ghost,
+                                        onclick: move |_| {
+                                            crate::toast::push(
+                                                crate::toast::ToastKind::Info,
+                                                "Approve the system dialog — HQ will restart if permission is granted.",
+                                            );
+                                            spawn(async move {
+                                                let result = tokio::task::spawn_blocking(
+                                                    crate::services::grant_flash_locker_low_ports,
+                                                )
+                                                .await;
+                                                match result {
+                                                    Ok(Ok(())) => {}
+                                                    Ok(Err(err)) => crate::toast::push(
+                                                        crate::toast::ToastKind::Error,
+                                                        err,
+                                                    ),
+                                                    Err(err) => crate::toast::push(
+                                                        crate::toast::ToastKind::Error,
+                                                        format!("Permission request failed: {err}"),
+                                                    ),
+                                                }
+                                            });
+                                        },
+                                        "Allow ports 80 / 443"
+                                    }
+                                }
+                                p { class: "text-xs text-muted-foreground mb-1",
+                                    if pin_set { "PIN is set (value never shown)." } else { "No PIN yet — required before browsers can unlock." }
+                                }
+                                div { class: "grid gap-2 sm:grid-cols-2 mb-2",
+                                    TextInput {
+                                        value: flash_locker_pin(),
+                                        placeholder: "New PIN".to_string(),
+                                        kind: "password".to_string(),
+                                        oninput: move |event: FormEvent| flash_locker_pin.set(event.value()),
+                                    }
+                                    TextInput {
+                                        value: flash_locker_pin2(),
+                                        placeholder: "Confirm PIN".to_string(),
+                                        kind: "password".to_string(),
+                                        oninput: move |event: FormEvent| flash_locker_pin2.set(event.value()),
+                                    }
+                                }
+                                if !flash_locker_pin_note().is_empty() {
+                                    p { class: "text-xs text-amber-200 mb-2", "{flash_locker_pin_note}" }
+                                }
+                                Button {
+                                    kind: ButtonKind::Ghost,
+                                    onclick: move |_| {
+                                        let a = flash_locker_pin();
+                                        let b = flash_locker_pin2();
+                                        if a != b {
+                                            flash_locker_pin_note.set("PIN entries do not match.".into());
+                                            return;
+                                        }
+                                        match crate::services::set_flash_locker_pin(&crate::data_dir(), &a) {
+                                            Ok(()) => {
+                                                flash_locker_pin.set(String::new());
+                                                flash_locker_pin2.set(String::new());
+                                                flash_locker_pin_note.set(String::new());
+                                                let _ = state().db.audit("flash_locker_pin_set", "", "");
+                                                crate::toast::push(
+                                                    crate::toast::ToastKind::Success,
+                                                    "Flash locker PIN updated.",
+                                                );
+                                            }
+                                            Err(err) => flash_locker_pin_note.set(err),
+                                        }
+                                    },
+                                    if pin_set { "Rotate PIN" } else { "Set PIN" }
+                                }
+                            }
+                        }
+                    }
+                    } // FlasherSubTab::LanLocker
                 }
             }
             }

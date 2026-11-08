@@ -2073,19 +2073,80 @@ option {
 .welcome-card {
   width: min(36rem, 100%);
   max-height: min(90vh, 44rem);
-  overflow: auto;
+  /* Visible so the emoji popover can extend past the card onto the dimmed backdrop. */
+  overflow: visible;
   padding: 1.35rem 1.4rem 1.25rem;
   border-radius: 0.65rem;
   border: 1px solid #ffffff24;
   background: #12171e;
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.welcome-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: visible;
+}
+
+.welcome-name-row {
+  position: relative;
+  z-index: 90;
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+  margin: 0.35rem 0 0.75rem;
+}
+
+.welcome-name-row .emoji-picker-panel {
+  /* Above the welcome step strip and action row inside the same card. */
+  z-index: 95;
+}
+
+.welcome-name-row > :first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.welcome-step-strip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: auto;
+  padding-top: 0.85rem;
+  border-top: 1px solid #ffffff14;
+}
+
+.welcome-step-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  color: #71717a;
+  pointer-events: none;
+}
+
+.welcome-step-icon-active {
+  color: #38bdf8;
+}
+
+.welcome-step-arrow {
+  display: inline-flex;
+  align-items: center;
+  color: #52525b;
+  pointer-events: none;
 }
 
 .welcome-brand {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  margin-bottom: 1rem;
+  margin-bottom: 0;
 }
 
 .welcome-logo {
@@ -2291,18 +2352,20 @@ option {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
-  max-height: 12rem;
+  max-height: 9.5rem;
   overflow: auto;
+  min-height: 0;
 }
 
 .welcome-device {
   text-align: left;
-  padding: 0.5rem 0.65rem;
+  padding: 0.55rem 0.7rem;
   border-radius: 0.4rem;
   border: 1px solid #ffffff18;
   background: #0b1220;
   color: #e4e4e7;
-  font-size: 0.8rem;
+  font-size: 0.9rem;
+  line-height: 1.3;
   cursor: pointer;
 }
 
@@ -2326,8 +2389,43 @@ option {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.65rem;
+  gap: 0.75rem;
   width: 100%;
+}
+
+.welcome-device-lead {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.welcome-device-check {
+  display: inline-flex;
+  width: 1.15rem;
+  height: 1.15rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.28rem;
+  border: 1.5px solid #71717a;
+  background: transparent;
+  color: transparent;
+}
+
+.welcome-device.active .welcome-device-check,
+.welcome-device-linked .welcome-device-check {
+  border-color: #3dd68c;
+  background: rgba(61, 214, 140, 0.22);
+  color: #3dd68c;
+}
+
+.welcome-device-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  min-width: 0;
 }
 
 .welcome-device-label {
@@ -2335,14 +2433,27 @@ option {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 0.9rem;
+  font-weight: 560;
+  color: #f4f4f5;
+}
+
+.welcome-device-addr {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.72rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: #9aa3af;
 }
 
 .welcome-device-badge {
   display: inline-flex;
   align-items: center;
-  gap: 0.3rem;
+  gap: 0.25rem;
   flex-shrink: 0;
-  font-size: 0.68rem;
+  font-size: 0.7rem;
   font-weight: 600;
   letter-spacing: 0.02em;
   color: #9aa3af;
@@ -2468,12 +2579,13 @@ option {
 .map-line-dashed {
   background-image: repeating-linear-gradient(
     90deg,
-    #fbbf24 0,
-    #fbbf24 4px,
+    currentColor 0,
+    currentColor 4px,
     transparent 4px,
     transparent 7px
   ) !important;
   background-color: transparent !important;
+  color: #a78bfa;
   height: 0.25rem;
 }
 
@@ -4576,6 +4688,78 @@ html.hq-col-resize body {
     opacity: 1;
     transform: translateY(0) scale(1);
   }
+}
+
+/* Chat position share — clickable chip in message bubbles. */
+.position-share-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  max-width: 100%;
+  margin: 0.1rem 0;
+  padding: 0.28rem 0.65rem;
+  border-radius: 0.5rem;
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  background: rgba(14, 116, 144, 0.22);
+  color: #e0f2fe;
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.3;
+  cursor: pointer;
+  vertical-align: baseline;
+}
+.position-share-chip:hover {
+  background: rgba(14, 116, 144, 0.38);
+  border-color: rgba(125, 211, 252, 0.55);
+}
+.position-share-chip-out {
+  border-color: rgba(125, 211, 252, 0.45);
+  background: rgba(56, 189, 248, 0.18);
+  color: #e0f2fe;
+}
+.position-share-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 14rem;
+}
+.position-share-chip-coords {
+  font-weight: 500;
+  opacity: 0.85;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Durable temp pin for shared chat locations (no matching device pin). */
+.metis-temp-pin {
+  position: relative;
+  width: 22px;
+  height: 30px;
+  pointer-events: none;
+  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.45));
+}
+.metis-temp-pin__head {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 16px;
+  height: 16px;
+  margin-left: -8px;
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+  background: #f472b6;
+  border: 2px solid #fce7f3;
+  box-sizing: border-box;
+}
+.metis-temp-pin__stem {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  width: 6px;
+  height: 6px;
+  margin-left: -3px;
+  border-radius: 50%;
+  background: rgba(244, 114, 182, 0.85);
 }
 
 /* Map presence: thin sonar rings from a pin (message TX/RX, new device, move). */

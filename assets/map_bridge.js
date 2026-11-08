@@ -1010,6 +1010,7 @@
       this.teardownCoverageDrag(mapId);
       this.clearRegionDraft(mapId);
       this.clearSonar(mapId);
+      this.clearTempPin(mapId);
       this.removeZoomControls(mapId);
       var map = this.maps[mapId];
       if (this._resizeObs && this._resizeObs[mapId]) {
@@ -1651,6 +1652,44 @@
       this.sonarMarkers[mapId] = [];
     },
 
+    /** Durable spotlight pin until cleared / replaced (chat position shares). */
+    setTempPin: function (mapId, lng, lat, label) {
+      var map = this.maps[mapId];
+      if (!map || !global.maplibregl || typeof global.maplibregl.Marker !== "function") {
+        return false;
+      }
+      if (!isFinite(lng) || !isFinite(lat)) return false;
+      this.clearTempPin(mapId);
+      var root = document.createElement("div");
+      root.className = "metis-temp-pin";
+      root.title = label ? String(label) : "Shared location";
+      var head = document.createElement("div");
+      head.className = "metis-temp-pin__head";
+      root.appendChild(head);
+      var stem = document.createElement("div");
+      stem.className = "metis-temp-pin__stem";
+      root.appendChild(stem);
+      var marker = new global.maplibregl.Marker({
+        element: root,
+        anchor: "bottom",
+        pitchAlignment: "viewport",
+        rotationAlignment: "viewport",
+      })
+        .setLngLat([lng, lat])
+        .addTo(map);
+      if (!this.tempPins) this.tempPins = {};
+      this.tempPins[mapId] = marker;
+      return true;
+    },
+
+    clearTempPin: function (mapId) {
+      if (!this.tempPins || !this.tempPins[mapId]) return;
+      try {
+        this.tempPins[mapId].remove();
+      } catch (_) {}
+      delete this.tempPins[mapId];
+    },
+
     /** First paint seeds; later never-seen pubkeys with coords get a warp-in. */
     noteArrivals: function (mapId, data) {
       if (!this.seenPubkeys) this.seenPubkeys = {};
@@ -1910,7 +1949,20 @@
         map.addSource(sourceId, { type: "geojson", data: data });
       }
       (layerSpecs || []).forEach(function (layer) {
-        if (!map.getLayer(layer.id)) map.addLayer(layer);
+        // Keep route/trail lines under node pins so icons stay readable.
+        var beforeId = null;
+        if (layer.type === "line") {
+          if (map.getLayer("node-pins")) beforeId = "node-pins";
+          else if (map.getLayer("clusters")) beforeId = "clusters";
+        }
+        if (!map.getLayer(layer.id)) {
+          if (beforeId) map.addLayer(layer, beforeId);
+          else map.addLayer(layer);
+        } else if (beforeId) {
+          try {
+            map.moveLayer(layer.id, beforeId);
+          } catch (_) {}
+        }
       });
       return true;
     },

@@ -3,29 +3,102 @@
 use dioxus::prelude::*;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 
 use crate::contact_qr::{contact_add_uri, enqueue_contact_qr, qr_public_url};
 use crate::db::unix_now;
-use crate::path::{
-    aggregate_traffic_edges, build_line, traffic_line_width, MapLine,
-};
+use crate::path::{build_line, MapLine};
 use crate::pmtiles_path;
 use crate::radio::SyncPhase;
 
 use super::icons::{Icon, IconName};
 use super::map_host::{
     dark_basemap_style, load_saved_basemap, load_saved_camera, map_bind_node_clicks,
-    map_bind_waypoint_clicks, map_destroy, map_ease_to, map_exists, map_fit_bounds, map_fly_to,
-    map_get_camera, map_init, map_pulse_at, map_set_geojson, map_camera_from_global,
-    map_clear_region_draft, map_is_moving, map_place_region_draft, map_region_draft_seq,
-    map_set_nodes, map_set_style, map_set_visibility, map_snapshot_region_draft,
-    map_take_favorite_toggle, map_take_selection, map_zoom_by, region_draft_from_placement,
-    save_basemap, save_camera, BasemapKind, MapCamera, RegionDraftConfirm, MAP_CONTAINER_ID,
+    map_bind_waypoint_clicks, map_clear_temp_pin, map_destroy, map_ease_to, map_exists,
+    map_fit_bounds, map_fly_to, map_get_camera, map_init, map_pulse_at, map_set_geojson,
+    map_camera_from_global, map_clear_region_draft, map_is_moving, map_place_region_draft,
+    map_region_draft_seq, map_set_nodes, map_set_style, map_set_temp_pin, map_set_visibility,
+    map_snapshot_region_draft, map_take_favorite_toggle, map_take_selection, map_zoom_by,
+    region_draft_from_placement, save_basemap, save_camera, BasemapKind, MapCamera,
+    RegionDraftConfirm, MAP_CONTAINER_ID,
 };
 use super::state;
 use super::widgets::{
-    Button, ButtonKind, PageHeading, PopoverDismissLayer, SelectInput, SlideDownPanel,
+    coords_near, Button, ButtonKind, PageHeading, PopoverDismissLayer, SelectInput, SlideDownPanel,
 };
+
+/// Deep-link from a chat position share (or similar) onto the map.
+#[derive(Clone, Debug)]
+pub struct MapFocusRequest {
+    pub lat: f64,
+    pub lon: f64,
+    pub label: String,
+    /// When false, an existing device/HQ pin already covers this spot.
+    pub show_temp_pin: bool,
+}
+
+fn pending_map_focus_slot() -> &'static Mutex<Option<MapFocusRequest>> {
+    static SLOT: OnceLock<Mutex<Option<MapFocusRequest>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+fn want_map_page_slot() -> &'static Mutex<bool> {
+    static SLOT: OnceLock<Mutex<bool>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(false))
+}
+
+/// Open Map and fly to `lat`/`lon`. Shows a temp pin unless `pubkey` (or HQ) already
+/// has a device pin at that location.
+pub fn open_map_focus(lat: f64, lon: f64, label: impl Into<String>, pubkey: Option<&str>) {
+    let label = label.into();
+    let show_temp_pin = !device_pin_covers(pubkey, lat, lon);
+    if let Ok(mut guard) = pending_map_focus_slot().lock() {
+        *guard = Some(MapFocusRequest {
+            lat,
+            lon,
+            label,
+            show_temp_pin,
+        });
+    }
+    if let Ok(mut guard) = want_map_page_slot().lock() {
+        *guard = true;
+    }
+}
+
+fn device_pin_covers(pubkey: Option<&str>, lat: f64, lon: f64) -> bool {
+    let db = &state().db;
+    if let Some(pk) = pubkey.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Ok(Some(node)) = db.get_node(pk) {
+            if let (Some(nlat), Some(nlon)) = (node.lat, node.lon) {
+                if (nlat != 0.0 || nlon != 0.0) && coords_near(nlat, nlon, lat, lon) {
+                    return true;
+                }
+            }
+        }
+    }
+    if let Ok(Some((_, hlat, hlon))) = db.hq_position() {
+        if coords_near(hlat, hlon, lat, lon) {
+            return true;
+        }
+    }
+    false
+}
+
+/// App polls this to switch the sidebar page to Map.
+pub fn take_want_map_page() -> bool {
+    want_map_page_slot()
+        .lock()
+        .ok()
+        .map(|mut g| std::mem::take(&mut *g))
+        .unwrap_or(false)
+}
+
+fn take_pending_map_focus() -> Option<MapFocusRequest> {
+    pending_map_focus_slot()
+        .lock()
+        .ok()
+        .and_then(|mut g| g.take())
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NodeFilterKind {
@@ -216,12 +289,6 @@ enum TrafficWindow {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum TrafficScope {
-    AllGps,
-    TrackedClaimed,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum TrailWindow {
     Hour,
     SixHours,
@@ -265,20 +332,6 @@ fn collection(features: Vec<Value>) -> Value {
     json!({ "type": "FeatureCollection", "features": features })
 }
 
-fn line_feature(line: &MapLine) -> Value {
-    json!({
-        "type": "Feature",
-        "properties": {
-            "outbound": line.outbound,
-            "hops": line.hops,
-        },
-        "geometry": {
-            "type": "LineString",
-            "coordinates": line.coords,
-        }
-    })
-}
-
 fn highlight_feature(line: &MapLine, direction: &str) -> Value {
     json!({
         "type": "Feature",
@@ -295,19 +348,39 @@ fn highlight_feature(line: &MapLine, direction: &str) -> Value {
     })
 }
 
-fn traffic_feature(edge: &crate::path::TrafficEdge, width: f64) -> Value {
+fn neighbor_feature(a: (f64, f64), b: (f64, f64), snr: f64) -> Value {
     json!({
         "type": "Feature",
         "properties": {
-            "count": edge.count,
-            "width": width,
-            "opacity": (0.35 + (width / 8.0) * 0.5).clamp(0.35, 0.85),
+            "snr": snr,
+            "label": format!("SNR {snr:.1}"),
         },
         "geometry": {
             "type": "LineString",
-            "coordinates": [edge.a, edge.b],
+            "coordinates": [a, b],
         }
     })
+}
+
+/// Match a neighbour pubkey prefix to exactly one GPS node (no guessing).
+fn resolve_gps_prefix(
+    prefix_hex: &str,
+    gps_nodes: &[(String, f64, f64)],
+) -> Option<(String, f64, f64)> {
+    let prefix = prefix_hex.trim().to_ascii_lowercase();
+    if prefix.len() < 4 || !prefix.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let hits: Vec<_> = gps_nodes
+        .iter()
+        .filter(|(pk, _, _)| pk.starts_with(&prefix))
+        .cloned()
+        .collect();
+    if hits.len() == 1 {
+        Some(hits[0].clone())
+    } else {
+        None
+    }
 }
 
 /// Pin colors by MeshCore contact type (HQ overrides).
@@ -597,20 +670,17 @@ struct LegendCounts {
     repeater: usize,
     room: usize,
     sensor: usize,
-    solid: usize,
-    dashed: usize,
+    neighbors: usize,
 }
 
 struct MapModel {
     nodes: Value,
-    solid: Value,
-    dashed: Value,
+    neighbors: Value,
     snr: Value,
     noise: Value,
     trails: Value,
     waypoints: Value,
     highlight: Value,
-    traffic: Value,
     note: String,
     bounds: Option<(f64, f64, f64, f64)>,
     pmtiles_ok: bool,
@@ -644,12 +714,9 @@ fn build_model(
     filter: NodeFilterSet,
     window: TrafficWindow,
     trail_window: TrailWindow,
-    show_solid: bool,
-    show_dashed: bool,
     show_snr: bool,
     show_noise: bool,
-    show_traffic: bool,
-    traffic_scope: TrafficScope,
+    show_neighbors: bool,
     favorites: &HashSet<String>,
     tracked: &HashSet<String>,
     claimed: &HashSet<String>,
@@ -859,22 +926,10 @@ fn build_model(
         .recent_messages_window(limit, since)
         .unwrap_or_default();
 
-    let mut solid = Vec::new();
-    let mut dashed = Vec::new();
     let mut snr_features = Vec::new();
-    let mut traffic_lines: Vec<(MapLine, i64)> = Vec::new();
     let hq_pos = hq.as_ref().map(|(_, lat, lon)| (*lon, *lat));
 
     for message in &messages {
-        let peer_key = message.sender_pubkey.as_deref().unwrap_or("");
-        let in_traffic_scope = match traffic_scope {
-            TrafficScope::AllGps => true,
-            TrafficScope::TrackedClaimed => {
-                peer_key.is_empty()
-                    || tracked.contains(peer_key)
-                    || claimed.contains(peer_key)
-            }
-        };
         let node_pos = message.sender_pubkey.as_ref().and_then(|key| {
             path_nodes
                 .iter()
@@ -882,33 +937,6 @@ fn build_model(
                 .and_then(|node| Some((node.lon?, node.lat?)))
         });
         let outbound = message.direction == "tx";
-        let (from, to) = if outbound {
-            (hq_pos, node_pos)
-        } else {
-            (node_pos, hq_pos)
-        };
-        if let Some(line) = build_line(
-            outbound,
-            from,
-            to,
-            &message.path,
-            message.hash_size.max(1) as usize,
-            &path_nodes,
-            message.hop_count.unwrap_or(0) as u32,
-        ) {
-            if show_traffic && in_traffic_scope {
-                traffic_lines.push((line.clone(), message.received_at));
-            }
-            let feature = line_feature(&line);
-            if line.dashed {
-                if show_dashed {
-                    dashed.push(feature);
-                }
-            } else if show_solid {
-                solid.push(feature);
-            }
-        }
-
         if show_snr {
             if let Some(snr) = message.snr {
                 let point = if outbound { hq_pos } else { node_pos };
@@ -927,16 +955,61 @@ fn build_model(
         }
     }
 
-    let traffic_features: Vec<Value> = if show_traffic {
-        let edges = aggregate_traffic_edges(&traffic_lines);
-        let max_count = edges.iter().map(|e| e.count).max().unwrap_or(1);
-        edges
+    // Neighbour links from claimed infra probes → any uniquely matched GPS peer.
+    let mut neighbor_features = Vec::new();
+    if show_neighbors {
+        let gps_nodes: Vec<(String, f64, f64)> = rows
             .iter()
-            .map(|edge| traffic_feature(edge, traffic_line_width(edge.count, max_count)))
-            .collect()
-    } else {
-        Vec::new()
-    };
+            .filter_map(|n| {
+                let lat = n.lat?;
+                let lon = n.lon?;
+                if lat == 0.0 && lon == 0.0 {
+                    return None;
+                }
+                Some((n.pubkey.to_ascii_lowercase(), lon, lat))
+            })
+            .collect();
+        let links = db.list_infra_neighbor_links().unwrap_or_default();
+        let mut seen = HashSet::<(String, String)>::new();
+        for link in links {
+            // Only probe sources we claim (and can place).
+            if !claimed.contains(&link.from_pubkey)
+                && !claimed
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case(&link.from_pubkey))
+            {
+                continue;
+            }
+            let Some((from_key, from_lon, from_lat)) = gps_nodes
+                .iter()
+                .find(|(pk, _, _)| pk.eq_ignore_ascii_case(&link.from_pubkey))
+                .cloned()
+            else {
+                continue;
+            };
+            let Some((to_key, to_lon, to_lat)) =
+                resolve_gps_prefix(&link.neighbor_prefix, &gps_nodes)
+            else {
+                continue;
+            };
+            if from_key == to_key {
+                continue;
+            }
+            let edge = if from_key <= to_key {
+                (from_key.clone(), to_key.clone())
+            } else {
+                (to_key.clone(), from_key.clone())
+            };
+            if !seen.insert(edge) {
+                continue;
+            }
+            neighbor_features.push(neighbor_feature(
+                (from_lon, from_lat),
+                (to_lon, to_lat),
+                link.snr,
+            ));
+        }
+    }
 
     // Trace highlight: inbound (advert/operator path) + outbound (contact hop_bytes).
     let mut highlight_features = Vec::new();
@@ -1097,26 +1170,23 @@ fn build_model(
             basemap_note
         )
     } else if hq_pos.is_none() {
-        "Routes need a headquarters fix. Set the radio location under Device → Identity.".into()
+        "Set a headquarters fix under Device → Identity for HQ-centered overlays.".into()
     } else {
-        let traffic_bit = if show_traffic {
-            format!(" · {} traffic edge(s)", traffic_features.len())
+        let neighbor_bit = if show_neighbors {
+            format!(" · {} neighbour link(s)", neighbor_features.len())
         } else {
             String::new()
         };
         format!(
-            "{} GPS nodes · {} solid · {} dashed{}{}",
+            "{} GPS nodes{}{}",
             node_features.len(),
-            solid.len(),
-            dashed.len(),
-            traffic_bit,
+            neighbor_bit,
             basemap_note
         )
     };
 
     let mut legend = LegendCounts {
-        solid: solid.len(),
-        dashed: dashed.len(),
+        neighbors: neighbor_features.len(),
         ..LegendCounts::default()
     };
     for feat in &node_features {
@@ -1136,14 +1206,12 @@ fn build_model(
 
     MapModel {
         nodes: collection(node_features),
-        solid: collection(solid),
-        dashed: collection(dashed),
+        neighbors: collection(neighbor_features),
         snr: collection(snr_features),
         noise: collection(noise_features),
         trails: collection(trail_features),
         waypoints: collection(waypoint_features),
         highlight: collection(highlight_features),
-        traffic: collection(traffic_features),
         note,
         bounds,
         pmtiles_ok,
@@ -1151,24 +1219,17 @@ fn build_model(
     }
 }
 
-fn solid_layers() -> Value {
+fn neighbor_layers() -> Value {
     json!([{
-        "id": "solid-lines",
+        "id": "neighbor-lines",
         "type": "line",
-        "source": "solid-routes",
-        "paint": { "line-color": "#34d399", "line-width": 3 }
-    }])
-}
-
-fn dashed_layers() -> Value {
-    json!([{
-        "id": "dashed-lines",
-        "type": "line",
-        "source": "dashed-routes",
+        "source": "neighbor-routes",
         "paint": {
-            "line-color": "#fbbf24",
+            // Violet dashed — distinct from green repeater pins / solid trails.
+            "line-color": "#a78bfa",
             "line-width": 2,
-            "line-dasharray": [2, 2]
+            "line-opacity": 0.8,
+            "line-dasharray": [1.6, 1.4]
         }
     }])
 }
@@ -1186,18 +1247,6 @@ fn highlight_layers() -> Value {
     }])
 }
 
-fn traffic_layers() -> Value {
-    json!([{
-        "id": "traffic-lines",
-        "type": "line",
-        "source": "traffic-routes",
-        "paint": {
-            "line-color": "#a78bfa",
-            "line-width": ["coalesce", ["get", "width"], 2.5],
-            "line-opacity": ["coalesce", ["get", "opacity"], 0.55]
-        }
-    }])
-}
 
 fn snr_layers() -> Value {
     json!([{
@@ -1308,12 +1357,9 @@ pub fn MapPage() -> Element {
     let mut tracker_panel_open = use_signal(|| false);
     let mut basemap = use_signal(load_saved_basemap);
     let mut cluster = use_signal(|| true);
-    let mut show_solid = use_signal(|| true);
-    let mut show_dashed = use_signal(|| true);
     let mut show_snr = use_signal(|| false);
     let mut show_noise = use_signal(|| false);
-    let mut show_traffic = use_signal(|| false);
-    let mut traffic_scope = use_signal(|| TrafficScope::AllGps);
+    let mut show_neighbors = use_signal(|| true);
     let mut selected_map_pubkey = use_signal(String::new);
     let mut trace_focus = use_signal(String::new);
     let mut trace_busy = use_signal(|| false);
@@ -1362,12 +1408,9 @@ pub fn MapPage() -> Element {
         filter(),
         window(),
         trail_window(),
-        show_solid(),
-        show_dashed(),
         show_snr(),
         show_noise(),
-        show_traffic(),
-        traffic_scope(),
+        show_neighbors(),
         &favorites(),
         &tracked,
         &claimed,
@@ -1429,9 +1472,41 @@ pub fn MapPage() -> Element {
             if let Some(cam) = map_get_camera().await {
                 save_camera(cam);
             }
+            map_clear_temp_pin().await;
             map_destroy().await;
         });
     });
+
+    // Chat / roster deep-link: fly in and optionally drop a temp pin.
+    {
+        let ready = ready;
+        use_future(move || async move {
+            let mut applied_while_cold = false;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                if !ready() {
+                    applied_while_cold = false;
+                    continue;
+                }
+                let Some(req) = take_pending_map_focus() else {
+                    continue;
+                };
+                // First focus after Map mounts: brief settle for style/sources.
+                if !applied_while_cold {
+                    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+                    applied_while_cold = true;
+                }
+                map_fly_to(req.lon, req.lat, 14.0).await;
+                if req.show_temp_pin {
+                    map_set_temp_pin(req.lon, req.lat, &req.label).await;
+                    map_pulse_at(req.lon, req.lat, Some("#f472b6"), "arrive").await;
+                } else {
+                    map_clear_temp_pin().await;
+                    map_pulse_at(req.lon, req.lat, Some("#38bdf8"), "message").await;
+                }
+            }
+        });
+    }
 
     use_effect(move || {
         let _ = (
@@ -1439,12 +1514,9 @@ pub fn MapPage() -> Element {
             filter(),
             window(),
             trail_window(),
-            show_solid(),
-            show_dashed(),
             show_snr(),
             show_noise(),
-            show_traffic(),
-            traffic_scope(),
+            show_neighbors(),
             trace_focus(),
             cluster(),
             favorites(),
@@ -1466,12 +1538,9 @@ pub fn MapPage() -> Element {
             filter(),
             window(),
             trail_window(),
-            show_solid(),
-            show_dashed(),
             show_snr(),
             show_noise(),
-            show_traffic(),
-            traffic_scope(),
+            show_neighbors(),
             &favorites(),
             &tracked_now,
             &claimed_now,
@@ -1480,22 +1549,18 @@ pub fn MapPage() -> Element {
             *basemap.peek(),
         );
         let nodes = snapshot.nodes.clone();
-        let solid = snapshot.solid.clone();
-        let dashed = snapshot.dashed.clone();
+        let neighbors = snapshot.neighbors.clone();
         let snr = snapshot.snr.clone();
         let noise = snapshot.noise.clone();
         let trails = snapshot.trails.clone();
         let waypoints = snapshot.waypoints.clone();
         let highlight = snapshot.highlight.clone();
-        let traffic = snapshot.traffic.clone();
         let bounds = snapshot.bounds;
         let do_fit = !fitted() && bounds.is_some();
         let do_cluster = cluster();
         spawn(async move {
             map_set_nodes(&nodes, do_cluster).await;
-            map_set_geojson("solid-routes", &solid, &solid_layers()).await;
-            map_set_geojson("dashed-routes", &dashed, &dashed_layers()).await;
-            map_set_geojson("traffic-routes", &traffic, &traffic_layers()).await;
+            map_set_geojson("neighbor-routes", &neighbors, &neighbor_layers()).await;
             map_set_geojson("trace-routes", &highlight, &highlight_layers()).await;
             map_set_geojson("snr-points", &snr, &snr_layers()).await;
             map_set_geojson("noise-points", &noise, &noise_layers()).await;
@@ -1518,15 +1583,11 @@ pub fn MapPage() -> Element {
         if !ready() {
             return;
         }
-        let solid = show_solid();
-        let dashed = show_dashed();
         let snr = show_snr();
         let noise = show_noise();
-        let traffic = show_traffic();
+        let neighbors = show_neighbors();
         spawn(async move {
-            map_set_visibility("solid-lines", solid).await;
-            map_set_visibility("dashed-lines", dashed).await;
-            map_set_visibility("traffic-lines", traffic).await;
+            map_set_visibility("neighbor-lines", neighbors).await;
             map_set_visibility("snr-dots", snr).await;
             map_set_visibility("noise-dots", noise).await;
         });
@@ -1940,68 +2001,15 @@ pub fn MapPage() -> Element {
                                     "Cluster markers"
                                 }
                                 label {
-                                    class: if radio_linked { "map-menu__item" } else { "map-menu__item map-menu__item--disabled" },
-                                    title: "{rf_title}",
-                                    input {
-                                        r#type: "checkbox",
-                                        checked: show_solid(),
-                                        disabled: !radio_linked,
-                                        oninput: move |_| {
-                                            if radio_linked {
-                                                show_solid.set(!show_solid());
-                                            }
-                                        },
-                                    }
-                                    Icon { name: IconName::Track, size: 14 }
-                                    "Solid routes"
-                                }
-                                label {
-                                    class: if radio_linked { "map-menu__item" } else { "map-menu__item map-menu__item--disabled" },
-                                    title: "{rf_title}",
-                                    input {
-                                        r#type: "checkbox",
-                                        checked: show_dashed(),
-                                        disabled: !radio_linked,
-                                        oninput: move |_| {
-                                            if radio_linked {
-                                                show_dashed.set(!show_dashed());
-                                            }
-                                        },
-                                    }
-                                    Icon { name: IconName::Track, size: 14 }
-                                    "Dashed routes"
-                                }
-                                label {
                                     class: "map-menu__item",
-                                    title: "Passive traffic weight from overheard messages",
+                                    title: "Links from claimed repeater neighbour probes to uniquely matched GPS peers",
                                     input {
                                         r#type: "checkbox",
-                                        checked: show_traffic(),
-                                        oninput: move |_| show_traffic.set(!show_traffic()),
+                                        checked: show_neighbors(),
+                                        oninput: move |_| show_neighbors.set(!show_neighbors()),
                                     }
-                                    Icon { name: IconName::Signal, size: 14 }
-                                    "Traffic"
-                                }
-                                if show_traffic() {
-                                    label {
-                                        class: "map-menu__item",
-                                        title: "Limit traffic edges to Tracker + claimed infra",
-                                        input {
-                                            r#type: "checkbox",
-                                            checked: traffic_scope() == TrafficScope::TrackedClaimed,
-                                            oninput: move |_| {
-                                                traffic_scope.set(
-                                                    if traffic_scope() == TrafficScope::TrackedClaimed {
-                                                        TrafficScope::AllGps
-                                                    } else {
-                                                        TrafficScope::TrackedClaimed
-                                                    },
-                                                );
-                                            },
-                                        }
-                                        Icon { name: IconName::Filter, size: 14 }
-                                        "Tracked/claimed only"
-                                    }
+                                    Icon { name: IconName::Track, size: 14 }
+                                    "Neighbour links"
                                 }
                                 label {
                                     class: if radio_linked { "map-menu__item" } else { "map-menu__item map-menu__item--disabled" },
@@ -2036,10 +2044,10 @@ pub fn MapPage() -> Element {
                                     "Noise"
                                 }
                                 div { class: "map-menu__divider" }
-                                p { class: "map-menu__title", "Traffic window" }
+                                p { class: "map-menu__title", "SNR lookback" }
                                 div { class: "min-w-[10rem]",
                                     SelectInput {
-                                        id: "map-traffic-window".to_string(),
+                                        id: "map-snr-window".to_string(),
                                         value: match window() {
                                             TrafficWindow::Last25 => "25".to_string(),
                                             TrafficWindow::Hour => "1h".to_string(),
@@ -2984,14 +2992,9 @@ pub fn MapPage() -> Element {
                         span { class: "map-legend-label", "Cluster (5+)" }
                     }
                     div { class: "map-legend-row",
-                        span { class: "map-line", style: "background:#34d399;" }
-                        span { class: "map-legend-label", "Resolved hops" }
-                        span { class: "map-legend-count", "{model.legend.solid}" }
-                    }
-                    div { class: "map-legend-row",
-                        span { class: "map-line map-line-dashed", style: "background:#fbbf24;" }
-                        span { class: "map-legend-label", "Endpoints only" }
-                        span { class: "map-legend-count", "{model.legend.dashed}" }
+                        span { class: "map-line map-line-dashed", style: "color:#a78bfa;" }
+                        span { class: "map-legend-label", "Neighbour links" }
+                        span { class: "map-legend-count", "{model.legend.neighbors}" }
                     }
                 }
                 div { class: "map-basemap-switcher", title: "Basemap",

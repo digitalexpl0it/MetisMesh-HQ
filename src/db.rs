@@ -148,7 +148,10 @@ pub struct MessageRow {
     pub received_at: i64,
     #[allow(dead_code)]
     pub route_source: Option<String>,
+    /// Joined from `paths` for history; map hop overlays no longer consume these.
+    #[allow(dead_code)]
     pub path: Vec<u8>,
+    #[allow(dead_code)]
     pub hash_size: i64,
     pub snr: Option<f64>,
 }
@@ -210,6 +213,86 @@ pub struct OutboundRow {
     pub id: i64,
     pub pubkey: String,
     pub body: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BroadcastGroupKind {
+    Contact,
+    Channel,
+}
+
+impl BroadcastGroupKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Contact => "contact",
+            Self::Channel => "channel",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "contact" => Some(Self::Contact),
+            "channel" => Some(Self::Channel),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Contact => "Contacts",
+            Self::Channel => "Channels",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BroadcastGroupRow {
+    pub id: i64,
+    pub kind: BroadcastGroupKind,
+    pub name: String,
+    pub member_count: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct BroadcastCannedRow {
+    pub id: i64,
+    pub title: String,
+    pub body: String,
+    #[allow(dead_code)] // kept for stable ordering / future drag-reorder UI
+    pub sort_order: i64,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct BroadcastJobProgress {
+    pub id: i64,
+    pub group_id: i64,
+    pub group_kind: BroadcastGroupKind,
+    /// Current group name, or empty if the group was deleted.
+    pub group_name: String,
+    pub body: String,
+    pub status: String,
+    pub created_at: i64,
+    pub total: i64,
+    pub sent: i64,
+    pub failed: i64,
+    pub skipped: i64,
+    pub queued: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct BroadcastLegRow {
+    pub id: i64,
+    pub job_id: i64,
+    pub group_kind: BroadcastGroupKind,
+    pub member_key: String,
+    pub body: String,
+}
+
+/// True when `value` is a 32-byte pubkey as 64 hex digits.
+pub fn is_broadcast_pubkey(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.len() == 64 && trimmed.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 #[derive(Debug, Clone)]
@@ -483,6 +566,18 @@ impl Db {
             [],
         );
         let _ = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS infra_neighbor_links (
+                from_pubkey TEXT NOT NULL,
+                neighbor_prefix TEXT NOT NULL,
+                snr REAL NOT NULL DEFAULT 0,
+                secs_ago INTEGER NOT NULL DEFAULT 0,
+                probed_at INTEGER NOT NULL,
+                PRIMARY KEY (from_pubkey, neighbor_prefix)
+            );
+            CREATE INDEX IF NOT EXISTS infra_neighbor_links_from
+                ON infra_neighbor_links(from_pubkey);",
+        );
+        let _ = conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS service_events (
                 id TEXT PRIMARY KEY,
                 kind TEXT NOT NULL,
@@ -505,9 +600,86 @@ impl Db {
             [],
         );
         Self::ensure_messages_rail_schema(&conn)?;
+        Self::ensure_broadcast_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
+    }
+
+    fn ensure_broadcast_schema(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS broadcast_groups (
+                id INTEGER PRIMARY KEY,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS broadcast_group_members (
+                group_id INTEGER NOT NULL,
+                member_key TEXT NOT NULL,
+                PRIMARY KEY (group_id, member_key)
+            );
+            CREATE TABLE IF NOT EXISTS broadcast_canned (
+                id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                is_default INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS broadcast_jobs (
+                id INTEGER PRIMARY KEY,
+                group_id INTEGER NOT NULL,
+                group_kind TEXT NOT NULL,
+                body TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                status TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS broadcast_legs (
+                id INTEGER PRIMARY KEY,
+                job_id INTEGER NOT NULL,
+                member_key TEXT NOT NULL,
+                status TEXT NOT NULL,
+                error TEXT NOT NULL DEFAULT '',
+                sent_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS broadcast_legs_job ON broadcast_legs(job_id, status);
+            CREATE INDEX IF NOT EXISTS broadcast_jobs_status ON broadcast_jobs(status, created_at);",
+        )?;
+        Self::seed_broadcast_canned(conn)?;
+        Ok(())
+    }
+
+    fn seed_broadcast_canned(conn: &Connection) -> Result<()> {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM broadcast_canned WHERE is_default = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        if count > 0 {
+            return Ok(());
+        }
+        let defaults = [
+            (10, "Check-in request", "HQ check-in: reply OK when you receive this."),
+            (20, "All clear", "HQ: all clear. Resume normal ops. Reply if you still need help."),
+            (
+                30,
+                "Shelter notice",
+                "HQ: shelter open. Reply SHELTER if you need directions or aid.",
+            ),
+            (
+                40,
+                "Stand by",
+                "HQ: stand by for further instructions. Keep radio on.",
+            ),
+        ];
+        for (order, title, body) in defaults {
+            conn.execute(
+                "INSERT INTO broadcast_canned (title, body, sort_order, is_default)
+                 VALUES (?1, ?2, ?3, 1)",
+                params![title, body, order],
+            )?;
+        }
+        Ok(())
     }
 
     /// Messages left-rail sections / favorites / pins. Must run on every open —
@@ -1168,6 +1340,21 @@ impl Db {
         }
         if self.setting("local_api_rate_limit_per_min")?.is_none() {
             self.set_setting("local_api_rate_limit_per_min", "120")?;
+        }
+        if self.setting("flash_locker_enabled")?.is_none() {
+            self.set_setting("flash_locker_enabled", "0")?;
+        }
+        if self.setting("flash_locker_bind")?.is_none() {
+            self.set_setting("flash_locker_bind", "0.0.0.0")?;
+        }
+        if self.setting("flash_locker_port")?.is_none() {
+            self.set_setting("flash_locker_port", "443")?;
+        } else if self.setting("flash_locker_port")?.as_deref() == Some("8788") {
+            // Early builds seeded 8788; prefer standard HTTPS.
+            self.set_setting("flash_locker_port", "443")?;
+        }
+        if self.setting("flash_locker_session_mins")?.is_none() {
+            self.set_setting("flash_locker_session_mins", "60")?;
         }
         if self.setting("ha_mqtt_enabled")?.is_none() {
             self.set_setting("ha_mqtt_enabled", "0")?;
@@ -4443,6 +4630,607 @@ impl Db {
         Ok(())
     }
 
+    // --- Broadcast groups / canned / jobs ---------------------------------
+
+    pub fn list_broadcast_groups(
+        &self,
+        kind: Option<BroadcastGroupKind>,
+    ) -> Result<Vec<BroadcastGroupRow>> {
+        let conn = self.lock();
+        let mut rows = Vec::new();
+        if let Some(kind) = kind {
+            let mut stmt = conn.prepare(
+                "SELECT g.id, g.kind, g.name,
+                        (SELECT COUNT(*) FROM broadcast_group_members m WHERE m.group_id = g.id)
+                 FROM broadcast_groups g
+                 WHERE g.kind = ?1
+                 ORDER BY g.name COLLATE NOCASE",
+            )?;
+            let mapped = stmt.query_map(params![kind.as_str()], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?;
+            for item in mapped {
+                let (id, kind_s, name, member_count) = item?;
+                let Some(kind) = BroadcastGroupKind::parse(&kind_s) else {
+                    continue;
+                };
+                rows.push(BroadcastGroupRow {
+                    id,
+                    kind,
+                    name,
+                    member_count,
+                });
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT g.id, g.kind, g.name,
+                        (SELECT COUNT(*) FROM broadcast_group_members m WHERE m.group_id = g.id)
+                 FROM broadcast_groups g
+                 ORDER BY g.kind, g.name COLLATE NOCASE",
+            )?;
+            let mapped = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?;
+            for item in mapped {
+                let (id, kind_s, name, member_count) = item?;
+                let Some(kind) = BroadcastGroupKind::parse(&kind_s) else {
+                    continue;
+                };
+                rows.push(BroadcastGroupRow {
+                    id,
+                    kind,
+                    name,
+                    member_count,
+                });
+            }
+        }
+        Ok(rows)
+    }
+
+    pub fn create_broadcast_group(
+        &self,
+        kind: BroadcastGroupKind,
+        name: &str,
+    ) -> Result<i64> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(Error::Msg("Group name is required.".into()));
+        }
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO broadcast_groups (kind, name, created_at) VALUES (?1, ?2, ?3)",
+            params![kind.as_str(), name, unix_now()],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn rename_broadcast_group(&self, id: i64, name: &str) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(Error::Msg("Group name is required.".into()));
+        }
+        let n = self.lock().execute(
+            "UPDATE broadcast_groups SET name = ?2 WHERE id = ?1",
+            params![id, name],
+        )?;
+        if n == 0 {
+            return Err(Error::Msg("Group not found.".into()));
+        }
+        Ok(())
+    }
+
+    pub fn delete_broadcast_group(&self, id: i64) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "DELETE FROM broadcast_group_members WHERE group_id = ?1",
+            params![id],
+        )?;
+        let n = conn.execute("DELETE FROM broadcast_groups WHERE id = ?1", params![id])?;
+        if n == 0 {
+            return Err(Error::Msg("Group not found.".into()));
+        }
+        Ok(())
+    }
+
+    pub fn list_broadcast_group_members(&self, group_id: i64) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT member_key FROM broadcast_group_members
+             WHERE group_id = ?1
+             ORDER BY member_key COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map(params![group_id], |row| row.get(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::from)
+    }
+
+    pub fn set_broadcast_group_members(
+        &self,
+        group_id: i64,
+        kind: BroadcastGroupKind,
+        members: &[String],
+    ) -> Result<()> {
+        let conn = self.lock();
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM broadcast_groups WHERE id = ?1 AND kind = ?2",
+            params![group_id, kind.as_str()],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            return Err(Error::Msg("Group not found.".into()));
+        }
+        conn.execute(
+            "DELETE FROM broadcast_group_members WHERE group_id = ?1",
+            params![group_id],
+        )?;
+        for raw in members {
+            let key = raw.trim();
+            if key.is_empty() {
+                continue;
+            }
+            if kind == BroadcastGroupKind::Contact && !is_broadcast_pubkey(key) {
+                return Err(Error::Msg(format!(
+                    "Contact group members need a 32-byte public key (got `{key}`)."
+                )));
+            }
+            if kind == BroadcastGroupKind::Channel && key.is_empty() {
+                continue;
+            }
+            conn.execute(
+                "INSERT OR IGNORE INTO broadcast_group_members (group_id, member_key)
+                 VALUES (?1, ?2)",
+                params![group_id, key],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn list_broadcast_canned(&self) -> Result<Vec<BroadcastCannedRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, title, body, sort_order, is_default
+             FROM broadcast_canned
+             ORDER BY sort_order, id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(BroadcastCannedRow {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                body: row.get(2)?,
+                sort_order: row.get(3)?,
+                is_default: row.get::<_, i64>(4)? != 0,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Error::from)
+    }
+
+    pub fn upsert_broadcast_canned(
+        &self,
+        id: Option<i64>,
+        title: &str,
+        body: &str,
+    ) -> Result<i64> {
+        let title = title.trim();
+        let body = body.trim();
+        if title.is_empty() {
+            return Err(Error::Msg("Canned title is required.".into()));
+        }
+        if body.is_empty() {
+            return Err(Error::Msg("Canned body is required.".into()));
+        }
+        if body.len() > 160 {
+            return Err(Error::Msg(
+                "Canned body must be at most 160 bytes.".into(),
+            ));
+        }
+        let conn = self.lock();
+        if let Some(id) = id {
+            let n = conn.execute(
+                "UPDATE broadcast_canned SET title = ?2, body = ?3 WHERE id = ?1",
+                params![id, title, body],
+            )?;
+            if n == 0 {
+                return Err(Error::Msg("Canned message not found.".into()));
+            }
+            Ok(id)
+        } else {
+            let order: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(MAX(sort_order), 0) + 10 FROM broadcast_canned",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(100);
+            conn.execute(
+                "INSERT INTO broadcast_canned (title, body, sort_order, is_default)
+                 VALUES (?1, ?2, ?3, 0)",
+                params![title, body, order],
+            )?;
+            Ok(conn.last_insert_rowid())
+        }
+    }
+
+    pub fn delete_broadcast_canned(&self, id: i64) -> Result<()> {
+        let n = self.lock().execute(
+            "DELETE FROM broadcast_canned WHERE id = ?1",
+            params![id],
+        )?;
+        if n == 0 {
+            return Err(Error::Msg("Canned message not found.".into()));
+        }
+        Ok(())
+    }
+
+    /// Active channel slot for a member name, or `None` if missing/inactive.
+    pub fn active_channel_slot_by_name(&self, name: &str) -> Result<Option<u8>> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Ok(None);
+        }
+        let conn = self.lock();
+        let slot: Option<i64> = conn
+            .query_row(
+                "SELECT slot FROM channels
+                 WHERE name = ?1 COLLATE NOCASE AND COALESCE(active, 1) = 1",
+                params![name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(slot.and_then(|s| u8::try_from(s).ok()))
+    }
+
+    /// Expand a group into a queued job + legs. Rejects empty body/group.
+    /// For channel groups, body must fit 160 bytes after HQ name prefix.
+    pub fn enqueue_broadcast(&self, group_id: i64, body: &str) -> Result<i64> {
+        let body = body.trim();
+        if body.is_empty() {
+            return Err(Error::Msg("Message is empty.".into()));
+        }
+        if body.len() > 160 {
+            return Err(Error::Msg("Mesh text is limited to 160 bytes.".into()));
+        }
+        let conn = self.lock();
+        let (kind_s, _name): (String, String) = conn
+            .query_row(
+                "SELECT kind, name FROM broadcast_groups WHERE id = ?1",
+                params![group_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|_| Error::Msg("Group not found.".into()))?;
+        let kind = BroadcastGroupKind::parse(&kind_s)
+            .ok_or_else(|| Error::Msg("Invalid group kind.".into()))?;
+        drop(conn);
+
+        if kind == BroadcastGroupKind::Channel {
+            let advert = self.hq_advert_name().unwrap_or_else(|_| "hq".into());
+            let wire = crate::radio::prefix_channel_sender(&advert, body);
+            if wire.len() > 160 {
+                return Err(Error::Msg(
+                    "Mesh text is limited to 160 bytes after adding the device name.".into(),
+                ));
+            }
+        }
+
+        let members = self.list_broadcast_group_members(group_id)?;
+        if members.is_empty() {
+            return Err(Error::Msg("Group has no members.".into()));
+        }
+        if kind == BroadcastGroupKind::Contact {
+            for key in &members {
+                if !is_broadcast_pubkey(key) {
+                    return Err(Error::Msg(format!(
+                        "Invalid contact pubkey in group: `{key}`."
+                    )));
+                }
+            }
+        }
+
+        // Only one active blast at a time.
+        let conn = self.lock();
+        let active: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM broadcast_jobs
+             WHERE status IN ('queued', 'running')",
+            [],
+            |row| row.get(0),
+        )?;
+        if active > 0 {
+            return Err(Error::Msg(
+                "A broadcast is already in progress. Cancel it or wait for it to finish.".into(),
+            ));
+        }
+
+        conn.execute(
+            "INSERT INTO broadcast_jobs (group_id, group_kind, body, created_at, status)
+             VALUES (?1, ?2, ?3, ?4, 'queued')",
+            params![group_id, kind.as_str(), body, unix_now()],
+        )?;
+        let job_id = conn.last_insert_rowid();
+        for key in &members {
+            conn.execute(
+                "INSERT INTO broadcast_legs (job_id, member_key, status)
+                 VALUES (?1, ?2, 'queued')",
+                params![job_id, key],
+            )?;
+        }
+        drop(conn);
+        let _ = self.audit(
+            "broadcast_start",
+            "",
+            &format!(
+                "job {job_id} group {group_id} kind {} members {}",
+                kind.as_str(),
+                members.len()
+            ),
+        );
+        Ok(job_id)
+    }
+
+    pub fn cancel_broadcast_job(&self, job_id: i64) -> Result<()> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE broadcast_jobs SET status = 'cancelled'
+             WHERE id = ?1 AND status IN ('queued', 'running')",
+            params![job_id],
+        )?;
+        if n == 0 {
+            return Err(Error::Msg("No active broadcast job to cancel.".into()));
+        }
+        // Leave remaining queued legs as queued but job won't drain them.
+        Ok(())
+    }
+
+    pub fn active_broadcast_job(&self) -> Result<Option<BroadcastJobProgress>> {
+        let conn = self.lock();
+        let active: Option<(i64, i64, String, String, String, i64, String)> = conn
+            .query_row(
+                "SELECT j.id, j.group_id, j.group_kind, j.body, j.status, j.created_at,
+                        COALESCE(g.name, '')
+                 FROM broadcast_jobs j
+                 LEFT JOIN broadcast_groups g ON g.id = j.group_id
+                 WHERE j.status IN ('queued', 'running')
+                 ORDER BY j.id ASC
+                 LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((id, group_id, kind_s, body, status, created_at, group_name)) = active else {
+            return Ok(None);
+        };
+        let kind = BroadcastGroupKind::parse(&kind_s)
+            .ok_or_else(|| Error::Msg("Invalid group kind.".into()))?;
+        Ok(Some(Self::broadcast_job_counts(
+            &conn, id, group_id, kind, group_name, body, status, created_at,
+        )?))
+    }
+
+    /// Newest-first job history with leg counts. `limit`/`offset` for pagination.
+    pub fn list_broadcast_jobs(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<BroadcastJobProgress>, i64)> {
+        let limit = limit.clamp(1, 100);
+        let offset = offset.max(0);
+        let conn = self.lock();
+        let total: i64 =
+            conn.query_row("SELECT COUNT(*) FROM broadcast_jobs", [], |row| row.get(0))?;
+        let mut stmt = conn.prepare(
+            "SELECT j.id, j.group_id, j.group_kind, j.body, j.status, j.created_at,
+                    COALESCE(g.name, '')
+             FROM broadcast_jobs j
+             LEFT JOIN broadcast_groups g ON g.id = j.group_id
+             ORDER BY j.id DESC
+             LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = stmt.query_map(params![limit, offset], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for item in rows {
+            let (id, group_id, kind_s, body, status, created_at, group_name) = item?;
+            let kind = BroadcastGroupKind::parse(&kind_s)
+                .ok_or_else(|| Error::Msg("Invalid group kind.".into()))?;
+            out.push(Self::broadcast_job_counts(
+                &conn, id, group_id, kind, group_name, body, status, created_at,
+            )?);
+        }
+        Ok((out, total))
+    }
+
+    fn broadcast_job_counts(
+        conn: &Connection,
+        id: i64,
+        group_id: i64,
+        kind: BroadcastGroupKind,
+        group_name: String,
+        body: String,
+        status: String,
+        created_at: i64,
+    ) -> Result<BroadcastJobProgress> {
+        let mut counts = (0i64, 0i64, 0i64, 0i64, 0i64); // total sent failed skipped queued
+        {
+            let mut stmt = conn.prepare(
+                "SELECT status, COUNT(*) FROM broadcast_legs WHERE job_id = ?1 GROUP BY status",
+            )?;
+            let rows = stmt.query_map(params![id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            for item in rows {
+                let (st, n) = item?;
+                counts.0 += n;
+                match st.as_str() {
+                    "sent" => counts.1 += n,
+                    "failed" => counts.2 += n,
+                    "skipped" => counts.3 += n,
+                    "queued" => counts.4 += n,
+                    _ => {}
+                }
+            }
+        }
+        Ok(BroadcastJobProgress {
+            id,
+            group_id,
+            group_kind: kind,
+            group_name,
+            body,
+            status,
+            created_at,
+            total: counts.0,
+            sent: counts.1,
+            failed: counts.2,
+            skipped: counts.3,
+            queued: counts.4,
+        })
+    }
+
+    /// Next queued leg for the oldest active job, marking the job running.
+    pub fn next_broadcast_leg(&self) -> Result<Option<BroadcastLegRow>> {
+        let conn = self.lock();
+        let job: Option<(i64, String, String)> = conn
+            .query_row(
+                "SELECT id, group_kind, body FROM broadcast_jobs
+                 WHERE status IN ('queued', 'running')
+                 ORDER BY id ASC
+                 LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((job_id, kind_s, body)) = job else {
+            return Ok(None);
+        };
+        let kind = BroadcastGroupKind::parse(&kind_s)
+            .ok_or_else(|| Error::Msg("Invalid group kind.".into()))?;
+        conn.execute(
+            "UPDATE broadcast_jobs SET status = 'running' WHERE id = ?1 AND status = 'queued'",
+            params![job_id],
+        )?;
+        let leg: Option<(i64, String)> = conn
+            .query_row(
+                "SELECT id, member_key FROM broadcast_legs
+                 WHERE job_id = ?1 AND status = 'queued'
+                 ORDER BY id ASC
+                 LIMIT 1",
+                params![job_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((leg_id, member_key)) = leg else {
+            // No legs left — finalize job.
+            let failed: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM broadcast_legs
+                 WHERE job_id = ?1 AND status = 'failed'",
+                params![job_id],
+                |row| row.get(0),
+            )?;
+            let status = if failed > 0 { "failed" } else { "done" };
+            conn.execute(
+                "UPDATE broadcast_jobs SET status = ?2 WHERE id = ?1 AND status = 'running'",
+                params![job_id, status],
+            )?;
+            return Ok(None);
+        };
+        Ok(Some(BroadcastLegRow {
+            id: leg_id,
+            job_id,
+            group_kind: kind,
+            member_key,
+            body,
+        }))
+    }
+
+    pub fn mark_broadcast_leg(
+        &self,
+        leg_id: i64,
+        status: &str,
+        error: &str,
+    ) -> Result<()> {
+        let status = match status {
+            "sent" | "failed" | "skipped" => status,
+            _ => return Err(Error::Msg("Invalid leg status.".into())),
+        };
+        let sent_at = if status == "sent" {
+            Some(unix_now())
+        } else {
+            None
+        };
+        let conn = self.lock();
+        let job_id: i64 = conn.query_row(
+            "SELECT job_id FROM broadcast_legs WHERE id = ?1",
+            params![leg_id],
+            |row| row.get(0),
+        )?;
+        conn.execute(
+            "UPDATE broadcast_legs SET status = ?2, error = ?3, sent_at = ?4 WHERE id = ?1",
+            params![leg_id, status, error, sent_at],
+        )?;
+        let member: String = conn.query_row(
+            "SELECT member_key FROM broadcast_legs WHERE id = ?1",
+            params![leg_id],
+            |row| row.get(0),
+        )?;
+        drop(conn);
+        let _ = self.audit(
+            "broadcast_leg",
+            &member,
+            &format!("leg {leg_id} job {job_id} {status} {error}"),
+        );
+
+        // If nothing queued remains and job still running, close it.
+        let conn = self.lock();
+        let queued: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM broadcast_legs
+             WHERE job_id = ?1 AND status = 'queued'",
+            params![job_id],
+            |row| row.get(0),
+        )?;
+        if queued == 0 {
+            let failed: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM broadcast_legs
+                 WHERE job_id = ?1 AND status = 'failed'",
+                params![job_id],
+                |row| row.get(0),
+            )?;
+            let status = if failed > 0 { "failed" } else { "done" };
+            conn.execute(
+                "UPDATE broadcast_jobs SET status = ?2
+                 WHERE id = ?1 AND status IN ('queued', 'running')",
+                params![job_id, status],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn service_event_seen(&self, id: &str) -> Result<bool> {
         let conn = self.lock();
         let mut stmt = conn.prepare("SELECT 1 FROM service_events WHERE id = ?1")?;
@@ -5387,6 +6175,59 @@ impl Db {
         Ok(out)
     }
 
+    /// Replace all neighbor links reported by one claimed infra node.
+    pub fn replace_infra_neighbors(
+        &self,
+        from_pubkey: &str,
+        links: &[InfraNeighborLink],
+    ) -> Result<()> {
+        let from = from_pubkey.trim().to_ascii_lowercase();
+        if from.is_empty() {
+            return Err(Error::Msg("Missing infrastructure pubkey.".into()));
+        }
+        let conn = self.lock();
+        conn.execute(
+            "DELETE FROM infra_neighbor_links WHERE from_pubkey = ?1",
+            params![from],
+        )?;
+        for link in links {
+            let prefix = link.neighbor_prefix.trim().to_ascii_lowercase();
+            if prefix.is_empty() {
+                continue;
+            }
+            conn.execute(
+                "INSERT OR REPLACE INTO infra_neighbor_links
+                    (from_pubkey, neighbor_prefix, snr, secs_ago, probed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![from, prefix, link.snr, link.secs_ago, link.probed_at],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn list_infra_neighbor_links(&self) -> Result<Vec<InfraNeighborLink>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT from_pubkey, neighbor_prefix, snr, secs_ago, probed_at
+             FROM infra_neighbor_links
+             ORDER BY probed_at DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(InfraNeighborLink {
+                from_pubkey: r.get(0)?,
+                neighbor_prefix: r.get(1)?,
+                snr: r.get(2)?,
+                secs_ago: r.get(3)?,
+                probed_at: r.get(4)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     pub fn infra_status_samples_since(
         &self,
         pubkey: &str,
@@ -5642,6 +6483,17 @@ pub struct InfraStatusLatest {
     /// Full StatusData (+ extras) JSON for forward-compatible UI.
     #[allow(dead_code)]
     pub raw_json: String,
+}
+
+/// One claimed-infra neighbor entry from a binary neighbours probe.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InfraNeighborLink {
+    pub from_pubkey: String,
+    /// Hex pubkey prefix as returned by the repeater (typically 8–12 hex chars).
+    pub neighbor_prefix: String,
+    pub snr: f64,
+    pub secs_ago: i64,
+    pub probed_at: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -5977,6 +6829,16 @@ CREATE TABLE IF NOT EXISTS blocked_nodes (
     label TEXT NOT NULL DEFAULT '',
     added_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS infra_neighbor_links (
+    from_pubkey TEXT NOT NULL,
+    neighbor_prefix TEXT NOT NULL,
+    snr REAL NOT NULL DEFAULT 0,
+    secs_ago INTEGER NOT NULL DEFAULT 0,
+    probed_at INTEGER NOT NULL,
+    PRIMARY KEY (from_pubkey, neighbor_prefix)
+);
+CREATE INDEX IF NOT EXISTS infra_neighbor_links_from
+    ON infra_neighbor_links(from_pubkey);
 CREATE TABLE IF NOT EXISTS claimed_infra (
     pubkey TEXT PRIMARY KEY,
     kind TEXT NOT NULL DEFAULT 'repeater',
@@ -6988,6 +7850,83 @@ mod tests {
         assert!(db.get_node("cc33").unwrap().is_some());
         assert!(!db.is_blocked("aa11").unwrap());
         assert!(db.list_tracked_nodes().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn broadcast_enqueue_expands_contact_members() {
+        let (db, _, dir) = test_db();
+        assert!(!db.list_broadcast_canned().unwrap().is_empty());
+        let gid = db
+            .create_broadcast_group(BroadcastGroupKind::Contact, "Leads")
+            .unwrap();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        db.set_broadcast_group_members(
+            gid,
+            BroadcastGroupKind::Contact,
+            &[a.clone(), b.clone()],
+        )
+        .unwrap();
+        assert!(db
+            .enqueue_broadcast(gid, "")
+            .unwrap_err()
+            .to_string()
+            .contains("empty"));
+        let job = db.enqueue_broadcast(gid, "Stand by").unwrap();
+        let leg1 = db.next_broadcast_leg().unwrap().expect("first leg");
+        assert_eq!(leg1.job_id, job);
+        assert_eq!(leg1.member_key, a);
+        db.mark_broadcast_leg(leg1.id, "sent", "").unwrap();
+        let leg2 = db.next_broadcast_leg().unwrap().expect("second leg");
+        assert_eq!(leg2.member_key, b);
+        db.mark_broadcast_leg(leg2.id, "sent", "").unwrap();
+        assert!(db.next_broadcast_leg().unwrap().is_none());
+        assert!(db.active_broadcast_job().unwrap().is_none());
+        let (history, total) = db.list_broadcast_jobs(10, 0).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(history[0].status, "done");
+        assert_eq!(history[0].sent, 2);
+        assert_eq!(history[0].group_name, "Leads");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn broadcast_rejects_empty_group_and_bad_pubkey() {
+        let (db, _, dir) = test_db();
+        let gid = db
+            .create_broadcast_group(BroadcastGroupKind::Contact, "Empty")
+            .unwrap();
+        assert!(db.enqueue_broadcast(gid, "hi").is_err());
+        assert!(db
+            .set_broadcast_group_members(
+                gid,
+                BroadcastGroupKind::Contact,
+                &["not-a-key".into()],
+            )
+            .is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn broadcast_channel_group_resolves_active_slot() {
+        let (db, _, dir) = test_db();
+        let gid = db
+            .create_broadcast_group(BroadcastGroupKind::Channel, "Public")
+            .unwrap();
+        db.set_broadcast_group_members(
+            gid,
+            BroadcastGroupKind::Channel,
+            &[CHANNEL_NAME.into(), "missing-channel".into()],
+        )
+        .unwrap();
+        assert!(db.active_channel_slot_by_name(CHANNEL_NAME).unwrap().is_some());
+        assert!(db
+            .active_channel_slot_by_name("missing-channel")
+            .unwrap()
+            .is_none());
+        let job = db.enqueue_broadcast(gid, "All clear").unwrap();
+        assert!(job > 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -4,6 +4,7 @@
 //! are enrolled-only, rate-limited, and capped at 160 bytes.
 
 mod ecowitt;
+pub mod flash_locker;
 pub mod ha_mqtt;
 pub mod local_api;
 pub mod map_upload;
@@ -16,6 +17,12 @@ mod station;
 mod weather;
 
 pub use ecowitt::{bump_ecowitt_config, ecowitt_pull_status_line, ecowitt_push_status_line};
+pub use flash_locker::{
+    bump_flash_locker_config, cert_fingerprint_short, clamp_session_mins as clamp_flash_locker_session_mins,
+    ensure_tls_cert as ensure_flash_locker_tls, flash_locker_status_line, flash_locker_urls,
+    grant_low_port_and_restart as grant_flash_locker_low_ports,
+    pin_is_set as flash_locker_pin_is_set, set_pin as set_flash_locker_pin,
+};
 pub use ha_mqtt::{
     bump_ha_mqtt_config, clamp_ha_mqtt_interval, clear_ha_mqtt_password,
     ha_mqtt_password_present, ha_mqtt_status_line, save_ha_mqtt_password,

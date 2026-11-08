@@ -511,6 +511,47 @@ pub fn HelpPage() -> Element {
                                 code { ".zip" }
                                 " pack for USB sticks. Flash is blocked if a checksum fails."
                             }
+                            li {
+                                strong { "LAN flash locker" }
+                                " — opt-in under Settings → Flasher. HQ serves an HTTPS page (self-signed cert) so other laptops on Wi‑Fi unlock with a room PIN, download synced builds, and flash via Web Serial (Chrome/Edge): ESP SLIP "
+                                code { ".bin" }
+                                " and nRF Adafruit DFU "
+                                code { ".zip" }
+                                ". Also: Download menu (firmware / erase / OTAFIX), Enter DFU, Custom local files (not HQ-verified), and in-locker Help. Default HTTPS port "
+                                code { "443" }
+                                "; HTTP "
+                                code { "80" }
+                                " redirects. On Linux, HQ can request permission once via a system dialog (or "
+                                strong { "Allow ports 80 / 443" }
+                                "); after approval HQ restarts. Or use "
+                                code { "8443" }
+                                ". PIN hash and TLS key stay under "
+                                code { "data/" }
+                                " (0600). Does not flash USB plugged into the HQ box; does not expose radio, secrets, or enroll."
+                            }
+                            li {
+                                strong { "OTAFIX / nRF bootloader" }
+                                " — some repeater and room boards need the OTAFIX UF2 before Bluetooth OTA works. Sync pulls bootloader "
+                                code { ".uf2" }
+                                " / "
+                                code { ".zip" }
+                                " and erase images for selected boards; on the locker use Download or the OTAFIX banner, then drag the UF2 onto the drive (double-reset / Enter DFU). See "
+                                a {
+                                    href: "https://blog.meshcore.io/2026/04/06/otafix-bootloader",
+                                    target: "_blank",
+                                    rel: "noopener noreferrer",
+                                    "the MeshCore OTAFIX guide"
+                                }
+                                "."
+                            }
+                            li {
+                                strong { "Repeater / room setup" }
+                                " — after flashing those roles on the locker, use "
+                                strong { "Setup repeater" }
+                                " / "
+                                strong { "Setup room server" }
+                                " to run the USB serial CLI wizard (name, passwords, optional map coords). Claiming the node over LoRa for HQ Infra stays on the desktop app."
+                            }
                         }
                     }
 
@@ -550,7 +591,7 @@ pub fn HelpPage() -> Element {
                                 strong { "Settings → Flasher → Manage firmware" }
                                 ": select the boards and roles you actually own → "
                                 strong { "Save & sync" }
-                                "."
+                                ". Sync also pulls OTAFIX bootloader / erase images for selected nRF boards when the catalog lists them."
                             }
                             li {
                                 "Wait until Flasher says "
@@ -562,6 +603,11 @@ pub fn HelpPage() -> Element {
                                 " to a "
                                 code { "MetisMeshHQ-firmware-*.zip" }
                                 " on a USB stick."
+                            }
+                            li {
+                                "Optional: enable the "
+                                strong { "LAN flash locker" }
+                                " (Settings → Flasher) for other laptops on Wi‑Fi — room PIN over HTTPS; Web Serial needs Chrome/Edge; OTAFIX remains UF2 drag-drop."
                             }
                             li { "Leave the laptop on UPS or wall power; disable sleep while HQ is the desk radio." }
                         }
@@ -594,7 +640,7 @@ pub fn HelpPage() -> Element {
                             }
                             li {
                                 strong { "Flash only from cache" }
-                                " — Settings → Flasher. Flash is blocked if a file fails checksum. If the locker is empty, "
+                                " — Settings → Flasher on the HQ machine, or the LAN locker page from a PIN session. Indexed flash is blocked if a file fails checksum. Custom local files on the LAN page are operator-supplied (not HQ-verified). If the locker is empty, "
                                 strong { "Import pack" }
                                 " and pick the USB "
                                 code { ".zip" }

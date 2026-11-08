@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+## 0.1.14 — 2026-11-08
+
+Package version `0.1.14` (Cargo / About). Windows Details may show `0.1.14.0`.
+
+### Flasher
+
+- Opt-in **LAN flash locker** (Settings → Flasher): HTTPS with a self-signed cert, room PIN sessions, catalog + trusted firmware download, and browser Web Serial flash on remote laptops (Chrome/Edge). Default bind `0.0.0.0:443` with HTTP `:80` → HTTPS redirect; on Linux HQ can Polkit-prompt for low-port capability and restart (or use `8443`). Separate from the read-only Local API
+- Locker board browse: maker/search filters, Web Serial vs download tabs, device → role slide-up with Flash / Download / Console / Setup
+- **ESP32** Web Serial flash (SLIP) and **nRF52** Web Serial flash (Adafruit DFU `.zip`, vendored `jszip` + DFU) — SenseCAP / Wio Tracker L1 and similar are not download-only
+- **OTAFIX**: Sync pulls every catalog bootloader name (`.uf2` and `.zip`) plus erase images (catalog erase + `.uf2` wipe sibling when present) for selected nRF devices; role sheet shows warning + UF2 download (drag-drop DFU — not Web Serial)
+- LAN locker **Download ▴** menu (body-mounted, opens above the button): firmware, erase, and OTAFIX files when synced — escapes the sheet `transform`/`overflow` clip
+- LAN locker **Enter DFU mode** on nRF roles (1200-baud bootloader reset for UF2 copy or serial DFU)
+- LAN locker **Custom** firmware: flash a local `.bin` (ESP) or DFU `.zip` (nRF) from the laptop — not HQ-catalog verified
+- **Repeater / Room Server setup** wizard on the locker: after flash, auto-runs serial CLI (`password`, `set name`, guest password, optional lat/lon/advert/repeat, `advert`, `reboot`)
+- LAN locker **Help** sheet: browser/PIN, Web Serial (ESP vs nRF), OTAFIX UF2, Console/setup, empty-catalog notes
+
+### Broadcast
+
+- New **Broadcast** sidebar page: contact and channel groups, canned presets, queued one-by-one fan-out on the primary radio (intentional spacing; not an automatic bot reply)
+
+### Welcome
+
+- Setup wizard companion **name** step after connect (max one emoji when setting a name) plus a bottom icon step strip showing progress
+
+### Map / Messages
+
+- Position shares in message bodies render as map chips; related map host / bridge polish
+
+### Docs
+
+- README, offline runbook, Help, and todo updated for LAN locker / OTAFIX / Broadcast
+
 ## 0.1.13 — 2026-11-06
 
 Package version `0.1.13` (Cargo / About). Windows Details may show `0.1.13.0`.

@@ -17,13 +17,18 @@ use tokio::sync::oneshot;
 use tokio::sync::watch;
 
 use crate::contact_qr;
-use crate::db::{contact_snapshot, unix_now, Db, InfraStatusSample, RadioRole};
+use crate::db::{
+    contact_snapshot, is_broadcast_pubkey, unix_now, BroadcastGroupKind, Db, InfraStatusSample,
+    RadioRole,
+};
 use crate::path::{hop_count_from_path_len, parse_advert_path};
 use crate::secrets::Secrets;
 use crate::signup::{decide, parse_command};
 use crate::usb_serial::{self, UsbPort};
 
 const REPLY_GAP: Duration = Duration::from_secs(20);
+/// Spacing between intentional broadcast fan-out legs (operator blast).
+const BROADCAST_LEG_GAP: Duration = Duration::from_millis(250);
 
 /// Type filter bits for `DISCOVER_REQ`: `(1 << ADV_TYPE_*)`.
 /// Repeater (2) + room server (3).
@@ -2891,6 +2896,94 @@ const PROBE_CONTACTS_TIMEOUT: Duration = Duration::from_secs(20);
 const PROBE_MAX_TARGETS: usize = 5;
 
 /// Persist a binary status sample (+ RF map sample) for Overview / Infrastructure.
+const PROBE_NEIGHBOURS_TIMEOUT: Duration = Duration::from_secs(12);
+const PROBE_NEIGHBOURS_COUNT: u8 = 32;
+const PROBE_NEIGHBOURS_PREFIX_LEN: u8 = 6;
+
+/// After a status probe, ask the claimed node for its neighbour table and store links.
+async fn probe_and_persist_neighbours(db: &Db, meshcore: &MeshCore, pubkey_hex: &str) {
+    let Ok(key) = parse_pubkey_full(pubkey_hex) else {
+        return;
+    };
+    let commands = match tokio::time::timeout(
+        Duration::from_secs(8),
+        meshcore.commands().lock(),
+    )
+    .await
+    {
+        Ok(guard) => guard,
+        Err(_) => return,
+    };
+    let result = commands
+        .request_neighbours_with_timeout(
+            Destination::Bytes(key.to_vec()),
+            PROBE_NEIGHBOURS_COUNT,
+            0,
+            0,
+            PROBE_NEIGHBOURS_PREFIX_LEN,
+            PROBE_NEIGHBOURS_TIMEOUT,
+        )
+        .await;
+    drop(commands);
+    match result {
+        Ok(data) => {
+            let now = unix_now();
+            let from = pubkey_hex.trim().to_ascii_lowercase();
+            let links: Vec<crate::db::InfraNeighborLink> = data
+                .neighbours
+                .into_iter()
+                .filter_map(|n| {
+                    if n.pubkey.is_empty() {
+                        return None;
+                    }
+                    Some(crate::db::InfraNeighborLink {
+                        from_pubkey: from.clone(),
+                        neighbor_prefix: hex::encode(&n.pubkey),
+                        snr: f64::from(n.snr),
+                        secs_ago: i64::from(n.secs_ago),
+                        probed_at: now,
+                    })
+                })
+                .collect();
+            let n = links.len();
+            if let Err(err) = db.replace_infra_neighbors(&from, &links) {
+                hq_log!(debug, "persist neighbours {from}: {err}");
+                return;
+            }
+            let summary = if n == 0 {
+                format!("{} reported (none in range)", data.total)
+            } else {
+                let sample: Vec<String> = links
+                    .iter()
+                    .take(4)
+                    .map(|l| l.neighbor_prefix.chars().take(8).collect())
+                    .collect();
+                format!("{} reported · {}", data.total, sample.join(", "))
+            };
+            let _ = db.update_infra_status_cli_fields(
+                &from,
+                None,
+                None,
+                None,
+                None,
+                Some(&summary),
+            );
+            hq_log!(
+                debug,
+                "neighbours {}: {n} link(s)",
+                &from.chars().take(12).collect::<String>()
+            );
+        }
+        Err(err) => {
+            hq_log!(
+                debug,
+                "neighbours probe {}: {err}",
+                &pubkey_hex.chars().take(12).collect::<String>()
+            );
+        }
+    }
+}
+
 pub fn persist_infra_status_probe(
     db: &Db,
     pubkey: &str,
@@ -2989,6 +3082,8 @@ async fn run_claimed_infra_status_sweep(
         match run_infra_status_probe(meshcore.clone(), status.clone(), &pubkey).await {
             Ok(info) => {
                 persist_infra_status_probe(&db, &pubkey, &info, prior_tx);
+                tokio::task::yield_now().await;
+                probe_and_persist_neighbours(&db, &meshcore, &pubkey).await;
                 ok += 1;
             }
             Err(err) => {
@@ -3695,6 +3790,43 @@ async fn companion_device_query(
     }
 }
 
+fn looks_like_bt_address(value: &str) -> bool {
+    let trimmed = value.trim();
+    let parts: Vec<_> = trimmed.split([':', '-']).collect();
+    parts.len() == 6
+        && parts.iter().all(|part| {
+            part.len() == 2 && part.chars().all(|ch| ch.is_ascii_hexdigit())
+        })
+}
+
+/// Human-facing companion label for status / welcome rename.
+///
+/// Order: SelfInfo advert name → BLE scan GAP name → transport address.
+fn companion_display_label(status: &Mutex<RadioStatus>, address: &str, self_name: &str) -> String {
+    let self_name = self_name.trim();
+    if !self_name.is_empty() && !looks_like_bt_address(self_name) {
+        return self_name.to_string();
+    }
+    let scanned = {
+        let guard = status.lock().unwrap_or_else(|err| err.into_inner());
+        guard
+            .devices
+            .iter()
+            .find(|device| device.address.eq_ignore_ascii_case(address))
+            .map(|device| device.name.clone())
+    };
+    if let Some(name) = scanned {
+        let name = name.trim();
+        if !name.is_empty() && name != "Unnamed device" && !looks_like_bt_address(name) {
+            return name.to_string();
+        }
+    }
+    if !self_name.is_empty() {
+        return self_name.to_string();
+    }
+    address.to_string()
+}
+
 /// Record this companion as the HQ node and site settings. Primary companion only.
 fn apply_hq_identity(db: &Db, ident: &SelfIdentity) -> Result<(), String> {
     db.save_hq(&ident.pubkey, &ident.name, ident.adv_lat, ident.adv_lon, &ident.raw)
@@ -3834,12 +3966,11 @@ async fn run_session(
             "sf": info.sf,
             "cr": info.cr,
         });
-        let label = if info.name.trim().is_empty() {
-            name
-        } else {
-            info.name.trim()
-        };
-        let _ = db.remember_radio(&ctx.transport, name, label);
+        // Prefer the MeshCore advert name from SelfInfo. Fall back to the BLE
+        // GAP name from the last scan before using the transport address — UI
+        // surfaces (`connected_name`, welcome rename) should not show a MAC.
+        let label = companion_display_label(status, name, info.name.trim());
+        let _ = db.remember_radio(&ctx.transport, name, &label);
         let (lat, lon) = crate::db::coords_from_micro(info.adv_lat, info.adv_lon);
         {
             let mut guard = status.lock().unwrap_or_else(|err| err.into_inner());
@@ -3906,7 +4037,7 @@ async fn run_session(
         let _ = commands.set_time(unix_now() as u32).await;
         {
             let mut guard = status.lock().unwrap_or_else(|err| err.into_inner());
-            guard.connected_name = name.to_string();
+            guard.connected_name = label.clone();
         }
         if let Ok(battery) = commands.get_bat().await {
             apply_battery(db, status, &battery);
@@ -3917,7 +4048,7 @@ async fn run_session(
         write_status(
             status,
             "connecting",
-            format!("Linked to {name}. Syncing companion…"),
+            format!("Linked to {label}. Syncing companion…"),
         );
         write_sync(
             status,
@@ -4136,15 +4267,22 @@ async fn run_session(
                                 write_status(status, "connected", err.to_string());
                             } else {
                                 let _ = db.set_setting("hq_name", &advert);
-                                let hq_key = status
-                                    .lock()
-                                    .unwrap_or_else(|err| err.into_inner())
-                                    .public_key
-                                    .clone();
+                                let hq_key = {
+                                    let mut guard =
+                                        status.lock().unwrap_or_else(|err| err.into_inner());
+                                    guard.connected_name = advert.clone();
+                                    guard.public_key.clone()
+                                };
                                 if !hq_key.is_empty() {
                                     let _ = db.update_node_name(&hq_key, &advert);
                                     contact_qr::enqueue_contact_qr(&hq_key);
                                 }
+                                let addr = ctx
+                                    .address
+                                    .lock()
+                                    .unwrap_or_else(|err| err.into_inner())
+                                    .clone();
+                                let _ = db.remember_radio(&ctx.transport, &addr, &advert);
                                 write_status(status, "connected", format!("Advert name set to {advert}."));
                             }
                         }
@@ -4565,9 +4703,18 @@ async fn run_session(
                     Some(RadioCmd::ProbeInfraStatus { pubkey_hex, reply }) => {
                         let meshcore = meshcore.clone();
                         let status = Arc::clone(status);
+                        let db = Arc::clone(db);
                         tokio::spawn(async move {
-                            let outcome =
-                                run_infra_status_probe(meshcore, status, &pubkey_hex).await;
+                            let outcome = run_infra_status_probe(
+                                meshcore.clone(),
+                                status,
+                                &pubkey_hex,
+                            )
+                            .await;
+                            if outcome.is_ok() {
+                                tokio::task::yield_now().await;
+                                probe_and_persist_neighbours(&db, &meshcore, &pubkey_hex).await;
+                            }
                             let _ = reply.send(outcome);
                         });
                     }
@@ -4729,6 +4876,13 @@ async fn run_session(
                     }
                     if let Err(err) = flush_one_outbound(db, &meshcore, radio, &mut replies).await {
                         hq_log!(warn, "send: {err}");
+                    }
+                    if primary {
+                        if let Err(err) =
+                            flush_one_broadcast_leg(db, &meshcore, status, name, radio).await
+                        {
+                            hq_log!(warn, "broadcast: {err}");
+                        }
                     }
                 }
                 was_primary = primary;
@@ -6278,6 +6432,19 @@ async fn run_contact_refresh(
     }
     tokio::task::yield_now().await;
 
+    // 3b) Neighbour table for claimed map links (prefix match → claimed GPS peers).
+    probe_and_persist_neighbours(db, meshcore, &key_hex).await;
+    if let Ok(links) = db.list_infra_neighbor_links() {
+        let n = links
+            .iter()
+            .filter(|l| l.from_pubkey.eq_ignore_ascii_case(&key_hex))
+            .count();
+        if n > 0 {
+            parts.push(format!("{n} neighbour(s)"));
+        }
+    }
+    tokio::task::yield_now().await;
+
     // 4) Over-the-air telemetry (CayenneLPP when supported).
     {
         let commands = match tokio::time::timeout(
@@ -6368,6 +6535,108 @@ async fn send_direct_text(
         EventPayload::String(err) => Err(err),
         _ => Err("Companion rejected the direct message.".into()),
     }
+}
+
+/// Drain one queued broadcast leg (contact DM or channel flood). Bypasses
+/// [`REPLY_GAP`] — operator blasts are intentional, not automatic bot replies.
+async fn flush_one_broadcast_leg(
+    db: &Arc<Db>,
+    meshcore: &MeshCore,
+    status: &Mutex<RadioStatus>,
+    connected_name: &str,
+    radio_id: i64,
+) -> Result<(), String> {
+    let Some(leg) = db.next_broadcast_leg().map_err(|err| err.to_string())? else {
+        return Ok(());
+    };
+    match leg.group_kind {
+        BroadcastGroupKind::Contact => {
+            let key = leg.member_key.trim().to_ascii_lowercase();
+            if !is_broadcast_pubkey(&key) {
+                let _ = db.mark_broadcast_leg(leg.id, "skipped", "invalid public key");
+                return Ok(());
+            }
+            let Some(commands) = tokio::time::timeout(SEND_LOCK_WAIT, meshcore.commands().lock())
+                .await
+                .ok()
+            else {
+                // Leave leg queued for the next tick (do not mark failed).
+                return Ok(());
+            };
+            match send_direct_text(&commands, meshcore.dispatcher(), &key, &leg.body).await {
+                Ok(info) => {
+                    let ack = hex::encode(info.expected_ack);
+                    let prefix = key.chars().take(12).collect::<String>();
+                    let raw = json!({
+                        "expected_ack": ack,
+                        "message_type": info.message_type,
+                        "timeout_ms": info.suggested_timeout,
+                        "broadcast_leg": leg.id,
+                        "broadcast_job": leg.job_id,
+                    });
+                    let _ = db.insert_message(
+                        "direct",
+                        "tx",
+                        Some(&key),
+                        &prefix,
+                        None,
+                        None,
+                        unix_now() as u32,
+                        &leg.body,
+                        &leg.body,
+                        None,
+                        None,
+                        &raw,
+                        "sent",
+                        Some(radio_id),
+                        "local",
+                    );
+                    let _ = db.mark_broadcast_leg(leg.id, "sent", "");
+                }
+                Err(err) => {
+                    let _ = db.mark_broadcast_leg(leg.id, "failed", &err);
+                }
+            }
+        }
+        BroadcastGroupKind::Channel => {
+            let slot = match db
+                .active_channel_slot_by_name(&leg.member_key)
+                .map_err(|err| err.to_string())?
+            {
+                Some(slot) => slot,
+                None => {
+                    let _ = db.mark_broadcast_leg(
+                        leg.id,
+                        "skipped",
+                        "channel missing or inactive",
+                    );
+                    return Ok(());
+                }
+            };
+            match transmit_channel_message(
+                db,
+                meshcore,
+                status,
+                connected_name,
+                radio_id,
+                slot,
+                &leg.body,
+                true,
+                false,
+            )
+            .await
+            {
+                Ok(()) => {
+                    let _ = db.mark_broadcast_leg(leg.id, "sent", "");
+                }
+                Err(err) => {
+                    let _ = db.mark_broadcast_leg(leg.id, "failed", &err);
+                }
+            }
+        }
+    }
+    tokio::time::sleep(BROADCAST_LEG_GAP).await;
+    Ok(())
 }
 
 async fn flush_one_outbound(

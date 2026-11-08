@@ -46,6 +46,10 @@ pub enum IconName {
     Plus,
     /// Open folder — reveal files in the system file manager.
     Folder,
+    /// Megaphone — Broadcast page.
+    Broadcast,
+    /// Pencil — edit row / group.
+    Pencil,
 }
 
 #[component]
@@ -228,6 +232,15 @@ fn icon_paths(name: IconName) -> &'static [&'static str] {
         IconName::Plus => &["M12 5v14", "M5 12h14"],
         IconName::Folder => &[
             "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
+        ],
+        IconName::Broadcast => &[
+            "M3 11v2a1 1 0 0 0 1 1h2l5 5V5L6 10H4a1 1 0 0 0-1 1z",
+            "M15.54 8.46a5 5 0 0 1 0 7.07",
+            "M19.07 4.93a10 10 0 0 1 0 14.14",
+        ],
+        IconName::Pencil => &[
+            "M12 20h9",
+            "M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z",
         ],
     }
 }

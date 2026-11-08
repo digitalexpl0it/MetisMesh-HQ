@@ -156,70 +156,6 @@ pub fn parse_advert_path(frame: &[u8]) -> Option<(Vec<u8>, usize)> {
     Some((path, hash_size))
 }
 
-/// Weighted edge for passive mesh traffic overlay (lon/lat pairs).
-#[derive(Debug, Clone, PartialEq)]
-pub struct TrafficEdge {
-    pub a: (f64, f64),
-    pub b: (f64, f64),
-    pub count: u32,
-    pub last_at: i64,
-}
-
-fn quantize_coord(lon: f64, lat: f64) -> (i64, i64) {
-    ((lon * 100_000.0).round() as i64, (lat * 100_000.0).round() as i64)
-}
-
-fn edge_key(a: (f64, f64), b: (f64, f64)) -> ((i64, i64), (i64, i64)) {
-    let qa = quantize_coord(a.0, a.1);
-    let qb = quantize_coord(b.0, b.1);
-    if qa <= qb {
-        (qa, qb)
-    } else {
-        (qb, qa)
-    }
-}
-
-/// Aggregate consecutive GPS vertices from map lines into undirected traffic edges.
-pub fn aggregate_traffic_edges(lines: &[(MapLine, i64)]) -> Vec<TrafficEdge> {
-    use std::collections::HashMap;
-    let mut map: HashMap<((i64, i64), (i64, i64)), TrafficEdge> = HashMap::new();
-    for (line, at) in lines {
-        for w in line.coords.windows(2) {
-            let a = w[0];
-            let b = w[1];
-            if a == b {
-                continue;
-            }
-            let key = edge_key(a, b);
-            let entry = map.entry(key).or_insert_with(|| TrafficEdge {
-                a,
-                b,
-                count: 0,
-                last_at: *at,
-            });
-            entry.count = entry.count.saturating_add(1);
-            if *at >= entry.last_at {
-                entry.last_at = *at;
-                // Keep freshest endpoint coords for drawing.
-                entry.a = a;
-                entry.b = b;
-            }
-        }
-    }
-    let mut out: Vec<_> = map.into_values().collect();
-    out.sort_by(|l, r| r.count.cmp(&l.count).then(r.last_at.cmp(&l.last_at)));
-    out
-}
-
-/// Line width hint for traffic overlay (1..=8).
-pub fn traffic_line_width(count: u32, max_count: u32) -> f64 {
-    if max_count <= 1 {
-        return 2.5;
-    }
-    let t = (count as f64 / max_count as f64).clamp(0.0, 1.0);
-    1.5 + t * 6.5
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,18 +253,4 @@ mod tests {
         assert!(parse_advert_path(&frame).is_none());
     }
 
-    #[test]
-    fn traffic_edges_merge_same_segment() {
-        let line = MapLine {
-            coords: vec![(-122.0, 37.0), (-121.0, 38.0)],
-            dashed: true,
-            outbound: false,
-            hops: 1,
-        };
-        let edges = aggregate_traffic_edges(&[(line.clone(), 10), (line, 20)]);
-        assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0].count, 2);
-        assert_eq!(edges[0].last_at, 20);
-        assert!((traffic_line_width(2, 2) - 8.0).abs() < 0.01);
-    }
 }

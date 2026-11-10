@@ -302,6 +302,54 @@ pub async fn map_pulse_at(lng: f64, lat: f64, color: Option<&str>, kind: &str) {
     let _ = document::eval(&js).await;
 }
 
+/// Growing ping beam from HQ/companion coords to a pin, then sonar on arrival.
+/// `waypoints` are optional mid-hop `[lng, lat]` pins when repeaters resolve.
+pub async fn map_play_ping_fx(
+    pubkey: &str,
+    from_lng: f64,
+    from_lat: f64,
+    color: Option<&str>,
+    waypoints: &[(f64, f64)],
+) {
+    let waypoints_json = {
+        let mut parts = Vec::with_capacity(waypoints.len());
+        for (lng, lat) in waypoints {
+            parts.push(format!("[{lng},{lat}]"));
+        }
+        format!("[{}]", parts.join(","))
+    };
+    let js = format!(
+        r#"(() => {{
+  if (!window.MetisMap || !window.MetisMap.playPingFx) return false;
+  return window.MetisMap.playPingFx({id}, {pubkey}, {lng}, {lat}, {color}, {waypoints});
+}})()"#,
+        id = escape_js_string(MAP_ID),
+        pubkey = escape_js_string(pubkey),
+        lng = from_lng,
+        lat = from_lat,
+        color = color
+            .map(escape_js_string)
+            .unwrap_or_else(|| "null".into()),
+        waypoints = waypoints_json,
+    );
+    let _ = document::eval(&js).await;
+}
+
+/// Write ping status into the open pin detail card (`pending` / `ok` / `err`).
+pub async fn map_set_ping_result(pubkey: &str, state: &str, text: &str) {
+    let js = format!(
+        r#"(() => {{
+  if (!window.MetisMap || !window.MetisMap.setPingResult) return false;
+  return window.MetisMap.setPingResult({id}, {pubkey}, {state}, {text});
+}})()"#,
+        id = escape_js_string(MAP_ID),
+        pubkey = escape_js_string(pubkey),
+        state = escape_js_string(state),
+        text = escape_js_string(text),
+    );
+    let _ = document::eval(&js).await;
+}
+
 /// Durable spotlight pin for a chat-shared location (until cleared/replaced).
 pub async fn map_set_temp_pin(lng: f64, lat: f64, label: &str) {
     let js = format!(
@@ -363,6 +411,17 @@ pub async fn map_take_favorite_toggle() -> Option<String> {
         r#"(() => {
   var raw = window.__metisMapFavoriteToggle || "";
   window.__metisMapFavoriteToggle = null;
+  return raw;
+})()"#,
+    )
+    .await
+}
+
+pub async fn map_take_ping() -> Option<String> {
+    eval_string(
+        r#"(() => {
+  var raw = window.__metisMapPing || "";
+  window.__metisMapPing = null;
   return raw;
 })()"#,
     )

@@ -6,8 +6,8 @@ use super::fuzzy_score;
 use super::icons::{Icon, IconName};
 use super::state;
 use super::widgets::{
-    clamp_mesh_text, Badge, Button, ButtonKind, Card, ConversationAvatar, MeshTextCount,
-    PageHeading, SelectInput, SlideDownPanel, TextInput,
+    clamp_mesh_text, Badge, Button, ButtonKind, Card, ComposeField, ConversationAvatar,
+    MeshTextCount, PageHeading, SelectInput, SlideDownPanel, TextInput,
 };
 use crate::db::{is_broadcast_pubkey, BroadcastGroupKind};
 use crate::radio::{prefix_channel_sender, RadioStatus};
@@ -273,15 +273,12 @@ fn BroadcastSendPanel(linked: bool, tick: u32) -> Element {
                             Icon { name: IconName::Messages, size: 12 }
                             "Message"
                         }
-                        textarea {
-                            class: "{TEXTAREA_CLASS}",
-                            rows: "4",
-                            value: "{draft()}",
-                            placeholder: "Message to send to every member…",
-                            oninput: move |event: FormEvent| {
-                                draft.set(event.value());
-                                canned_id.set(0);
-                            },
+                        ComposeField {
+                            text: draft,
+                            placeholder: "Message to send to every member…".to_string(),
+                            multiline: true,
+                            class_name: Some(TEXTAREA_CLASS.to_string()),
+                            on_change: move |_| canned_id.set(0),
                         }
                         div { class: "mt-1 flex flex-wrap items-center justify-between gap-2",
                             MeshTextCount {
@@ -1099,12 +1096,11 @@ fn BroadcastCannedPanel() -> Element {
                         Icon { name: IconName::Messages, size: 12 }
                         "Body"
                     }
-                    textarea {
-                        class: "{TEXTAREA_CLASS}",
-                        rows: "4",
-                        value: "{body()}",
-                        placeholder: "Preset message body…",
-                        oninput: move |event: FormEvent| body.set(event.value()),
+                    ComposeField {
+                        text: body,
+                        placeholder: "Preset message body…".to_string(),
+                        multiline: true,
+                        class_name: Some(TEXTAREA_CLASS.to_string()),
                     }
                     div { class: "mt-1",
                         MeshTextCount { text: body() }

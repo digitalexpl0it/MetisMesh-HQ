@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+### Map
+
+- Pin detail **Ping**: mesh binary status probe (SNR / RSSI / noise / battery toast); uses airtime; 8s rate limit shared with Trace
+- Map Ping FX: smooth canvas beam from HQ pin to the target, then sonar on arrival; pin detail card shows Ping pending/ok/err; longer mesh timeouts + clearer failure copy
+- Refresh contact / Ping: prefetch advert-path, push companion contact only for route/direct (never flood — Status cannot flood and path_len=-1 was wiping companion out_path); skip neighbours unless claimed; clearer “no path” copy; 0-hop channel RX marks direct route
+- meshcore-rs: binary Status/Telemetry pending tags stay registered for the full operator wait (not only companion `suggested_timeout`) so late replies still match
+
+### Messages
+
+- Phone-app contact shares `<pubkey:type:name>` in channel/DM bubbles become the same Add / Copy chip as `meshcore://contact/add`
+- Channel bubble action bar (Reply / Quote / Copy / …): close the hover gap so moving from the bubble onto the pill no longer hides it (Windows WebView2)
+- Compose spellcheck (Phase N): OS/WebView underlines + right-click suggestions on channel/DM/Broadcast compose; Settings → Preferences → **Spellcheck compose** (default on); native context menu allowed only on compose fields
+- Compose bars use `<textarea>` (not `<input>`) so WebView spell underlines actually appear
+- Linux: enable WebKitGTK WebContext spellcheck + dictionary languages (HTML `spellcheck` alone showed Cut/Copy/Paste with no suggestions)
+- Compose typing: draft Signal reads stay in a compose dock (not the message list) so keystrokes no longer re-render the thread; spellcheck preference cached (no SQLite per key)
+- Map Ping beam follows resolved hop pins when HQ has repeater GPS; otherwise straight HQ→target (dashed). Toast/detail note shows direct / hop count / “no repeater pins”
+- **Ping** also on Messages rail right-click (DM/Contacts), channel/DM bubble actions when a pubkey is known, and Roster row actions
+
+### Help
+
+- Map / Messages notes for Ping and compose spellcheck
+
+### Local API
+
+- Local API **v2**: OpenAPI at `/api/v1/openapi.json` and offline docs UI at `/api/v1/docs` (docs + OpenAPI public; data routes still need bearer); Settings → Local API → **Open API docs** / **Copy docs URL**
+- Read channel/DM history (`/channels/{name}/messages`, `/dms`, `/dms/{pubkey}/messages`), infra detail + samples, expanded `/stats` and `/metrics`
+- Heavy-route rate limit (messages/samples) in addition to the global per-minute cap; `429` includes `retry_after_secs`
+
+### Flasher / Backup
+
+- **Node identity kits** (`.metisnode`): USB-only encrypted backup of MeshCore `prv.key` / public key (+ name/radio snapshot), stored under `data/node-kits/` separate from HQ `.metisbak`
+- Settings → Data → **Node identity kits**: backup/restore over USB, import/export/delete
+- Desktop Flasher and LAN locker prompt to back up before flash and restore after; LAN API `GET/POST /api/node-kit(s)`
+
 ## 0.1.14 — 2026-11-08
 
 Package version `0.1.14` (Cargo / About). Windows Details may show `0.1.14.0`.

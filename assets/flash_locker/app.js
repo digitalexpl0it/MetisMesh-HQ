@@ -412,7 +412,11 @@
         logLine("No asset to flash.");
         return;
       }
-      await flashAsset(asset, erase.querySelector("input").checked);
+      const eraseFirst = erase.querySelector("input").checked;
+      const go = await maybeBackupBeforeFlash(eraseFirst, role);
+      if (!go) return;
+      await flashAsset(asset, eraseFirst);
+      await maybeRestoreAfterFlash();
     });
     actions.appendChild(flashBtn);
 
@@ -1078,8 +1082,13 @@
       "<ul>" +
       "<li><strong>Enter DFU mode</strong> — optional 1200-baud reset into the bootloader (UF2 drive or serial DFU) without starting a full flash.</li>" +
       "<li>Leave erase unchecked for a normal update (full erase wipes node identity).</li>" +
+      "<li>Before Flash!, HQ can prompt to back up identity over USB into an encrypted <code>.metisnode</code> kit; after flash you can restore it.</li>" +
       "<li>If sync fails, hold BOOT / double-tap RESET and try again.</li>" +
       "</ul>" +
+      "</div>" +
+      '<div class="help-block">' +
+      "<h3>Node identity kits</h3>" +
+      "<p>USB-only private key backup (not LoRa). Kits live on HQ under <code>node-kits/</code>, separate from HQ <code>.metisbak</code>. Passphrase-encrypts <code>prv.key</code>; never paste keys into chat.</p>" +
       "</div>" +
       '<div class="help-block">' +
       "<h3>OTAFIX bootloader (nRF)</h3>" +
@@ -1569,6 +1578,301 @@
       try {
         await dfuPort.close();
       } catch (_) {}
+    }
+  }
+
+  function firstHexBlob(text, minLen) {
+    let best = "";
+    let cur = "";
+    for (const c of text) {
+      if (/[0-9a-fA-F]/.test(c)) cur += c.toLowerCase();
+      else {
+        if (cur.length >= minLen && cur.length > best.length) best = cur;
+        cur = "";
+      }
+    }
+    if (cur.length >= minLen && cur.length > best.length) best = cur;
+    return best;
+  }
+
+  function stripCliNoise(raw) {
+    return String(raw || "")
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(
+        (l) =>
+          l &&
+          !l.startsWith(">") &&
+          l.toLowerCase() !== "ok" &&
+          !l.startsWith("→")
+      )
+      .join(" ")
+      .trim();
+  }
+
+  async function openTempSerial() {
+    const port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200 });
+    const writer = port.writable.getWriter();
+    const reader = port.readable.getReader();
+    return { port, writer, reader };
+  }
+
+  async function closeTempSerial(sess) {
+    if (!sess) return;
+    try {
+      sess.reader.releaseLock();
+    } catch (_) {}
+    try {
+      sess.writer.releaseLock();
+    } catch (_) {}
+    try {
+      await sess.port.close();
+    } catch (_) {}
+  }
+
+  async function serialCmd(sess, command, waitMs) {
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+    await sess.writer.write(enc.encode(command + "\n"));
+    const deadline = Date.now() + (waitMs || 800);
+    let out = "";
+    while (Date.now() < deadline) {
+      const remain = Math.max(1, deadline - Date.now());
+      const raced = await Promise.race([
+        sess.reader.read(),
+        new Promise((resolve) =>
+          setTimeout(() => resolve({ timeout: true }), remain)
+        ),
+      ]);
+      if (raced.timeout) break;
+      const { value, done } = raced;
+      if (done) break;
+      if (value && value.length) out += dec.decode(value, { stream: true });
+    }
+    return out;
+  }
+
+  async function harvestKitOverSerial(roleHint) {
+    const sess = await openTempSerial();
+    try {
+      await serialCmd(sess, "", 200);
+      const nameRaw = await serialCmd(sess, "get name", 800);
+      const pubRaw = await serialCmd(sess, "get public.key", 1200);
+      const prvRaw = await serialCmd(sess, "get prv.key", 1500);
+      const public_key = firstHexBlob(pubRaw, 32);
+      const private_key = firstHexBlob(prvRaw, 32);
+      if (!public_key || !private_key) {
+        throw new Error(
+          "Could not read keys — is the node running MeshCore CLI on this USB port?"
+        );
+      }
+      const kit = {
+        public_key,
+        private_key,
+        name: stripCliNoise(nameRaw),
+        role_hint: roleHint || "",
+        board: stripCliNoise(await serialCmd(sess, "board", 600)),
+        radio: stripCliNoise(await serialCmd(sess, "get radio", 800)).slice(0, 160),
+        lat: stripCliNoise(await serialCmd(sess, "get lat", 500)),
+        lon: stripCliNoise(await serialCmd(sess, "get lon", 500)),
+        advert_interval: stripCliNoise(
+          await serialCmd(sess, "get advert.interval", 500)
+        ),
+        path_hash_mode: stripCliNoise(
+          await serialCmd(sess, "get path.hash.mode", 500)
+        ),
+        guest_password: stripCliNoise(
+          await serialCmd(sess, "get guest.password", 500)
+        ),
+      };
+      return kit;
+    } finally {
+      await closeTempSerial(sess);
+    }
+  }
+
+  async function restoreKitOverSerial(kit) {
+    const sess = await openTempSerial();
+    try {
+      const prv = String(kit.private_key || "").replace(/[^0-9a-fA-F]/g, "");
+      const setRaw = await serialCmd(sess, "set prv.key " + prv, 2000);
+      const low = setRaw.toLowerCase();
+      if (low.includes("error") || low.includes("fail") || low.includes("denied")) {
+        throw new Error("set prv.key failed");
+      }
+      logLine("[private key set]");
+      try {
+        await serialCmd(sess, "reboot", 400);
+      } catch (_) {}
+    } finally {
+      await closeTempSerial(sess);
+    }
+    await new Promise((r) => setTimeout(r, 3000));
+    const sess2 = await openTempSerial();
+    try {
+      if (kit.name) {
+        await serialCmd(sess2, "set name " + kit.name, 800);
+      }
+      if (kit.lat) await serialCmd(sess2, "set lat " + kit.lat, 500);
+      if (kit.lon) await serialCmd(sess2, "set lon " + kit.lon, 500);
+      if (kit.advert_interval) {
+        await serialCmd(
+          sess2,
+          "set advert.interval " + kit.advert_interval,
+          500
+        );
+      }
+      if (kit.guest_password) {
+        await serialCmd(
+          sess2,
+          "set guest.password " + kit.guest_password,
+          500
+        );
+      }
+      const pubRaw = await serialCmd(sess2, "get public.key", 1500);
+      const got = firstHexBlob(pubRaw, 32);
+      const expect = String(kit.public_key || "")
+        .replace(/[^0-9a-fA-F]/g, "")
+        .toLowerCase();
+      if (got && expect && got !== expect) {
+        throw new Error("Public key mismatch after restore");
+      }
+      logLine(
+        "Identity restored" +
+          (got ? " (" + got.slice(0, 8) + "…)" : "") +
+          "."
+      );
+    } finally {
+      await closeTempSerial(sess2);
+    }
+  }
+
+  function promptKitPassphrase(title) {
+    const a = window.prompt(title + "\n\nKit passphrase:");
+    if (a === null) return null;
+    const b = window.prompt("Confirm kit passphrase:");
+    if (b === null) return null;
+    if (!a.trim() || a !== b) {
+      window.alert("Passphrases empty or do not match.");
+      return null;
+    }
+    return a;
+  }
+
+  async function uploadNodeKit(kit, passphrase) {
+    const res = await fetch("/api/node-kit", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(Object.assign({ passphrase: passphrase }, kit)),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || "kit upload failed (" + res.status + ")");
+    }
+    return data;
+  }
+
+  async function unlockNodeKit(id, passphrase) {
+    const res = await fetch("/api/node-kit/unlock", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: id, passphrase: passphrase }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || "unlock failed (" + res.status + ")");
+    }
+    return data;
+  }
+
+  async function maybeBackupBeforeFlash(eraseFirst, role) {
+    const msg = eraseFirst
+      ? "Erase wipes the MeshCore private key. Back up identity over USB into an encrypted kit on this HQ first?"
+      : "Back up this node’s identity over USB before flashing?";
+    if (!window.confirm(msg)) {
+      if (
+        eraseFirst &&
+        !window.confirm("Flash with erase without saving a kit backup?")
+      ) {
+        return false;
+      }
+      return true;
+    }
+    if (!("serial" in navigator)) {
+      logLine("Web Serial required to back up identity.");
+      return false;
+    }
+    const pass = promptKitPassphrase("Encrypt node identity kit");
+    if (pass === null) return false;
+    try {
+      await disconnectConsole();
+      showSheetFlash(true);
+      flashLog.hidden = false;
+      logLine("Backing up identity over USB… pick the app serial port.");
+      const kit = await harvestKitOverSerial(
+        (role && (role.role || role.label)) || ""
+      );
+      logLine("[private key read]");
+      const saved = await uploadNodeKit(kit, pass);
+      logLine("Kit saved on HQ: " + (saved.file_name || saved.id || "ok"));
+      return true;
+    } catch (err) {
+      logLine("Identity backup failed: " + err);
+      return window.confirm("Backup failed. Continue flash anyway?");
+    }
+  }
+
+  async function maybeRestoreAfterFlash() {
+    if (
+      !window.confirm(
+        "Flash finished. Restore a node identity kit over USB now?"
+      )
+    ) {
+      return;
+    }
+    try {
+      const listRes = await fetch("/api/node-kits", {
+        credentials: "same-origin",
+      });
+      const listData = await listRes.json().catch(() => ({}));
+      const kits = listData.kits || [];
+      if (!kits.length) {
+        window.alert("No kits on this HQ yet.");
+        return;
+      }
+      const names = kits
+        .map(
+          (k, i) =>
+            i +
+            1 +
+            ") " +
+            (k.name || "node") +
+            " " +
+            (k.public_key_prefix || "") +
+            "… — " +
+            (k.file_name || k.id)
+        )
+        .join("\n");
+      const pick = window.prompt(
+        "Enter kit number to restore:\n\n" + names
+      );
+      if (pick === null) return;
+      const idx = Number(pick) - 1;
+      if (!(idx >= 0 && idx < kits.length)) {
+        window.alert("Invalid kit number.");
+        return;
+      }
+      const id = kits[idx].id || kits[idx].file_name;
+      const pass = window.prompt("Kit passphrase:");
+      if (pass === null || !pass.trim()) return;
+      const unlocked = await unlockNodeKit(id, pass.trim());
+      logLine("Restoring identity over USB… pick the serial port.");
+      await restoreKitOverSerial(unlocked);
+    } catch (err) {
+      logLine("Identity restore failed: " + err);
     }
   }
 

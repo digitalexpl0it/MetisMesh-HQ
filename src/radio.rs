@@ -341,6 +341,11 @@ pub enum RadioCmd {
         pubkey_hex: String,
         reply: oneshot::Sender<Result<meshcore_rs::events::StatusData, String>>,
     },
+    /// Lightweight reachability probe (binary status only — no neighbours).
+    PingNode {
+        pubkey_hex: String,
+        reply: oneshot::Sender<Result<meshcore_rs::events::StatusData, String>>,
+    },
     /// Sign bytes with the primary companion (Ed25519). Used by map upload.
     SignBytes {
         data: Vec<u8>,
@@ -1468,6 +1473,19 @@ impl RadioHandle {
     ) -> oneshot::Receiver<Result<meshcore_rs::events::StatusData, String>> {
         let (tx, rx) = oneshot::channel();
         self.pool.route_to_primary(RadioCmd::ProbeInfraStatus {
+            pubkey_hex,
+            reply: tx,
+        });
+        rx
+    }
+
+    /// Mesh status ping to any known pubkey (uses airtime; no neighbours follow-up).
+    pub fn ping_node(
+        &self,
+        pubkey_hex: String,
+    ) -> oneshot::Receiver<Result<meshcore_rs::events::StatusData, String>> {
+        let (tx, rx) = oneshot::channel();
+        self.pool.route_to_primary(RadioCmd::PingNode {
             pubkey_hex,
             reply: tx,
         });
@@ -3120,12 +3138,32 @@ async fn run_infra_status_probe(
     status: Arc<Mutex<RadioStatus>>,
     pubkey_hex: &str,
 ) -> Result<meshcore_rs::events::StatusData, String> {
+    run_binary_status_probe(
+        meshcore,
+        status,
+        pubkey_hex,
+        "Refreshing infrastructure status",
+        "Infrastructure status refreshed.",
+        "Status refresh",
+    )
+    .await
+}
+
+/// Binary Status (0x01) over the mesh — the practical MeshCore “ping”.
+async fn run_binary_status_probe(
+    meshcore: Arc<MeshCore>,
+    status: Arc<Mutex<RadioStatus>>,
+    pubkey_hex: &str,
+    busy_prefix: &str,
+    ok_line: &str,
+    err_prefix: &str,
+) -> Result<meshcore_rs::events::StatusData, String> {
     let key = parse_pubkey_full(pubkey_hex)?;
     write_status(
         &status,
         "connected",
         format!(
-            "Refreshing infrastructure status ({})…",
+            "{busy_prefix} ({})…",
             &pubkey_hex.chars().take(12).collect::<String>()
         ),
     );
@@ -3137,7 +3175,7 @@ async fn run_infra_status_probe(
     {
         Ok(guard) => guard,
         Err(_) => {
-            let msg = "Status refresh skipped — radio busy.".to_string();
+            let msg = format!("{err_prefix} skipped — radio busy.");
             write_status(&status, "connected", msg.clone());
             return Err(msg);
         }
@@ -3148,11 +3186,100 @@ async fn run_infra_status_probe(
     drop(commands);
     match result {
         Ok(info) => {
-            write_status(&status, "connected", "Infrastructure status refreshed.");
+            write_status(&status, "connected", ok_line.to_string());
             Ok(info)
         }
         Err(err) => {
-            let msg = format!("Status refresh failed: {err}");
+            let msg = format!("{err_prefix} failed: {err}");
+            write_status(&status, "connected", msg.clone());
+            Err(msg)
+        }
+    }
+}
+
+/// Operator ping: longer MsgSent + Status waits than background infra probes.
+const PING_MSG_SENT_TIMEOUT: Duration = Duration::from_secs(15);
+const PING_STATUS_MAX: Duration = Duration::from_secs(60);
+
+async fn run_node_ping(
+    db: &Db,
+    meshcore: Arc<MeshCore>,
+    status: Arc<Mutex<RadioStatus>>,
+    pubkey_hex: &str,
+) -> Result<meshcore_rs::events::StatusData, String> {
+    trace_rate_allows(pubkey_hex)?;
+    let key = parse_pubkey_full(pubkey_hex)?;
+    let short: String = pubkey_hex.chars().take(12).collect();
+    write_status(
+        &status,
+        "connected",
+        format!("Pinging ({short})…"),
+    );
+    // Refresh companion advert-path cache into HQ *before* we touch the contact
+    // table. MeshCore cannot flood binary Status requests; we need a real route
+    // or a direct (0-hop) contact — never path_len=-1.
+    match fetch_advert_path(db, meshcore.as_ref(), pubkey_hex, None, "operator").await {
+        Ok(fetch) => {
+            if fetch.path.is_empty() && fetch.hop_count == 0 {
+                let _ = db.set_route(pubkey_hex, &[]);
+            } else if !fetch.path.is_empty() {
+                let _ = db.set_route(pubkey_hex, &fetch.path);
+            }
+            hq_log!(
+                debug,
+                "ping path source={} hops={} for {short}",
+                fetch.source,
+                fetch.hop_count
+            );
+        }
+        Err(err) => hq_log!(debug, "ping path prefetch: {err}"),
+    }
+    let mut commands = match tokio::time::timeout(SEND_LOCK_WAIT, meshcore.commands().lock()).await
+    {
+        Ok(guard) => guard,
+        Err(_) => {
+            let msg =
+                "Ping skipped — radio busy (wait for probes/sends, then try again).".to_string();
+            write_status(&status, "connected", msg.clone());
+            return Err(msg);
+        }
+    };
+    let route_mode = match ensure_radio_contact_for_probe(db, &commands, pubkey_hex).await {
+        Ok(mode) => {
+            hq_log!(debug, "ping radio contact mode={mode} for {short}");
+            mode
+        }
+        Err(err) => {
+            hq_log!(debug, "ping ensure contact: {err}");
+            "unknown"
+        }
+    };
+    // MsgSent uses default_timeout (normally 5s) — too tight when the companion
+    // is mid-probe. Status wait registers for the same window (meshcore-rs).
+    commands.set_default_timeout(PING_MSG_SENT_TIMEOUT);
+    let result = commands
+        .request_status_with_timeout(Destination::Bytes(key.to_vec()), PING_STATUS_MAX)
+        .await;
+    commands.set_default_timeout(Duration::from_secs(5));
+    drop(commands);
+    match result {
+        Ok(info) => {
+            write_status(&status, "connected", "Ping ok.");
+            Ok(info)
+        }
+        Err(err) => {
+            let hint = match route_mode {
+                "route" | "direct" => {
+                    "no status reply (out of range, asleep, or path stale — try Trace / hear advert)"
+                        .to_string()
+                }
+                "unchanged" => {
+                    "no cached unicast route yet (Status cannot flood — hear their advert or Trace first)"
+                        .to_string()
+                }
+                _ => "no status reply".to_string(),
+            };
+            let msg = format!("Ping failed: {err} — {hint}");
             write_status(&status, "connected", msg.clone());
             Err(msg)
         }
@@ -4718,6 +4845,17 @@ async fn run_session(
                             let _ = reply.send(outcome);
                         });
                     }
+                    Some(RadioCmd::PingNode { pubkey_hex, reply }) => {
+                        let meshcore = meshcore.clone();
+                        let status = Arc::clone(status);
+                        let db = Arc::clone(db);
+                        tokio::spawn(async move {
+                            let outcome =
+                                run_node_ping(db.as_ref(), meshcore, status, &pubkey_hex)
+                                    .await;
+                            let _ = reply.send(outcome);
+                        });
+                    }
                     Some(RadioCmd::SignBytes { data, reply }) => {
                         let commands = meshcore.commands().lock().await;
                         let outcome = match commands.sign(&data, 128).await {
@@ -5539,7 +5677,14 @@ async fn handle_event(
                 .map_err(|err| err.to_string())?;
             if let (Some(message_id), Some(pubkey)) = (inserted, sender_pubkey.as_deref()) {
                 let _ = db.touch_node_radio(pubkey, radio_id);
-                remember_route(db, meshcore, pubkey, message_id).await;
+                // Zero-hop channel RX = direct RF; mark a unicast-capable route.
+                // Multi-hop channel frames do not include reverse path bytes.
+                if message.path_len == 0 {
+                    let _ = db.set_route(pubkey, &[]);
+                    let _ = db.save_path(Some(message_id), Some(pubkey), "direct", &[], 1);
+                } else {
+                    remember_route(db, meshcore, pubkey, message_id).await;
+                }
             }
             // MeshCore-style session speakers under the channel in the rail —
             // live RX only (not connect-queue drain / history replay).
@@ -6041,7 +6186,7 @@ fn trace_rate_allows(pubkey_hex: &str) -> Result<(), String> {
         let wait = TRACE_COOLDOWN.saturating_sub(now.saturating_duration_since(*prev));
         if !wait.is_zero() {
             return Err(format!(
-                "Rate-limited — wait {}s before tracing again.",
+                "Rate-limited — wait {}s before probing again.",
                 wait.as_secs().max(1)
             ));
         }
@@ -6240,9 +6385,8 @@ async fn fetch_advert_path(
                 &path,
                 hash_size as i64,
             );
-            if kind == "path_update" || kind == "direct" {
-                let _ = db.set_route(pubkey_hex, &path);
-            }
+            // Advert-path cache is a usable reverse route for Status/DM — keep it.
+            let _ = db.set_route(pubkey_hex, &path);
             return Ok(advert_fetch_from_path(path, hash_size, source));
         }
         // Unrelated Unknown/PathUpdate won the race — keep listening briefly.
@@ -6271,9 +6415,7 @@ async fn fetch_advert_path(
                         &path,
                         hash_size as i64,
                     );
-                    if kind == "path_update" || kind == "direct" {
-                        let _ = db.set_route(pubkey_hex, &path);
-                    }
+                    let _ = db.set_route(pubkey_hex, &path);
                     return Ok(advert_fetch_from_path(path, hash_size, source));
                 }
             }
@@ -6295,8 +6437,75 @@ async fn run_operator_path_fetch(
     fetch_advert_path(db, meshcore, pubkey_hex, None, "operator").await
 }
 
-const CONTACT_REFRESH_STATUS_TIMEOUT: Duration = Duration::from_secs(15);
-const CONTACT_REFRESH_TELEM_TIMEOUT: Duration = Duration::from_secs(15);
+const CONTACT_REFRESH_STATUS_TIMEOUT: Duration = Duration::from_secs(25);
+const CONTACT_REFRESH_TELEM_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Push/update this node on the companion contact table so unicast Status/DM
+/// can route. Only push when HQ has a real route (`hop_bytes`) or direct
+/// (`path_len == 0`). Never push flood (`path_len == -1`): MeshCore cannot
+/// flood binary Status/Telemetry, and overwriting the companion with 0xFF
+/// wipes any out_path it already had.
+async fn ensure_radio_contact_for_probe(
+    db: &Db,
+    commands: &meshcore_rs::commands::CommandHandler,
+    pubkey_hex: &str,
+) -> Result<&'static str, String> {
+    let key = parse_pubkey_full(pubkey_hex)?;
+    let node = db
+        .get_node(pubkey_hex)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Node not in HQ roster.".to_string())?;
+    let name = {
+        let n = node.name.trim();
+        if n.is_empty() {
+            pubkey_hex.chars().take(12).collect::<String>()
+        } else {
+            n.chars().take(32).collect()
+        }
+    };
+    let (path_len, out_path, mode): (i8, Vec<u8>, &'static str) =
+        if !node.hop_bytes.is_empty() {
+            let len = node.hop_bytes.len().min(64) as i8;
+            (len, node.hop_bytes.iter().take(64).copied().collect(), "route")
+        } else if node.path_len == 0 {
+            (0, Vec::new(), "direct")
+        } else {
+            // Leave the companion contact alone — no HQ route to apply.
+            return Ok("unchanged");
+        };
+    let adv_lat = node
+        .lat
+        .filter(|v| v.abs() > 0.000_01)
+        .map(|v| (v * 1_000_000.0).round() as i32)
+        .unwrap_or(0);
+    let adv_lon = node
+        .lon
+        .filter(|v| v.abs() > 0.000_01)
+        .map(|v| (v * 1_000_000.0).round() as i32)
+        .unwrap_or(0);
+    let last_advert = node.last_advert.unwrap_or(0).clamp(0, u32::MAX as i64) as u32;
+    let contact = Contact {
+        public_key: key,
+        contact_type: if matches!(node.contact_type, 1..=4) {
+            node.contact_type
+        } else {
+            1
+        },
+        flags: 0,
+        path_len,
+        out_path,
+        adv_name: name,
+        last_advert,
+        adv_lat,
+        adv_lon,
+        last_modification_timestamp: unix_now() as u32,
+    };
+    commands
+        .add_contact(&contact)
+        .await
+        .map_err(|e| format!("Companion contact update failed: {e}"))?;
+    Ok(mode)
+}
 
 /// Operator “Refresh contact”: pull companion contact row, path cache, then OTA status/telemetry.
 async fn run_contact_refresh(
@@ -6378,6 +6587,8 @@ async fn run_contact_refresh(
     }
 
     // 2) Path from companion advert-path cache / contact out_path (local — no mesh TX).
+    // Channel chat is flood — hearing someone on a channel does not create a
+    // unicast advert-path. "no path yet" is normal until their advert is cached.
     match fetch_advert_path(db, meshcore, &key_hex, None, "operator").await {
         Ok(fetch) => {
             let hops = if fetch.hop_count == 0 && fetch.source == "direct" {
@@ -6387,22 +6598,26 @@ async fn run_contact_refresh(
             };
             parts.push(format!("path {hops} ({})", fetch.source));
         }
-        Err(_) => parts.push("no path yet".into()),
+        Err(_) => parts.push(
+            "no unicast path yet (channel flood ≠ route — need advert/contact path)".into(),
+        ),
     }
     tokio::task::yield_now().await;
 
-    // 3) Over-the-air status request (battery / RF / uptime when the node answers).
+    // 3) Ensure companion contact row (flood if no path), then OTA status.
     let prior_tx = db
         .get_infra_status_latest(&key_hex)
         .ok()
         .flatten()
         .and_then(|r| r.tx_power_dbm);
+    let is_claimed = db
+        .claimed_pubkey_set()
+        .ok()
+        .map(|s| s.contains(&key_hex))
+        .unwrap_or(false);
     {
-        let commands = match tokio::time::timeout(
-            Duration::from_secs(8),
-            meshcore.commands().lock(),
-        )
-        .await
+        let mut commands = match tokio::time::timeout(SEND_LOCK_WAIT, meshcore.commands().lock())
+            .await
         {
             Ok(guard) => guard,
             Err(_) => {
@@ -6413,13 +6628,27 @@ async fn run_contact_refresh(
                 });
             }
         };
-        match commands
+        let route_mode = match ensure_radio_contact_for_probe(db, &commands, &key_hex).await {
+            Ok(mode) => {
+                parts.push(format!("radio contact ({mode})"));
+                mode
+            }
+            Err(err) => {
+                hq_log!(debug, "contact refresh ensure contact: {err}");
+                parts.push("radio contact update failed".into());
+                "unknown"
+            }
+        };
+        commands.set_default_timeout(PING_MSG_SENT_TIMEOUT);
+        let status_result = commands
             .request_status_with_timeout(
                 Destination::Bytes(key.to_vec()),
                 CONTACT_REFRESH_STATUS_TIMEOUT,
             )
-            .await
-        {
+            .await;
+        commands.set_default_timeout(Duration::from_secs(5));
+        drop(commands);
+        match status_result {
             Ok(info) => {
                 persist_infra_status_probe(db, &key_hex, &info, prior_tx);
                 parts.push(format!(
@@ -6427,23 +6656,34 @@ async fn run_contact_refresh(
                     info.battery_mv, info.last_rssi, info.snr
                 ));
             }
-            Err(_) => parts.push("status: no reply".into()),
+            Err(_) => {
+                if route_mode == "unchanged" {
+                    parts.push(
+                        "status: no reply (no cached route — Status cannot flood)"
+                            .into(),
+                    );
+                } else {
+                    parts.push("status: no reply".into());
+                }
+            }
         }
     }
     tokio::task::yield_now().await;
 
-    // 3b) Neighbour table for claimed map links (prefix match → claimed GPS peers).
-    probe_and_persist_neighbours(db, meshcore, &key_hex).await;
-    if let Ok(links) = db.list_infra_neighbor_links() {
-        let n = links
-            .iter()
-            .filter(|l| l.from_pubkey.eq_ignore_ascii_case(&key_hex))
-            .count();
-        if n > 0 {
-            parts.push(format!("{n} neighbour(s)"));
+    // 3b) Neighbours only for claimed infra (chat contacts rarely answer; timeouts look like bugs).
+    if is_claimed {
+        probe_and_persist_neighbours(db, meshcore, &key_hex).await;
+        if let Ok(links) = db.list_infra_neighbor_links() {
+            let n = links
+                .iter()
+                .filter(|l| l.from_pubkey.eq_ignore_ascii_case(&key_hex))
+                .count();
+            if n > 0 {
+                parts.push(format!("{n} neighbour(s)"));
+            }
         }
+        tokio::task::yield_now().await;
     }
-    tokio::task::yield_now().await;
 
     // 4) Over-the-air telemetry (CayenneLPP when supported).
     {

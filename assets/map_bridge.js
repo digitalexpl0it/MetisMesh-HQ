@@ -162,6 +162,27 @@
           "</b></div>"
       );
     }
+    {
+      var store =
+        (MetisMap.pingResults && MetisMap.pingResults[pubkey]) || null;
+      var pingText = store && store.text ? String(store.text) : "";
+      var pingState = store && store.state ? String(store.state) : "";
+      var pingClass =
+        pingState === "ok"
+          ? "metis-ping-ok"
+          : pingState === "err"
+            ? "metis-ping-err"
+            : pingState === "pending"
+              ? "metis-ping-pending"
+              : "";
+      bits.push(
+        '<div class="metis-map-detail-row metis-map-detail-ping" data-metis-ping-result="1"><span>Ping</span><b class="' +
+          pingClass +
+          '">' +
+          escapeHtml(pingText || "—") +
+          "</b></div>"
+      );
+    }
     if (pubkey) {
       bits.push(
         '<div class="metis-map-detail-row metis-map-detail-key"><span>Public key</span>' +
@@ -192,6 +213,13 @@
     }
     bits.push("</div></div>");
     bits.push('<div class="metis-map-detail-actions">');
+    if (pubkey) {
+      bits.push(
+        '<button type="button" class="metis-map-action" data-metis-ping="' +
+          escapeHtml(pubkey) +
+          '" title="Mesh status ping (uses airtime)">Ping</button>'
+      );
+    }
     bits.push(
       '<button type="button" class="metis-map-action" data-metis-fav="' +
         escapeHtml(pubkey) +
@@ -604,6 +632,12 @@
       wireSealedClick(btn, function () {
         var key = btn.getAttribute("data-metis-fav") || "";
         if (key) global.__metisMapFavoriteToggle = key;
+      });
+    });
+    root.querySelectorAll("[data-metis-ping]").forEach(function (btn) {
+      wireSealedClick(btn, function () {
+        var key = btn.getAttribute("data-metis-ping") || "";
+        if (key) global.__metisMapPing = key;
       });
     });
   }
@@ -1040,6 +1074,7 @@
       if (this.nodeFp) delete this.nodeFp[mapId];
       if (this.seenPubkeys) delete this.seenPubkeys[mapId];
       if (this.sonarMarkers) delete this.sonarMarkers[mapId];
+      this.clearPingBeam(mapId);
       if (!map) return;
       this.loseWebGl(map);
       try {
@@ -1650,6 +1685,297 @@
         } catch (_) {}
       });
       this.sonarMarkers[mapId] = [];
+    },
+
+    clearPingBeam: function (mapId) {
+      if (!this.pingBeams) this.pingBeams = {};
+      var job = this.pingBeams[mapId];
+      if (job) {
+        if (job.raf) {
+          try {
+            cancelAnimationFrame(job.raf);
+          } catch (_) {}
+        }
+        if (job.onMove && job.map) {
+          try {
+            job.map.off("move", job.onMove);
+            job.map.off("resize", job.onMove);
+          } catch (_) {}
+        }
+        if (job.canvas && job.canvas.parentNode) {
+          try {
+            job.canvas.parentNode.removeChild(job.canvas);
+          } catch (_) {}
+        }
+      }
+      delete this.pingBeams[mapId];
+    },
+
+    /**
+     * Growing line from companion/HQ → target (canvas overlay — smooth),
+     * then sonar on the pin. fromLng/fromLat are HQ coords.
+     */
+    playPingFx: function (mapId, pubkey, fromLng, fromLat, color, waypoints) {
+      var self = this;
+      var tint =
+        typeof color === "string" && color ? color : "rgba(134, 239, 172, 0.95)";
+      var key = String(pubkey || "");
+      var dest = null;
+      var data = this.nodeData[mapId];
+      var feats = (data && data.features) || [];
+      for (var i = 0; i < feats.length; i++) {
+        var f = feats[i];
+        var p = (f && f.properties) || {};
+        if (String(p.pubkey || "") !== key) continue;
+        var coords = f.geometry && f.geometry.coordinates;
+        if (coords && coords.length >= 2) {
+          dest = [coords[0], coords[1]];
+          if (!color && p.color) tint = p.color;
+        }
+        break;
+      }
+      if (!dest) {
+        return this.pulsePubkey(mapId, key, tint, "message");
+      }
+      if (
+        !isFinite(fromLng) ||
+        !isFinite(fromLat) ||
+        this.prefersReducedMotion()
+      ) {
+        return this.pulseAt(mapId, dest[0], dest[1], tint, "message");
+      }
+      var map = this.maps[mapId];
+      if (!map) return false;
+
+      this.clearPingBeam(mapId);
+
+      var start = [fromLng, fromLat];
+      var end = dest;
+      // Optional mid-hop pins (resolved repeaters). Always HQ → … → target.
+      var path = [start];
+      if (Array.isArray(waypoints)) {
+        for (var wi = 0; wi < waypoints.length; wi++) {
+          var wp = waypoints[wi];
+          if (
+            Array.isArray(wp) &&
+            wp.length >= 2 &&
+            isFinite(wp[0]) &&
+            isFinite(wp[1])
+          ) {
+            path.push([wp[0], wp[1]]);
+          }
+        }
+      }
+      path.push(end);
+      // Dedupe consecutive identical points.
+      var pts = [path[0]];
+      for (var pi = 1; pi < path.length; pi++) {
+        var prev = pts[pts.length - 1];
+        if (path[pi][0] !== prev[0] || path[pi][1] !== prev[1]) {
+          pts.push(path[pi]);
+        }
+      }
+      var segs = [];
+      var totalLen = 0;
+      for (var si = 0; si < pts.length - 1; si++) {
+        var a0 = pts[si];
+        var a1 = pts[si + 1];
+        var sdx = a1[0] - a0[0];
+        var sdy = a1[1] - a0[1];
+        var slen = Math.sqrt(sdx * sdx + sdy * sdy) || 1e-9;
+        segs.push({ a: a0, b: a1, len: slen });
+        totalLen += slen;
+      }
+      var host = map.getCanvasContainer();
+      var canvas = document.createElement("canvas");
+      canvas.className = "metis-ping-beam-canvas";
+      canvas.style.cssText =
+        "position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:2;";
+      host.appendChild(canvas);
+
+      function syncSize() {
+        var gl = map.getCanvas();
+        var dpr = window.devicePixelRatio || 1;
+        var w = gl.clientWidth;
+        var h = gl.clientHeight;
+        canvas.width = Math.max(1, Math.floor(w * dpr));
+        canvas.height = Math.max(1, Math.floor(h * dpr));
+        canvas.style.width = w + "px";
+        canvas.style.height = h + "px";
+        return dpr;
+      }
+
+      var duration = Math.min(
+        1600,
+        Math.max(700, 500 + totalLen * 16000 + (pts.length - 2) * 120)
+      );
+      var dashed = pts.length <= 2;
+      var t0 = performance.now();
+      var progress = 0;
+      var job = { raf: 0, canvas: canvas, map: map, onMove: null };
+      this.pingBeams[mapId] = job;
+
+      function pointAt(t) {
+        var remain = t * totalLen;
+        for (var i = 0; i < segs.length; i++) {
+          var seg = segs[i];
+          if (remain <= seg.len || i === segs.length - 1) {
+            var u = Math.min(1, remain / seg.len);
+            return [
+              seg.a[0] + (seg.b[0] - seg.a[0]) * u,
+              seg.a[1] + (seg.b[1] - seg.a[1]) * u,
+            ];
+          }
+          remain -= seg.len;
+        }
+        return end;
+      }
+
+      function draw() {
+        if (!self.pingBeams || self.pingBeams[mapId] !== job) return;
+        var dpr = syncSize();
+        var ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        var e = 1 - Math.pow(1 - progress, 2.4);
+        var tip = pointAt(e);
+        var traveled = e * totalLen;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        if (dashed) ctx.setLineDash([7, 7]);
+        else ctx.setLineDash([]);
+        // Full planned path (dim).
+        ctx.beginPath();
+        for (var di = 0; di < pts.length; di++) {
+          var dp = map.project(pts[di]);
+          if (di === 0) ctx.moveTo(dp.x, dp.y);
+          else ctx.lineTo(dp.x, dp.y);
+        }
+        ctx.strokeStyle = tint.replace(/[\d.]+\)$/, "0.16)");
+        if (ctx.strokeStyle === tint) ctx.strokeStyle = "rgba(134, 239, 172, 0.16)";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        // Grown beam so far.
+        ctx.beginPath();
+        var drawn = 0;
+        var started = false;
+        for (var gi = 0; gi < segs.length; gi++) {
+          var gseg = segs[gi];
+          var ga = map.project(gseg.a);
+          if (!started) {
+            ctx.moveTo(ga.x, ga.y);
+            started = true;
+          }
+          if (drawn + gseg.len <= traveled) {
+            var gb = map.project(gseg.b);
+            ctx.lineTo(gb.x, gb.y);
+            drawn += gseg.len;
+          } else {
+            var gt = map.project(tip);
+            ctx.lineTo(gt.x, gt.y);
+            break;
+          }
+        }
+        ctx.strokeStyle = tint.replace(/[\d.]+\)$/, "0.28)");
+        if (ctx.strokeStyle === tint) ctx.strokeStyle = "rgba(134, 239, 172, 0.28)";
+        ctx.lineWidth = 7;
+        ctx.stroke();
+        ctx.beginPath();
+        started = false;
+        drawn = 0;
+        for (var gi2 = 0; gi2 < segs.length; gi2++) {
+          var gseg2 = segs[gi2];
+          var ga2 = map.project(gseg2.a);
+          if (!started) {
+            ctx.moveTo(ga2.x, ga2.y);
+            started = true;
+          }
+          if (drawn + gseg2.len <= traveled) {
+            var gb2 = map.project(gseg2.b);
+            ctx.lineTo(gb2.x, gb2.y);
+            drawn += gseg2.len;
+          } else {
+            var gt2 = map.project(tip);
+            ctx.lineTo(gt2.x, gt2.y);
+            break;
+          }
+        }
+        ctx.strokeStyle = tint;
+        ctx.lineWidth = 2.4;
+        ctx.stroke();
+        ctx.setLineDash([]);
+        var tipPx = map.project(tip);
+        ctx.beginPath();
+        ctx.arc(tipPx.x, tipPx.y, 4.5, 0, Math.PI * 2);
+        ctx.fillStyle = tint;
+        ctx.globalAlpha = 0.85;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+
+      job.onMove = function () {
+        draw();
+      };
+      map.on("move", job.onMove);
+      map.on("resize", job.onMove);
+
+      function frame(now) {
+        if (!self.pingBeams || self.pingBeams[mapId] !== job) return;
+        progress = Math.min(1, (now - t0) / duration);
+        draw();
+        if (progress < 1) {
+          job.raf = requestAnimationFrame(frame);
+          return;
+        }
+        self.clearPingBeam(mapId);
+        self.pulseAt(mapId, end[0], end[1], tint, "message");
+      }
+      job.raf = requestAnimationFrame(frame);
+      return true;
+    },
+
+    /** Update / remember last ping result for the pin detail card. */
+    setPingResult: function (mapId, pubkey, state, text) {
+      if (!this.pingResults) this.pingResults = {};
+      var key = String(pubkey || "");
+      if (!key) return false;
+      this.pingResults[key] = {
+        state: String(state || ""),
+        text: String(text || ""),
+        at: Date.now(),
+      };
+      var popup = this.detailPopups && this.detailPopups[mapId];
+      if (!popup || typeof popup.getElement !== "function") return true;
+      var root = popup.getElement();
+      if (!root) return true;
+      var openKey =
+        (root.querySelector("[data-metis-ping]") &&
+          root.querySelector("[data-metis-ping]").getAttribute("data-metis-ping")) ||
+        "";
+      if (openKey !== key) return true;
+      var row = root.querySelector("[data-metis-ping-result]");
+      if (!row) {
+        var meta = root.querySelector(".metis-map-detail-meta");
+        if (!meta) return true;
+        row = document.createElement("div");
+        row.className = "metis-map-detail-row metis-map-detail-ping";
+        row.setAttribute("data-metis-ping-result", "1");
+        row.innerHTML = "<span>Ping</span><b></b>";
+        meta.appendChild(row);
+      }
+      var b = row.querySelector("b");
+      if (b) {
+        b.textContent = text || "—";
+        b.className =
+          state === "ok"
+            ? "metis-ping-ok"
+            : state === "err"
+              ? "metis-ping-err"
+              : "metis-ping-pending";
+      }
+      return true;
     },
 
     /** Durable spotlight pin until cleared / replaced (chat position shares). */

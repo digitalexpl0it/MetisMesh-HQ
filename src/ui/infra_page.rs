@@ -727,6 +727,13 @@ pub fn InfraPage(radio: RadioStatus) -> Element {
                                         }
                                     }
                                 }
+                                p { class: "mb-3 text-xs text-muted-foreground",
+                                    "Identity backup (private key) is USB-only — use Settings → Data → "
+                                    strong { "Node identity kits" }
+                                    " with this board on a serial port. LoRa cannot export "
+                                    code { "prv.key" }
+                                    "."
+                                }
 
                                 div { class: "mb-4 flex flex-wrap items-end gap-2",
                                     div { class: "min-w-[10rem]",

@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Metis Mesh HQ — Local API</title>
+  <style>
+    :root {
+      --bg: #0b1220;
+      --panel: #121a2a;
+      --line: #243044;
+      --text: #e8eef8;
+      --muted: #93a4bd;
+      --accent: #7dd3fc;
+      --ok: #86efac;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+    }
+    header {
+      padding: 1.25rem 1.5rem;
+      border-bottom: 1px solid var(--line);
+      background: #0e1624;
+    }
+    header h1 { margin: 0 0 0.35rem; font-size: 1.25rem; }
+    header p { margin: 0; color: var(--muted); font-size: 0.9rem; }
+    main { max-width: 56rem; margin: 0 auto; padding: 1.25rem 1.5rem 3rem; }
+    .bar {
+      display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center;
+      margin-bottom: 1.25rem; padding: 0.85rem; border: 1px solid var(--line);
+      border-radius: 0.55rem; background: var(--panel);
+    }
+    input, button, select {
+      font: inherit; border-radius: 0.4rem; border: 1px solid var(--line);
+      background: #0a1220; color: var(--text); padding: 0.45rem 0.65rem;
+    }
+    input { flex: 1; min-width: 12rem; }
+    button {
+      cursor: pointer; background: linear-gradient(90deg, #38bdf8, #818cf8);
+      border: 0; color: #041018; font-weight: 650;
+    }
+    button.ghost { background: transparent; border: 1px solid var(--line); color: var(--text); }
+    .path {
+      border: 1px solid var(--line); border-radius: 0.55rem; background: var(--panel);
+      margin-bottom: 0.65rem; overflow: hidden;
+    }
+    .path summary {
+      list-style: none; cursor: pointer; padding: 0.75rem 0.9rem;
+      display: flex; gap: 0.65rem; align-items: baseline; flex-wrap: wrap;
+    }
+    .path summary::-webkit-details-marker { display: none; }
+    .method {
+      font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+      padding: 0.15rem 0.4rem; border-radius: 0.25rem; background: #14532d; color: var(--ok);
+    }
+    .route { font-family: ui-monospace, Menlo, monospace; font-size: 0.86rem; }
+    .sum { color: var(--muted); font-size: 0.85rem; }
+    .body { padding: 0 0.9rem 0.9rem; border-top: 1px solid var(--line); }
+    pre {
+      margin: 0.5rem 0 0; padding: 0.75rem; border-radius: 0.4rem;
+      background: #060a12; border: 1px solid var(--line); overflow: auto;
+      font-size: 0.78rem; white-space: pre-wrap;
+    }
+    .err { color: #fca5a5; }
+    .ok { color: var(--ok); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Metis Mesh HQ Local API</h1>
+    <p>Read-only OpenAPI docs (offline). Paste your bearer token to try GET routes.</p>
+  </header>
+  <main>
+    <div class="bar">
+      <input id="token" type="password" placeholder="Bearer token" autocomplete="off" />
+      <button type="button" id="reload">Load OpenAPI</button>
+      <a class="ghost" id="raw" href="../openapi.json" style="padding:0.45rem 0.65rem;text-decoration:none;border:1px solid var(--line);border-radius:0.4rem;color:var(--text);">openapi.json</a>
+    </div>
+    <div id="meta" class="sum"></div>
+    <div id="paths"></div>
+  </main>
+  <script>
+    const prefix = location.pathname.replace(/\/docs\/?$/, "") || "/api/v1";
+    document.getElementById("raw").href = prefix + "/openapi.json";
+
+    function authHeaders() {
+      const t = document.getElementById("token").value.trim();
+      const h = { Accept: "application/json" };
+      if (t) h.Authorization = "Bearer " + t;
+      return h;
+    }
+
+    async function loadSpec() {
+      const meta = document.getElementById("meta");
+      const host = document.getElementById("paths");
+      host.innerHTML = "";
+      meta.textContent = "Loading…";
+      try {
+        const res = await fetch(prefix + "/openapi.json", { headers: authHeaders() });
+        if (!res.ok) throw new Error(res.status + " " + (await res.text()));
+        const spec = await res.json();
+        meta.innerHTML =
+          "<span class=\"ok\">" +
+          (spec.info && spec.info.title ? spec.info.title : "OpenAPI") +
+          " v" +
+          (spec.info && spec.info.version ? spec.info.version : "?") +
+          "</span> — " +
+          (spec.info && spec.info.description ? spec.info.description : "");
+        const paths = spec.paths || {};
+        Object.keys(paths)
+          .sort()
+          .forEach((p) => {
+            const item = paths[p];
+            const get = item.get || {};
+            const details = document.createElement("details");
+            details.className = "path";
+            const summary = document.createElement("summary");
+            summary.innerHTML =
+              '<span class="method">GET</span><span class="route">' +
+              p +
+              '</span><span class="sum">' +
+              (get.summary || "") +
+              "</span>";
+            details.appendChild(summary);
+            const body = document.createElement("div");
+            body.className = "body";
+            const tryBtn = document.createElement("button");
+            tryBtn.type = "button";
+            tryBtn.textContent = "Try GET";
+            const out = document.createElement("pre");
+            tryBtn.addEventListener("click", async () => {
+              out.className = "";
+              out.textContent = "…";
+              let path = p;
+              (get.parameters || [])
+                .filter((x) => x.in === "path")
+                .forEach((param) => {
+                  const v = window.prompt(param.name + " (path)", param.schema && param.schema.default != null ? String(param.schema.default) : "");
+                  if (v === null) return;
+                  path = path.replace("{" + param.name + "}", encodeURIComponent(v));
+                });
+              const qs = [];
+              (get.parameters || [])
+                .filter((x) => x.in === "query")
+                .forEach((param) => {
+                  const v = window.prompt(
+                    param.name + " (query, blank to skip)",
+                    param.schema && param.schema.default != null ? String(param.schema.default) : ""
+                  );
+                  if (v) qs.push(encodeURIComponent(param.name) + "=" + encodeURIComponent(v));
+                });
+              const url = prefix + path + (qs.length ? "?" + qs.join("&") : "");
+              try {
+                const r = await fetch(url, { headers: authHeaders() });
+                const text = await r.text();
+                let pretty = text;
+                try {
+                  pretty = JSON.stringify(JSON.parse(text), null, 2);
+                } catch (_) {}
+                out.textContent = r.status + " " + url + "\n\n" + pretty;
+                out.className = r.ok ? "ok" : "err";
+              } catch (err) {
+                out.textContent = String(err);
+                out.className = "err";
+              }
+            });
+            body.appendChild(tryBtn);
+            body.appendChild(out);
+            details.appendChild(body);
+            host.appendChild(details);
+          });
+      } catch (err) {
+        meta.innerHTML = '<span class="err">' + String(err) + "</span>";
+      }
+    }
+
+    document.getElementById("reload").addEventListener("click", loadSpec);
+    loadSpec();
+  </script>
+</body>
+</html>

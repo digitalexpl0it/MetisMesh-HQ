@@ -86,6 +86,7 @@ Mirror MeshCore community firmware while online; flash over USB when the interne
 - [x] **G4** Selective locker + Manage overlay: `selection.json`, Download-all (~1 GB), Latest/Previous, fuzzy/zebra/pills; sync downloads only the checked set and prunes orphans
 - [x] **G5** Outage readiness: Flasher “Ready for outage” banner; SHA-256 flash guard; Check integrity; Export/Import locker pack (`.zip`); offline runbook (About + `docs/OFFLINE_RUNBOOK.md`)
 - [x] **G6** LAN flash locker (opt-in HTTPS + room PIN): catalog browse, trusted download, ESP SLIP + nRF Adafruit DFU Web Serial, OTAFIX/erase sync + Download menu, Enter DFU, Custom local `.bin`/`.zip`, Repeater/Room setup wizard, in-locker Help
+- [x] **G7** Node identity kits (`.metisnode`): USB harvest/restore, Settings Backup section, Flasher + LAN backup-before / restore-after prompts
 
 ## Phase H — Standalone desktop ship
 
@@ -148,6 +149,7 @@ Opt-in local HTTP so external apps (and Home Assistant) can **pull** HQ status. 
 - [x] **M5** Rate-limit + audit: per-IP sliding window (default 120/min); audit only when settings change; `/health` includes `api_version`
 - [x] **M6** Help: curl examples + Home Assistant `rest` sensor YAML using the bearer token (companion online, repeater battery/noise, enrolled count, last probe age)
 - [x] **M7** Optional MQTT Home Assistant discovery: publish `homeassistant/sensor/.../config` + state topics for the same read sensors (reuse MQTT weather stack patterns); discovery default **off**
+- [x] **M8a** Local API v2 read expansion: OpenAPI + docs UI, channel/DM messages, infra detail/samples, `/metrics`, heavy-route throttling (still read-only; no writes/secrets)
 - [ ] **M8** (later) Scoped tokens (`read:status` / `read:nodes` / `read:infra`) and/or write APIs only if operators ask
 - [ ] **M9** (later) Custom Home Assistant integration — only after REST + MQTT discovery prove out; not required for v1
 
@@ -157,10 +159,10 @@ Do **not**: expose the API on the public internet by default, share channel secr
 
 OS/WebView spellcheck for channel + DM compose — no cloud dictionary, no bundled Hunspell unless OS path fails.
 
-- [ ] **N1** Enable `spellcheck` on Messages channel + DM compose fields (prefer `<textarea>` where needed); keep PIN / secrets / codes `spellcheck: false`
-- [ ] **N2** Right-click suggestions: today `with_disable_context_menu(true)` blocks the WebView replace menu — re-enable context menu at least on editable compose (or otherwise surface OS suggestions) so misspellings can be replaced offline
-- [ ] **N3** (optional) Settings toggle for compose spellcheck; note mesh callsigns / `#weather` / hex may false-positive
-- [ ] **N4** (later, only if OS/WebView is weak) App-owned Hunspell + dictionary under `assets/` — not first cut
+- [x] **N1** Enable `spellcheck` on Messages channel + DM (+ Broadcast) compose via `ComposeField`; PIN / password fields stay `spellcheck: false`
+- [x] **N2** Right-click suggestions: selective context-menu script allows native OS menus only on `[data-allow-context-menu]` compose fields (`with_disable_context_menu(false)` + boot head guard)
+- [x] **N3** Settings → Preferences → Compose → **Spellcheck compose** (default on); note callsigns / `#weather` / hex may false-positive
+- [ ] **N4** (deferred — OS WebView path) App-owned Hunspell + dictionary under `assets/` — only if smoke shows empty OS dicts
 
 Do **not**: send compose text to a network spell service; spellcheck PIN/token/password fields.
 

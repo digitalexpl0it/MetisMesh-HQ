@@ -20,6 +20,7 @@ mod map_tiles;
 mod mesh_regions;
 mod mesh_text;
 mod messages_appearance;
+mod node_kit;
 mod path;
 mod pmtiles_path;
 mod radio;
@@ -145,6 +146,26 @@ html, body, #main {
         head.push('\n');
         head.push_str(include_str!("../assets/form.css"));
         head.push_str("\n</style>");
+        // Selective context menu: allow native OS spell suggestions on compose
+        // fields marked data-allow-context-menu; block WebView chrome elsewhere.
+        // (Dioxus's with_disable_context_menu(true) is a blanket preventDefault.)
+        // lang=en helps WebView dictionaries pick a language when the OS locale
+        // is unset or mismatched.
+        head.push_str(
+            r#"
+<script>
+(function () {
+  try { document.documentElement.setAttribute('lang', 'en'); } catch (_) {}
+  document.addEventListener('contextmenu', function (e) {
+    if (e.target && e.target.closest && e.target.closest('[data-allow-context-menu]')) {
+      return;
+    }
+    e.preventDefault();
+  }, false);
+})();
+</script>
+"#,
+        );
         head
     };
     // Mesh-head mark from the EmergHQ / Metis brand logo (assets/app_icon.png).
@@ -167,7 +188,8 @@ html, body, #main {
         .with_menu(None)
         .with_background_color((16, 20, 24, 255))
         .with_custom_head(boot_head)
-        .with_disable_context_menu(true)
+        // Context menus blocked selectively via boot_head script (compose only).
+        .with_disable_context_menu(false)
         // Dioxus/wry default on Windows is %LOCALAPPDATA%\<exe-stem>. Release
         // builds ship as metis-mesh-hq-0.1.x.exe, which created a new WebView2
         // folder per version. Keep one stable cache across upgrades.
@@ -461,6 +483,67 @@ fn parse_byte_range(header: &str) -> Option<(u64, u64)> {
         end.parse().ok()?
     };
     Some((start, end))
+}
+
+/// WebKitGTK ignores textarea `spellcheck` until the WebContext has spell
+/// checking enabled and at least one language set. Call once the desktop
+/// window exists (`dioxus::desktop::window()`).
+#[cfg(all(feature = "desktop", target_os = "linux"))]
+pub fn enable_linux_webview_spellcheck() {
+    use dioxus::desktop::wry::WebViewExtUnix;
+    use webkit2gtk::{WebContextExt, WebViewExt};
+
+    let desktop = dioxus::desktop::window();
+    let wk = desktop.webview.webview();
+    let Some(ctx) = wk.context() else {
+        hq_log!(warn, "WebKit spellcheck: no WebContext yet");
+        return;
+    };
+    ctx.set_spell_checking_enabled(true);
+    let langs = spellcheck_languages_from_env();
+    let lang_refs: Vec<&str> = langs.iter().map(String::as_str).collect();
+    ctx.set_spell_checking_languages(&lang_refs);
+    hq_log!(
+        info,
+        "WebKit spellcheck on ({})",
+        langs.join(", ")
+    );
+}
+
+#[cfg(all(feature = "desktop", target_os = "linux"))]
+fn spellcheck_languages_from_env() -> Vec<String> {
+    // WebKit wants hunspell-style tags (en_US), not POSIX locales (en_US.UTF-8).
+    let mut out = Vec::new();
+    for key in ["LC_MESSAGES", "LANG", "LANGUAGE"] {
+        if let Ok(raw) = std::env::var(key) {
+            for piece in raw.split([':', ';', ',']) {
+                let tag = piece
+                    .trim()
+                    .split('.')
+                    .next()
+                    .unwrap_or("")
+                    .replace('-', "_");
+                if tag.is_empty() || tag.eq_ignore_ascii_case("C") {
+                    continue;
+                }
+                if !out
+                    .iter()
+                    .any(|s: &String| s.eq_ignore_ascii_case(&tag))
+                {
+                    out.push(tag);
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push("en_US".into());
+    }
+    // Always keep US English as a fallback when another locale is primary.
+    if !out.iter().any(|s| s.eq_ignore_ascii_case("en_US") || s.eq_ignore_ascii_case("en"))
+    {
+        out.push("en_US".into());
+    }
+    out
 }
 
 #[cfg(all(feature = "desktop", target_os = "linux"))]

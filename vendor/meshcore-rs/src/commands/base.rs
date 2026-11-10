@@ -787,6 +787,20 @@ impl CommandHandler {
         dest: impl Into<Destination>,
         req_type: BinaryReqType,
     ) -> Result<MsgSentInfo> {
+        self.send_binary_req_with_register(dest, req_type, None)
+            .await
+    }
+
+    /// Send a binary request, keeping the pending tag alive for at least
+    /// `min_register` (or the companion's suggested_timeout, whichever is longer).
+    /// Callers that wait longer than suggested_timeout must pass that wait here,
+    /// or late Status/Telemetry replies are demoted to untyped BinaryResponse.
+    pub async fn send_binary_req_with_register(
+        &self,
+        dest: impl Into<Destination>,
+        req_type: BinaryReqType,
+        min_register: Option<Duration>,
+    ) -> Result<MsgSentInfo> {
         let dest: Destination = dest.into();
         let pubkey = dest.public_key().ok_or_else(|| {
             Error::invalid_param("Binary request requires full 32-byte public key")
@@ -800,13 +814,18 @@ impl CommandHandler {
 
         match event.payload {
             EventPayload::MsgSent(info) => {
-                // Register the binary request for response matching
+                let suggested =
+                    Duration::from_millis(u64::from(info.suggested_timeout.max(1)));
+                let register_for = match min_register {
+                    Some(min) => min.max(suggested),
+                    None => suggested,
+                };
                 self.reader
                     .register_binary_request(
                         &info.expected_ack,
                         req_type,
                         pubkey.to_vec(),
-                        Duration::from_millis(info.suggested_timeout as u64),
+                        register_for,
                         HashMap::new(),
                         false,
                     )
@@ -829,7 +848,9 @@ impl CommandHandler {
         dest: impl Into<Destination>,
         timeout: Duration,
     ) -> Result<StatusData> {
-        let sent = self.send_binary_req(dest, BinaryReqType::Status).await?;
+        let sent = self
+            .send_binary_req_with_register(dest, BinaryReqType::Status, Some(timeout))
+            .await?;
 
         let mut filters = HashMap::new();
         filters.insert("tag".to_string(), hex_encode(&sent.expected_ack));
@@ -856,7 +877,9 @@ impl CommandHandler {
         dest: impl Into<Destination>,
         timeout: Duration,
     ) -> Result<Vec<u8>> {
-        let sent = self.send_binary_req(dest, BinaryReqType::Telemetry).await?;
+        let sent = self
+            .send_binary_req_with_register(dest, BinaryReqType::Telemetry, Some(timeout))
+            .await?;
 
         let mut filters = HashMap::new();
         filters.insert("tag".to_string(), hex_encode(&sent.expected_ack));

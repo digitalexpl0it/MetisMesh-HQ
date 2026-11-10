@@ -47,13 +47,14 @@ use tracker_page::TrackerPage;
 use weather_page::WeatherPage;
 use welcome::{reopen_welcome, welcome_is_done, WelcomeFinishAction, WelcomeWizard};
 use widgets::{
-    append_emoji, clamp_mesh_text, conversation_avatar_tone, format_channel_share,
+    append_emoji, conversation_avatar_tone, format_channel_share,
     format_position_share, heard_icon_class, heard_within_week, insert_mesh_snippet,
     parse_position_share, Badge, BarMix,
     BarMixRow, BatteryChart, BatteryPill, BatterySample, Button, ButtonKind, Card, ChartSeries,
-    ComposePlusAction, ComposePlusButton, ConversationAvatar, Dialog, EmojiPickerButton, LineChart,
-    MeshTextCount, PageHeading, PinSlideDown, PopoverDismissLayer, SelectInput, SlideDownPanel,
-    Sparkline, TextInput, Throbber, ToastHost, ToggleSwitch, MESH_TEXT_MAX_BYTES,
+    ComposeField, ComposePlusAction, ComposePlusButton, ConversationAvatar, Dialog,
+    EmojiPickerButton, LineChart, MeshTextCount, PageHeading, PinSlideDown, PopoverDismissLayer,
+    SelectInput, set_compose_spellcheck_enabled, SlideDownPanel, Sparkline, TextInput, Throbber,
+    ToastHost, ToggleSwitch, COMPOSE_SPELLCHECK_KEY, MESH_TEXT_MAX_BYTES,
 };
 
 /// Show a transient toast (and log it). Prefer this over inline amber labels.
@@ -475,6 +476,11 @@ pub fn App() -> Element {
         #[cfg(feature = "desktop")]
         {
             dioxus::desktop::window().set_zoom_level(1.0);
+        }
+        // Linux WebKitGTK: enable WebContext spellcheck (HTML attr alone is not enough).
+        #[cfg(all(feature = "desktop", target_os = "linux"))]
+        {
+            crate::enable_linux_webview_spellcheck();
         }
         spawn(async move {
             loop {
@@ -2862,7 +2868,7 @@ fn RosterPage() -> Element {
                                 }
                                 p { class: "mt-1 text-sm text-muted-foreground",
                                     if needle.trim().is_empty() {
-                                        "When someone shares a meshcore://contact/add card, tap Add — they appear here with their public key."
+                                        "When someone shares a contact card (meshcore://contact/add or <pubkey:type:name>), tap Add — they appear here with their public key."
                                     } else {
                                         "Try another name or pubkey fragment."
                                     }
@@ -3093,6 +3099,23 @@ fn RosterPage() -> Element {
                                             },
                                             Icon { name: IconName::ChevronRight, size: 15 }
                                         }
+                                        button {
+                                            r#type: "button",
+                                            class: "roster-icon-btn roster-icon-btn-ping",
+                                            title: "Mesh status ping (uses airtime)",
+                                            "aria-label": "Ping",
+                                            onclick: {
+                                                let pubkey = node.pubkey.clone();
+                                                let name = title.clone();
+                                                move |_| {
+                                                    messages_rail::begin_node_ping(
+                                                        pubkey.clone(),
+                                                        name.clone(),
+                                                    );
+                                                }
+                                            },
+                                            Icon { name: IconName::Radio, size: 15 }
+                                        }
                                         if can_claim {
                                             button {
                                                 r#type: "button",
@@ -3191,13 +3214,10 @@ fn RosterPage() -> Element {
                 on_close: move |_| dm_target.set(None),
                 div { class: "flex flex-col gap-3",
                     div { class: "flex items-stretch gap-2",
-                        textarea {
-                            class: "min-h-28 min-w-0 flex-1 rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground outline-none",
-                            value: dm_body(),
-                            placeholder: "Write a direct message…",
-                            oninput: move |event: FormEvent| {
-                                dm_body.set(clamp_mesh_text(event.value()));
-                            },
+                        ComposeField {
+                            text: dm_body,
+                            placeholder: "Write a direct message…".to_string(),
+                            multiline: true,
                         }
                         div { class: "flex flex-col justify-end",
                             EmojiPickerButton {
@@ -4790,13 +4810,6 @@ fn MessagesPage() -> Element {
                     on_blocked: move |_| refresh.set(refresh() + 1),
                 }
                 BlockResolveFailDialog { target: block_resolve_fail }
-                ComposePlusDialogs {
-                    dialog: plus_dialog,
-                    pick_query: plus_pick_query,
-                    pick_value: plus_pick_value,
-                    draft,
-                    note,
-                }
                 div { class: "flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border bg-card",
                     div {
                         id: "dm-scroller",
@@ -4913,8 +4926,24 @@ fn MessagesPage() -> Element {
                                                     outgoing,
                                                     sender_pubkey: Some(dm_pubkey.clone()),
                                                 }
-                                                if !outgoing {
-                                                    div { class: "message-actions",
+                                                div { class: "message-actions",
+                                                    button {
+                                                        class: "message-action-btn message-action-btn-ping",
+                                                        title: "Mesh status ping (uses airtime)",
+                                                        onclick: {
+                                                            let pk = dm_pubkey.clone();
+                                                            let nm = title.clone();
+                                                            move |_| {
+                                                                messages_rail::begin_node_ping(
+                                                                    pk.clone(),
+                                                                    nm.clone(),
+                                                                );
+                                                            }
+                                                        },
+                                                        Icon { name: IconName::Radio, size: 12 }
+                                                        "Ping"
+                                                    }
+                                                    if !outgoing {
                                                         button {
                                                             class: "message-action-btn",
                                                             title: "Favorite this contact",
@@ -4988,88 +5017,16 @@ fn MessagesPage() -> Element {
                             }
                         }
                     }
-                    div { class: "border-t border-border p-3",
-                        div { class: "flex gap-2",
-                            ComposePlusButton {
-                                disabled: !linked,
-                                on_action: move |action| {
-                                    apply_compose_plus_action(
-                                        action,
-                                        draft,
-                                        note,
-                                        plus_dialog,
-                                        plus_pick_query,
-                                        plus_pick_value,
-                                        None,
-                                    );
-                                },
-                            }
-                            input {
-                                class: "h-10 min-w-0 flex-1 rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none",
-                                value: draft(),
-                                placeholder: "Direct message…",
-                                oninput: move |event: FormEvent| {
-                                    draft.set(clamp_mesh_text(event.value()));
-                                },
-                                onkeydown: {
-                                    let peer = dm_pubkey.clone();
-                                    move |event: KeyboardEvent| {
-                                        if event.key() == Key::Enter {
-                                            event.prevent_default();
-                                            let body = draft().trim().to_string();
-                                            if body.is_empty() || !linked {
-                                                return;
-                                            }
-                                            match state().db.queue_text(&peer, &body, &body) {
-                                                Ok(_) => {
-                                                    draft.set(String::new());
-                                                    note.set(String::new());
-                                                    refresh.set(refresh() + 1);
-                                                }
-                                                Err(err) => note.set(err.to_string()),
-                                            }
-                                        }
-                                    }
-                                },
-                            }
-                            Button {
-                                disabled: !linked || draft().trim().is_empty(),
-                                onclick: {
-                                    let peer = dm_pubkey.clone();
-                                    move |_| {
-                                        let body = draft().trim().to_string();
-                                        if body.is_empty() {
-                                            return;
-                                        }
-                                        match state().db.queue_text(&peer, &body, &body) {
-                                            Ok(_) => {
-                                                draft.set(String::new());
-                                                note.set(String::new());
-                                                refresh.set(refresh() + 1);
-                                            }
-                                            Err(err) => note.set(err.to_string()),
-                                        }
-                                    }
-                                },
-                                Icon { name: IconName::Messages, size: 14 }
-                                "Send"
-                            }
-                        }
-                        div { class: "mt-2 flex flex-wrap items-center justify-between gap-2",
-                            MeshTextCount { text: draft() }
-                            if !linked {
-                                p { class: "text-xs text-muted-foreground",
-                                    if syncing {
-                                        "Companion is still syncing — compose unlocks when Connected."
-                                    } else {
-                                        "Connect a companion to send direct messages."
-                                    }
-                                }
-                            }
-                        }
-                        if !note().is_empty() {
-                            p { class: "mt-2 text-xs text-amber-200", "{note}" }
-                        }
+                    DmComposeDock {
+                        draft,
+                        note,
+                        plus_dialog,
+                        plus_pick_query,
+                        plus_pick_value,
+                        linked,
+                        syncing,
+                        peer: dm_pubkey.clone(),
+                        on_sent: move |_| refresh.set(refresh() + 1),
                     }
                 }
             }
@@ -5633,6 +5590,25 @@ fn MessagesPage() -> Element {
                                                         Icon { name: IconName::Copy, size: 12 }
                                                         "Copy"
                                                     }
+                                                    if let Some(pk) = known_pk.clone().filter(|k| !k.is_empty()) {
+                                                        {
+                                                            let ping_name = device_name.clone();
+                                                            rsx! {
+                                                                button {
+                                                                    class: "message-action-btn message-action-btn-ping",
+                                                                    title: "Mesh status ping (uses airtime)",
+                                                                    onclick: move |_| {
+                                                                        messages_rail::begin_node_ping(
+                                                                            pk.clone(),
+                                                                            ping_name.clone(),
+                                                                        );
+                                                                    },
+                                                                    Icon { name: IconName::Radio, size: 12 }
+                                                                    "Ping"
+                                                                }
+                                                            }
+                                                        }
+                                                    }
                                                     if !outgoing {
                                                         {
                                                             let resolve_name = device_name.clone();
@@ -5775,131 +5751,19 @@ fn MessagesPage() -> Element {
                             }
                         }
                     }
-                    div { class: "border-t border-border p-3",
-                        if let Some(target) = reply_target() {
-                            div { class: "mb-2 flex items-start gap-2 rounded-md border border-border bg-background/80 px-3 py-2",
-                                Icon {
-                                    name: if target.text.is_empty() { IconName::Reply } else { IconName::Quote },
-                                    size: 14,
-                                }
-                                div { class: "min-w-0 flex-1",
-                                    p { class: "text-[0.65rem] uppercase tracking-[0.14em] text-muted-foreground",
-                                        if target.text.is_empty() {
-                                            "Replying to {target.sender_name}"
-                                        } else {
-                                            "Quoting {target.sender_name}"
-                                        }
-                                    }
-                                    if !target.text.is_empty() {
-                                        p { class: "mt-1 line-clamp-2 text-xs text-muted-foreground",
-                                            "{truncate_chars(&target.text, 120)}"
-                                        }
-                                    }
-                                }
-                                button {
-                                    class: "inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer",
-                                    title: "Cancel reply",
-                                    onclick: move |_| reply_target.set(None),
-                                    Icon { name: IconName::Close, size: 14 }
-                                }
-                            }
-                        }
-                        div {
-                            class: "flex gap-2",
-                            ComposePlusButton {
-                                disabled: !linked || sending(),
-                                on_action: {
-                                    let channel_name = selected_name.clone();
-                                    move |action| {
-                                        apply_compose_plus_action(
-                                            action,
-                                            draft,
-                                            note,
-                                            plus_dialog,
-                                            plus_pick_query,
-                                            plus_pick_value,
-                                            Some(channel_name.clone()),
-                                        );
-                                    }
-                                },
-                            }
-                            input {
-                                class: "h-10 min-w-0 flex-1 rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none",
-                                value: draft(),
-                                placeholder: if reply_target().is_some() {
-                                    "Write your reply…"
-                                } else {
-                                    "Message this channel…"
-                                },
-                                oninput: move |event: FormEvent| {
-                                    draft.set(clamp_mesh_text(event.value()));
-                                },
-                                onkeydown: move |event: KeyboardEvent| {
-                                    if event.key() == Key::Enter {
-                                        event.prevent_default();
-                                        begin_channel_send(
-                                            linked,
-                                            slot,
-                                            draft(),
-                                            reply_target(),
-                                            draft,
-                                            reply_target,
-                                            note,
-                                            sending,
-                                            bump_refresh,
-                                        );
-                                    }
-                                },
-                            }
-                            EmojiPickerButton {
-                                disabled: !linked,
-                                align_end: true,
-                                on_pick: move |emoji: String| {
-                                    draft.set(append_emoji(&draft(), &emoji));
-                                },
-                            }
-                            Button {
-                                disabled: !linked || sending() || draft().trim().is_empty(),
-                                onclick: move |_| {
-                                    begin_channel_send(
-                                        linked,
-                                        slot,
-                                        draft(),
-                                        reply_target(),
-                                        draft,
-                                        reply_target,
-                                        note,
-                                        sending,
-                                        bump_refresh,
-                                    );
-                                },
-                                Icon { name: IconName::Messages, size: 14 }
-                                if sending() { "Sending…" } else { "Send" }
-                            }
-                        }
-                        div { class: "mt-2 flex flex-wrap items-center justify-between gap-2",
-                            MeshTextCount { text: draft() }
-                            if !linked {
-                                p { class: "text-xs text-muted-foreground",
-                                    if syncing {
-                                        "Companion is still syncing — compose unlocks when Connected."
-                                    } else {
-                                        "Connect a companion to send on this channel."
-                                    }
-                                }
-                            } else if !note().is_empty() {
-                                p {
-                                    class: if note().starts_with("Send failed") || note().starts_with("Not sent") {
-                                        "text-xs text-red-300"
-                                    } else if note() == "Sending…" {
-                                        "text-xs text-muted-foreground"
-                                    } else {
-                                        "text-xs text-sky-200"
-                                    },
-                                    "{note}"
-                                }
-                            }
-                        }
+                    ChannelComposeDock {
+                        draft,
+                        note,
+                        sending,
+                        reply_target,
+                        plus_dialog,
+                        plus_pick_query,
+                        plus_pick_value,
+                        linked,
+                        syncing,
+                        slot,
+                        channel_name: selected_name.clone(),
+                        bump_refresh: move |_| bump_refresh(),
                     }
                 }
                 BlockContactDialog {
@@ -5907,13 +5771,6 @@ fn MessagesPage() -> Element {
                     on_blocked: move |_| refresh.set(refresh() + 1),
                 }
                 BlockResolveFailDialog { target: block_resolve_fail }
-                ComposePlusDialogs {
-                    dialog: plus_dialog,
-                    pick_query: plus_pick_query,
-                    pick_value: plus_pick_value,
-                    draft,
-                    note,
-                }
             }
         };
     }
@@ -6778,13 +6635,11 @@ fn MessagesPage() -> Element {
                                         "Message"
                                     }
                                     div { class: "flex items-stretch gap-2",
-                                        textarea {
-                                            class: "min-h-28 min-w-0 flex-1 rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground outline-none",
-                                            value: new_dm_body(),
-                                            placeholder: "Write a direct message…",
-                                            oninput: move |event: FormEvent| {
-                                                new_dm_body.set(clamp_mesh_text(event.value()));
-                                            },
+                                        ComposeField {
+                                            text: new_dm_body,
+                                            placeholder: "Write a direct message…".to_string(),
+                                            multiline: true,
+                                            disabled: !linked || dm_contacts.is_empty(),
                                         }
                                         div { class: "flex flex-col justify-end",
                                             EmojiPickerButton {
@@ -6982,6 +6837,267 @@ fn compose_channel_reply(target: Option<MessageReplyTarget>, text: &str) -> Stri
     }
     let quote = truncate_chars(target.text.trim(), 72);
     format!("> {mention} {quote}\n{text}")
+}
+
+/// Owns the draft `Signal` reads so typing does not re-render the message list.
+#[component]
+fn DmComposeDock(
+    draft: Signal<String>,
+    note: Signal<String>,
+    plus_dialog: Signal<Option<ComposePlusDialog>>,
+    plus_pick_query: Signal<String>,
+    plus_pick_value: Signal<String>,
+    linked: bool,
+    syncing: bool,
+    peer: String,
+    on_sent: EventHandler<()>,
+) -> Element {
+    let mut draft = draft;
+    let mut note = note;
+    rsx! {
+        div { class: "border-t border-border p-3",
+            div { class: "flex gap-2",
+                ComposePlusButton {
+                    disabled: !linked,
+                    on_action: move |action| {
+                        apply_compose_plus_action(
+                            action,
+                            draft,
+                            note,
+                            plus_dialog,
+                            plus_pick_query,
+                            plus_pick_value,
+                            None,
+                        );
+                    },
+                }
+                ComposeField {
+                    text: draft,
+                    placeholder: "Direct message…".to_string(),
+                    disabled: !linked,
+                    onkeydown: {
+                        let peer = peer.clone();
+                        move |event: KeyboardEvent| {
+                            if event.key() == Key::Enter {
+                                event.prevent_default();
+                                let body = draft().trim().to_string();
+                                if body.is_empty() || !linked {
+                                    return;
+                                }
+                                match state().db.queue_text(&peer, &body, &body) {
+                                    Ok(_) => {
+                                        draft.set(String::new());
+                                        note.set(String::new());
+                                        on_sent.call(());
+                                    }
+                                    Err(err) => note.set(err.to_string()),
+                                }
+                            }
+                        }
+                    },
+                }
+                Button {
+                    disabled: !linked || draft().trim().is_empty(),
+                    onclick: {
+                        let peer = peer.clone();
+                        move |_| {
+                            let body = draft().trim().to_string();
+                            if body.is_empty() {
+                                return;
+                            }
+                            match state().db.queue_text(&peer, &body, &body) {
+                                Ok(_) => {
+                                    draft.set(String::new());
+                                    note.set(String::new());
+                                    on_sent.call(());
+                                }
+                                Err(err) => note.set(err.to_string()),
+                            }
+                        }
+                    },
+                    Icon { name: IconName::Messages, size: 14 }
+                    "Send"
+                }
+            }
+            div { class: "mt-2 flex flex-wrap items-center justify-between gap-2",
+                MeshTextCount { text: draft() }
+                if !linked {
+                    p { class: "text-xs text-muted-foreground",
+                        if syncing {
+                            "Companion is still syncing — compose unlocks when Connected."
+                        } else {
+                            "Connect a companion to send direct messages."
+                        }
+                    }
+                }
+            }
+            if !note().is_empty() {
+                p { class: "mt-2 text-xs text-amber-200", "{note}" }
+            }
+        }
+        ComposePlusDialogs {
+            dialog: plus_dialog,
+            pick_query: plus_pick_query,
+            pick_value: plus_pick_value,
+            draft,
+            note,
+        }
+    }
+}
+
+/// Owns the draft `Signal` reads so typing does not re-render the message list.
+#[component]
+fn ChannelComposeDock(
+    draft: Signal<String>,
+    note: Signal<String>,
+    sending: Signal<bool>,
+    reply_target: Signal<Option<MessageReplyTarget>>,
+    plus_dialog: Signal<Option<ComposePlusDialog>>,
+    plus_pick_query: Signal<String>,
+    plus_pick_value: Signal<String>,
+    linked: bool,
+    syncing: bool,
+    slot: i64,
+    channel_name: String,
+    bump_refresh: EventHandler<()>,
+) -> Element {
+    let mut draft = draft;
+    let note = note;
+    let sending = sending;
+    let mut reply_target = reply_target;
+    let placeholder = if reply_target().is_some() {
+        "Write your reply…".to_string()
+    } else {
+        "Message this channel…".to_string()
+    };
+    let bump = bump_refresh;
+    rsx! {
+        div { class: "border-t border-border p-3",
+            if let Some(target) = reply_target() {
+                div { class: "mb-2 flex items-start gap-2 rounded-md border border-border bg-background/80 px-3 py-2",
+                    Icon {
+                        name: if target.text.is_empty() { IconName::Reply } else { IconName::Quote },
+                        size: 14,
+                    }
+                    div { class: "min-w-0 flex-1",
+                        p { class: "text-[0.65rem] uppercase tracking-[0.14em] text-muted-foreground",
+                            if target.text.is_empty() {
+                                "Replying to {target.sender_name}"
+                            } else {
+                                "Quoting {target.sender_name}"
+                            }
+                        }
+                        if !target.text.is_empty() {
+                            p { class: "mt-1 line-clamp-2 text-xs text-muted-foreground",
+                                "{truncate_chars(&target.text, 120)}"
+                            }
+                        }
+                    }
+                    button {
+                        class: "inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer",
+                        title: "Cancel reply",
+                        onclick: move |_| reply_target.set(None),
+                        Icon { name: IconName::Close, size: 14 }
+                    }
+                }
+            }
+            div { class: "flex gap-2",
+                ComposePlusButton {
+                    disabled: !linked || sending(),
+                    on_action: {
+                        let channel_name = channel_name.clone();
+                        move |action| {
+                            apply_compose_plus_action(
+                                action,
+                                draft,
+                                note,
+                                plus_dialog,
+                                plus_pick_query,
+                                plus_pick_value,
+                                Some(channel_name.clone()),
+                            );
+                        }
+                    },
+                }
+                ComposeField {
+                    text: draft,
+                    placeholder,
+                    disabled: !linked,
+                    onkeydown: move |event: KeyboardEvent| {
+                        if event.key() == Key::Enter {
+                            event.prevent_default();
+                            begin_channel_send(
+                                linked,
+                                slot,
+                                draft(),
+                                reply_target(),
+                                draft,
+                                reply_target,
+                                note,
+                                sending,
+                                move || bump.call(()),
+                            );
+                        }
+                    },
+                }
+                EmojiPickerButton {
+                    disabled: !linked,
+                    align_end: true,
+                    on_pick: move |emoji: String| {
+                        draft.set(append_emoji(&draft(), &emoji));
+                    },
+                }
+                Button {
+                    disabled: !linked || sending() || draft().trim().is_empty(),
+                    onclick: move |_| {
+                        begin_channel_send(
+                            linked,
+                            slot,
+                            draft(),
+                            reply_target(),
+                            draft,
+                            reply_target,
+                            note,
+                            sending,
+                            move || bump.call(()),
+                        );
+                    },
+                    Icon { name: IconName::Messages, size: 14 }
+                    if sending() { "Sending…" } else { "Send" }
+                }
+            }
+            div { class: "mt-2 flex flex-wrap items-center justify-between gap-2",
+                MeshTextCount { text: draft() }
+                if !linked {
+                    p { class: "text-xs text-muted-foreground",
+                        if syncing {
+                            "Companion is still syncing — compose unlocks when Connected."
+                        } else {
+                            "Connect a companion to send on this channel."
+                        }
+                    }
+                } else if !note().is_empty() {
+                    p {
+                        class: if note().starts_with("Send failed") || note().starts_with("Not sent") {
+                            "text-xs text-red-300"
+                        } else if note() == "Sending…" {
+                            "text-xs text-muted-foreground"
+                        } else {
+                            "text-xs text-sky-200"
+                        },
+                        "{note}"
+                    }
+                }
+            }
+        }
+        ComposePlusDialogs {
+            dialog: plus_dialog,
+            pick_query: plus_pick_query,
+            pick_value: plus_pick_value,
+            draft,
+            note,
+        }
+    }
 }
 
 fn begin_channel_send(
@@ -7262,7 +7378,14 @@ fn parse_message_parts(input: &str) -> Vec<TextPart> {
             TextPart::Text(text) => {
                 for linked in linkify_text(&text) {
                     match linked {
-                        TextPart::Text(plain) => parts.extend(positionify_text(&plain)),
+                        TextPart::Text(plain) => {
+                            for contactified in contactify_text(&plain) {
+                                match contactified {
+                                    TextPart::Text(p) => parts.extend(positionify_text(&p)),
+                                    other => parts.push(other),
+                                }
+                            }
+                        }
                         other => parts.push(other),
                     }
                 }
@@ -7272,6 +7395,36 @@ fn parse_message_parts(input: &str) -> Vec<TextPart> {
     }
     if parts.is_empty() {
         parts.push(TextPart::Text(String::new()));
+    }
+    parts
+}
+
+/// Turn phone-app `<pubkey:type:name>` contact shares into meshcore:// chips (Add / Copy).
+fn contactify_text(input: &str) -> Vec<TextPart> {
+    let mut parts = Vec::new();
+    let mut rest = input;
+    while let Some(open) = rest.find('<') {
+        if open > 0 {
+            parts.push(TextPart::Text(rest[..open].to_string()));
+        }
+        let after = &rest[open..];
+        let Some(close) = after.find('>') else {
+            parts.push(TextPart::Text(after.to_string()));
+            return parts;
+        };
+        let candidate = &after[..=close];
+        if let Some((name, pubkey, ty)) = crate::contact_qr::parse_contact_bracket_share(candidate)
+        {
+            parts.push(TextPart::MeshLink(crate::contact_qr::contact_add_uri(
+                &name, &pubkey, ty,
+            )));
+        } else {
+            parts.push(TextPart::Text(candidate.to_string()));
+        }
+        rest = &after[close + 1..];
+    }
+    if !rest.is_empty() || parts.is_empty() {
+        parts.push(TextPart::Text(rest.to_string()));
     }
     parts
 }
@@ -7520,6 +7673,32 @@ mod message_body_tests {
         assert!(short.contains('…'));
         assert!(short.starts_with("meshcore://"));
         assert!(short.ends_with("861c849") || short.len() < url.len());
+    }
+
+    #[test]
+    fn bracket_contact_share_becomes_add_chip() {
+        let key = "dd20c627e76ee46c225fcb65f3de5da709600843806c4d436b0f1ed410a52dd8";
+        let raw = format!("<{key}:1:KG6LOE - Home>");
+        let parts = parse_message_parts(&raw);
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            TextPart::MeshLink(url) => {
+                let (name, pubkey, ty) =
+                    crate::contact_qr::parse_contact_add_uri(url).expect("uri");
+                assert_eq!(name, "KG6LOE - Home");
+                assert_eq!(pubkey, key);
+                assert_eq!(ty, 1);
+            }
+            other => panic!("expected MeshLink, got {other:?}"),
+        }
+        let mixed = format!("hi {raw} thanks");
+        let mixed_parts = parse_message_parts(&mixed);
+        assert!(mixed_parts
+            .iter()
+            .any(|p| matches!(p, TextPart::MeshLink(_))));
+        assert!(mixed_parts
+            .iter()
+            .any(|p| matches!(p, TextPart::Text(t) if t.contains("hi"))));
     }
 
     #[test]
@@ -8033,6 +8212,21 @@ fn SettingsPage(
     let mut restore_path = use_signal(String::new);
     let mut restore_pass = use_signal(String::new);
     let mut restore_preview = use_signal(|| None::<(String, String, crate::backup::BackupPreview)>);
+    let mut kit_tick = use_signal(|| 0u32);
+    let mut kit_pass = use_signal(String::new);
+    let mut kit_pass2 = use_signal(String::new);
+    let mut kit_note = use_signal(String::new);
+    let mut kit_port = use_signal(String::new);
+    let mut kit_selected = use_signal(String::new);
+    let mut kit_role_hint = use_signal(|| "repeater".to_string());
+    let mut kit_pending_flash =
+        use_signal(|| None::<crate::firmware::FlashRequest>);
+    let mut kit_flash_backup_open = use_signal(|| false);
+    let mut kit_flash_pass = use_signal(String::new);
+    let mut kit_flash_pass2 = use_signal(String::new);
+    let mut kit_restore_after_open = use_signal(|| false);
+    let mut kit_watch_flash_done = use_signal(|| false);
+    let mut kit_was_flashing = use_signal(|| false);
     let mut contacts_note = use_signal(String::new);
     let mut exports_tick = use_signal(|| 0u32);
     let mut download_exports_open = use_signal(|| false);
@@ -8114,6 +8308,9 @@ fn SettingsPage(
     let mut log_autoscroll = use_signal(|| true);
     let mut log_file_on = use_signal(|| {
         crate::services::setting_bool(&state().db, crate::log_file::SETTING_KEY, true)
+    });
+    let mut compose_spellcheck_on = use_signal(|| {
+        crate::services::setting_bool(&state().db, COMPOSE_SPELLCHECK_KEY, true)
     });
     let mut svc_weather = use_signal(|| {
         crate::services::setting_bool(&state().db, "svc_weather_enabled", true)
@@ -8340,6 +8537,14 @@ fn SettingsPage(
             .ok()
             .flatten()
             .unwrap_or_else(|| "120".into())
+    });
+    let mut local_api_heavy_rate = use_signal(|| {
+        state()
+            .db
+            .setting("local_api_heavy_rate_limit_per_min")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "30".into())
     });
     let mut local_api_token_reveal = use_signal(String::new);
     let mut flash_locker_enabled = use_signal(|| {
@@ -9115,7 +9320,25 @@ fn SettingsPage(
                     }
                 }
             }
-            } // end HqTab::Preferences (date/time)
+            Card { title: "Compose".to_string(), icon: Some(IconName::Messages),
+                p { class: "mb-3 text-sm text-muted-foreground",
+                    "OS spellcheck on channel, DM, and Broadcast compose. Uses the system dictionary (offline). Right-click a flagged word for suggestions. On Linux install hunspell dictionaries (e.g. hunspell-en-us). Callsigns, #weather, and hex may false-positive."
+                }
+                ToggleSwitch {
+                    checked: compose_spellcheck_on(),
+                    label: "Spellcheck compose".to_string(),
+                    hint: Some(if compose_spellcheck_on() {
+                        "On — underlines and right-click suggestions on compose fields.".to_string()
+                    } else {
+                        "Off — no spellcheck on compose.".to_string()
+                    }),
+                    onchange: move |next: bool| {
+                        compose_spellcheck_on.set(next);
+                        set_compose_spellcheck_enabled(next);
+                    }
+                }
+            }
+            } // end HqTab::Preferences (date/time + compose)
 
             if hq_tab() == HqTab::Services {
             Card { title: "Info services", icon: Some(IconName::Radio),
@@ -9708,12 +9931,46 @@ fn SettingsPage(
                 if services_tab() == ServicesTab::LocalApi {
                     div { class: "services-panel",
                         p { class: "text-sm text-muted-foreground",
-                            "Opt-in read-only JSON API for local apps and Home Assistant. Default bind is loopback. Bearer token is required on every request (including /health). Token is stored as local-api.token under the HQ data folder (0600) — never in the database. See Help → Local API for curl and Home Assistant examples."
+                            "Opt-in read-only JSON API (v2) for local apps and Home Assistant. Default bind is loopback. Bearer token is required on data routes (/health, /status, chat, infra, …). /docs and /openapi.json are open so you can paste the token in the browser. Compose/send/secrets stay denied. Token is stored as local-api.token under the HQ data folder (0600). See Help → Local API."
                         }
                         p { class: "text-xs text-muted-foreground", "{local_api_status}" }
                         p { class: "text-xs text-muted-foreground",
                             strong { "Never exposed: " }
-                            "channel secrets, keyring material, Compose/send, enroll/approve/deny, radio CLI, full message bodies, or GPS trails."
+                            "channel secrets, keyring material, Compose/send, enroll/approve/deny, radio CLI, or GPS trails."
+                        }
+                        div { class: "flex flex-wrap gap-2",
+                            Button {
+                                kind: ButtonKind::Primary,
+                                onclick: move |_| {
+                                    match crate::services::open_local_api_docs(&state().db) {
+                                        Ok(url) => {
+                                            crate::toast::push(
+                                                crate::toast::ToastKind::Success,
+                                                format!("Opened {url} — paste the bearer token in the docs page."),
+                                            );
+                                        }
+                                        Err(err) => {
+                                            crate::toast::push(
+                                                crate::toast::ToastKind::Error,
+                                                err,
+                                            );
+                                        }
+                                    }
+                                },
+                                "Open API docs"
+                            }
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| {
+                                    let url = crate::services::local_api_docs_url(&state().db);
+                                    copy_text_to_clipboard(&url);
+                                    crate::toast::push(
+                                        crate::toast::ToastKind::Success,
+                                        format!("Copied {url}"),
+                                    );
+                                },
+                                "Copy docs URL"
+                            }
                         }
                         ToggleSwitch {
                             checked: local_api_enabled(),
@@ -9881,6 +10138,46 @@ fn SettingsPage(
                                         );
                                         crate::services::bump_local_api_config();
                                     },
+                                }
+                            }
+                            div { class: "flex flex-col gap-1",
+                                label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Heavy routes / minute" }
+                                TextInput {
+                                    value: local_api_heavy_rate(),
+                                    placeholder: "30".to_string(),
+                                    oninput: move |event: FormEvent| {
+                                        let value = event.value();
+                                        local_api_heavy_rate.set(value.clone());
+                                        let Ok(parsed) = value.trim().parse::<u32>() else {
+                                            return;
+                                        };
+                                        let clamped = crate::services::clamp_local_api_heavy_rate_limit(
+                                            parsed,
+                                        );
+                                        let stored = clamped.to_string();
+                                        let prev = state()
+                                            .db
+                                            .setting("local_api_heavy_rate_limit_per_min")
+                                            .ok()
+                                            .flatten()
+                                            .unwrap_or_default();
+                                        if prev == stored {
+                                            return;
+                                        }
+                                        let _ = state().db.set_setting(
+                                            "local_api_heavy_rate_limit_per_min",
+                                            &stored,
+                                        );
+                                        let _ = state().db.audit(
+                                            "local_api_heavy_rate_limit",
+                                            "",
+                                            &stored,
+                                        );
+                                        crate::services::bump_local_api_config();
+                                    },
+                                }
+                                p { class: "text-[0.7rem] text-muted-foreground",
+                                    "Extra cap for message pages and infra samples (in addition to the global limit)."
                                 }
                             }
                         }
@@ -11246,6 +11543,303 @@ fn SettingsPage(
                     p { class: "mt-4 text-sm text-muted-foreground", "{backup_note}" }
                 }
             }
+
+            Card { title: "Node identity kits", icon: Some(IconName::Key),
+                p { class: "mb-3 text-sm text-muted-foreground",
+                    "Encrypted .metisnode files (separate from HQ .metisbak). Backup a companion or repeater over "
+                    strong { "USB serial" }
+                    " before erase/reflash — private key stays behind a passphrase. Never over LoRa."
+                }
+                {
+                    let _ = kit_tick();
+                    let ports = crate::firmware::list_usb_ports_for_flash();
+                    if kit_port().is_empty() {
+                        if let Some(p) = ports.first() {
+                            kit_port.set(p.path.clone());
+                        }
+                    }
+                    let kits = crate::node_kit::list_kit_entries(&crate::data_dir());
+                    let a = kit_pass();
+                    let b = kit_pass2();
+                    let pass_ok = !a.trim().is_empty() && a == b;
+                    rsx! {
+                        div { class: "mb-3 grid gap-2 sm:grid-cols-2",
+                            div {
+                                label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "USB port" }
+                                SelectInput {
+                                    id: "kit-usb-port".to_string(),
+                                    value: kit_port(),
+                                    onchange: move |event: FormEvent| kit_port.set(event.value()),
+                                    option { value: "", style: "background-color:#151a20;color:#f4f4f5;", "Choose port…" }
+                                    for port in ports.iter() {
+                                        {
+                                            let path = port.path.clone();
+                                            let label = if port.label.trim().is_empty() {
+                                                path.clone()
+                                            } else {
+                                                port.label.clone()
+                                            };
+                                            rsx! {
+                                                option {
+                                                    key: "{path}",
+                                                    value: "{path}",
+                                                    style: "background-color:#151a20;color:#f4f4f5;",
+                                                    "{label}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            div {
+                                label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "Role hint" }
+                                SelectInput {
+                                    id: "kit-role-hint".to_string(),
+                                    value: kit_role_hint(),
+                                    onchange: move |event: FormEvent| kit_role_hint.set(event.value()),
+                                    option { value: "companion", style: "background-color:#151a20;color:#f4f4f5;", "Companion" }
+                                    option { value: "repeater", style: "background-color:#151a20;color:#f4f4f5;", "Repeater" }
+                                    option { value: "room", style: "background-color:#151a20;color:#f4f4f5;", "Room server" }
+                                }
+                            }
+                        }
+                        div { class: "mb-3 grid gap-2 sm:grid-cols-2",
+                            div {
+                                label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "Kit passphrase" }
+                                TextInput {
+                                    value: kit_pass(),
+                                    placeholder: "Passphrase",
+                                    kind: "password".to_string(),
+                                    oninput: move |event: FormEvent| kit_pass.set(event.value()),
+                                }
+                            }
+                            div {
+                                label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "Confirm" }
+                                TextInput {
+                                    value: kit_pass2(),
+                                    placeholder: "Confirm passphrase",
+                                    kind: "password".to_string(),
+                                    oninput: move |event: FormEvent| kit_pass2.set(event.value()),
+                                }
+                            }
+                        }
+                        if !a.is_empty() && !b.is_empty() && a != b {
+                            p { class: "mb-2 text-sm text-amber-200", "Passphrases do not match." }
+                        }
+                        div { class: "mb-3 flex flex-wrap gap-2",
+                            Button {
+                                kind: ButtonKind::Primary,
+                                disabled: !pass_ok || kit_port().trim().is_empty(),
+                                onclick: move |_| {
+                                    let port = kit_port();
+                                    let a = kit_pass();
+                                    let b = kit_pass2();
+                                    if port.trim().is_empty() || a.trim().is_empty() || a != b {
+                                        kit_note.set("Port and matching passphrase required.".into());
+                                        return;
+                                    }
+                                    match crate::node_kit::backup_usb_to_disk(
+                                        &crate::data_dir(),
+                                        port.trim(),
+                                        a.trim(),
+                                        "desktop",
+                                        &kit_role_hint(),
+                                        "",
+                                    ) {
+                                        Ok((path, meta)) => {
+                                            let _ = state().db.audit(
+                                                "node_kit_backup",
+                                                &meta.public_key.chars().take(16).collect::<String>(),
+                                                &path.display().to_string(),
+                                            );
+                                            kit_note.set(format!(
+                                                "Saved kit for {} ({}…) → {}",
+                                                if meta.name.is_empty() { "node" } else { &meta.name },
+                                                meta.public_key.chars().take(8).collect::<String>(),
+                                                path.display()
+                                            ));
+                                            status_note("Node identity kit saved");
+                                            kit_selected.set(path.display().to_string());
+                                            kit_pass.set(String::new());
+                                            kit_pass2.set(String::new());
+                                            kit_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                        }
+                                        Err(err) => {
+                                            kit_note.set(err.to_string());
+                                            crate::toast::push(crate::toast::ToastKind::Error, err.to_string());
+                                        }
+                                    }
+                                },
+                                "Backup from USB…"
+                            }
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| {
+                                    state().radio.scan_usb();
+                                    kit_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                },
+                                Icon { name: IconName::Scan, size: 14 }
+                                "Refresh ports"
+                            }
+                        }
+                        div { class: "mb-3",
+                            label { class: "mb-1 block text-xs uppercase tracking-[0.16em] text-muted-foreground", "Saved kits" }
+                            if kits.is_empty() {
+                                p { class: "text-sm text-muted-foreground", "No kits yet." }
+                            } else {
+                                SelectInput {
+                                    id: "kit-select".to_string(),
+                                    value: kit_selected(),
+                                    onchange: move |event: FormEvent| kit_selected.set(event.value()),
+                                    option { value: "", style: "background-color:#151a20;color:#f4f4f5;", "Choose a kit…" }
+                                    for entry in kits.iter() {
+                                        {
+                                            let path_s = entry.path.display().to_string();
+                                            let when = if entry.created_at > 0 {
+                                                timefmt::format_stamp(&state().db, entry.created_at)
+                                            } else {
+                                                entry.file_name.clone()
+                                            };
+                                            let label = format!(
+                                                "{when} · {} · {}…",
+                                                entry.name,
+                                                entry.public_key_prefix
+                                            );
+                                            rsx! {
+                                                option {
+                                                    key: "{path_s}",
+                                                    value: "{path_s}",
+                                                    style: "background-color:#151a20;color:#f4f4f5;",
+                                                    "{label}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        div { class: "flex flex-wrap gap-2",
+                            Button {
+                                kind: ButtonKind::Primary,
+                                disabled: kit_selected().trim().is_empty()
+                                    || kit_port().trim().is_empty()
+                                    || kit_pass().trim().is_empty(),
+                                onclick: move |_| {
+                                    let path = kit_selected();
+                                    let port = kit_port();
+                                    let pass = kit_pass();
+                                    if path.trim().is_empty() || port.trim().is_empty() || pass.trim().is_empty() {
+                                        kit_note.set("Choose kit, port, and passphrase.".into());
+                                        return;
+                                    }
+                                    match crate::node_kit::read_kit_file(
+                                        std::path::Path::new(path.trim()),
+                                        pass.trim(),
+                                    ) {
+                                        Ok(kit) => {
+                                            match crate::node_kit::restore_to_usb(port.trim(), &kit) {
+                                                Ok(msg) => {
+                                                    let _ = state().db.audit(
+                                                        "node_kit_restore",
+                                                        &kit.public_key.chars().take(16).collect::<String>(),
+                                                        port.trim(),
+                                                    );
+                                                    kit_note.set(msg);
+                                                    status_note("Node identity restored over USB");
+                                                    kit_pass.set(String::new());
+                                                    kit_pass2.set(String::new());
+                                                }
+                                                Err(err) => {
+                                                    kit_note.set(err.to_string());
+                                                    crate::toast::push(crate::toast::ToastKind::Error, err.to_string());
+                                                }
+                                            }
+                                        }
+                                        Err(err) => {
+                                            kit_note.set(err.to_string());
+                                            crate::toast::push(crate::toast::ToastKind::Error, err.to_string());
+                                        }
+                                    }
+                                },
+                                "Restore to USB…"
+                            }
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                disabled: kit_selected().trim().is_empty(),
+                                onclick: move |_| {
+                                    let path = kit_selected();
+                                    if path.trim().is_empty() {
+                                        return;
+                                    }
+                                    match crate::node_kit::export_kit_with_dialog(std::path::Path::new(path.trim())) {
+                                        Ok(dest) => {
+                                            kit_note.set(format!("Exported {}", dest.display()));
+                                            status_note("Node kit exported");
+                                        }
+                                        Err(err) => {
+                                            let msg = err.to_string();
+                                            if msg != "Save cancelled." {
+                                                kit_note.set(msg.clone());
+                                                crate::toast::push(crate::toast::ToastKind::Error, msg);
+                                            }
+                                        }
+                                    }
+                                },
+                                "Export…"
+                            }
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| {
+                                    match crate::node_kit::import_kit_with_dialog(&crate::data_dir()) {
+                                        Ok(dest) => {
+                                            kit_selected.set(dest.display().to_string());
+                                            kit_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                            kit_note.set(format!("Imported {}", dest.display()));
+                                            status_note("Node kit imported");
+                                        }
+                                        Err(err) => {
+                                            let msg = err.to_string();
+                                            if msg != "Open cancelled." {
+                                                kit_note.set(msg.clone());
+                                                crate::toast::push(crate::toast::ToastKind::Error, msg);
+                                            }
+                                        }
+                                    }
+                                },
+                                "Import…"
+                            }
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                disabled: kit_selected().trim().is_empty(),
+                                onclick: move |_| {
+                                    let path = kit_selected();
+                                    if path.trim().is_empty() {
+                                        return;
+                                    }
+                                    match crate::node_kit::delete_kit(std::path::Path::new(path.trim())) {
+                                        Ok(()) => {
+                                            let _ = state().db.audit("node_kit_delete", "", path.trim());
+                                            kit_selected.set(String::new());
+                                            kit_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                            kit_note.set("Kit deleted.".into());
+                                        }
+                                        Err(err) => {
+                                            kit_note.set(err.to_string());
+                                            crate::toast::push(crate::toast::ToastKind::Error, err.to_string());
+                                        }
+                                    }
+                                },
+                                Icon { name: IconName::Trash, size: 14 }
+                                "Delete"
+                            }
+                        }
+                        if !kit_note().is_empty() {
+                            p { class: "mt-3 text-sm text-muted-foreground", "{kit_note}" }
+                        }
+                    }
+                }
+            }
+
             Card { title: "Contacts export / import", icon: Some(IconName::Users),
                 p { class: "mb-3 text-sm text-muted-foreground",
                     "Bulk roster JSON (pubkey, name, type, optional GPS). Import merges into HQ only — it does not push contacts onto the radio."
@@ -13532,6 +14126,20 @@ fn SettingsPage(
                                 "Confirm erase"
                             }
                         }
+                        {
+                            // Offer restore after a watched flash completes.
+                            let running = flash.running;
+                            if running {
+                                kit_was_flashing.set(true);
+                            } else if kit_was_flashing() && kit_watch_flash_done() {
+                                kit_was_flashing.set(false);
+                                kit_watch_flash_done.set(false);
+                                if flash.phase == "done" && flash.last_error.is_empty() {
+                                    kit_restore_after_open.set(true);
+                                    kit_port.set(flasher_port());
+                                }
+                            }
+                        }
                         div { class: "flex flex-wrap gap-2",
                             Button {
                                 disabled: flash_busy
@@ -13553,17 +14161,16 @@ fn SettingsPage(
                                         .as_ref()
                                         .map(|d| d.platform.clone())
                                         .unwrap_or_else(|| "esp32".into());
-                                    crate::firmware::start_flash(
-                                        state().radio.clone(),
-                                        crate::firmware::FlashRequest {
-                                            platform,
-                                            port: flasher_port(),
-                                            asset_path: path,
-                                            erase: flasher_erase(),
-                                            uf2,
-                                        },
-                                    );
-                                    flasher_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                    kit_pending_flash.set(Some(crate::firmware::FlashRequest {
+                                        platform,
+                                        port: flasher_port(),
+                                        asset_path: path,
+                                        erase: flasher_erase(),
+                                        uf2,
+                                    }));
+                                    kit_flash_pass.set(String::new());
+                                    kit_flash_pass2.set(String::new());
+                                    kit_flash_backup_open.set(true);
                                 },
                                 Icon { name: IconName::Radio, size: 14 }
                                 if flash_busy { "Flashing…" } else { "Flash" }
@@ -14156,6 +14763,197 @@ fn SettingsPage(
                 } else {
                     p { class: "text-sm text-muted-foreground",
                         "Set infrastructure retention to 7 / 30 / 90 days before purging."
+                    }
+                }
+            }
+
+            Dialog {
+                open: kit_flash_backup_open(),
+                title: "Back up identity before flash?".to_string(),
+                on_close: move |_| {
+                    kit_flash_backup_open.set(false);
+                    kit_pending_flash.set(None);
+                },
+                p { class: "mb-3 text-sm text-muted-foreground",
+                    if kit_pending_flash().as_ref().map(|r| r.erase).unwrap_or(false) {
+                        "Erase wipes the MeshCore private key. Back up over USB serial into an encrypted .metisnode kit before flashing, or Skip only if you already have a kit."
+                    } else {
+                        "Optional: back up this node’s identity over USB before flashing. Recommended whenever you might erase later."
+                    }
+                }
+                div { class: "mb-3 grid gap-2 sm:grid-cols-2",
+                    TextInput {
+                        value: kit_flash_pass(),
+                        placeholder: "Kit passphrase",
+                        kind: "password".to_string(),
+                        oninput: move |event: FormEvent| kit_flash_pass.set(event.value()),
+                    }
+                    TextInput {
+                        value: kit_flash_pass2(),
+                        placeholder: "Confirm passphrase",
+                        kind: "password".to_string(),
+                        oninput: move |event: FormEvent| kit_flash_pass2.set(event.value()),
+                    }
+                }
+                div { class: "flex flex-wrap gap-2",
+                    Button {
+                        kind: ButtonKind::Primary,
+                        onclick: move |_| {
+                            let Some(req) = kit_pending_flash() else { return; };
+                            let a = kit_flash_pass();
+                            let b = kit_flash_pass2();
+                            if a.trim().is_empty() || a != b {
+                                crate::toast::push(
+                                    crate::toast::ToastKind::Error,
+                                    "Enter matching kit passphrases to back up.",
+                                );
+                                return;
+                            }
+                            match crate::node_kit::backup_usb_to_disk(
+                                &crate::data_dir(),
+                                &req.port,
+                                a.trim(),
+                                "desktop",
+                                "flasher",
+                                "",
+                            ) {
+                                Ok((path, meta)) => {
+                                    let _ = state().db.audit(
+                                        "node_kit_backup",
+                                        &meta.public_key.chars().take(16).collect::<String>(),
+                                        &path.display().to_string(),
+                                    );
+                                    status_note(format!("Node kit saved → {}", path.display()));
+                                    kit_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                    kit_flash_backup_open.set(false);
+                                    kit_pending_flash.set(None);
+                                    kit_watch_flash_done.set(true);
+                                    crate::firmware::start_flash(state().radio.clone(), req);
+                                    flasher_tick.with_mut(|n| *n = n.wrapping_add(1));
+                                }
+                                Err(err) => {
+                                    crate::toast::push(
+                                        crate::toast::ToastKind::Error,
+                                        err.to_string(),
+                                    );
+                                }
+                            }
+                        },
+                        "Back up then flash"
+                    }
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        onclick: move |_| {
+                            let Some(req) = kit_pending_flash() else { return; };
+                            if req.erase {
+                                // Extra confirm already required via erase_armed checkbox.
+                            }
+                            kit_flash_backup_open.set(false);
+                            kit_pending_flash.set(None);
+                            kit_watch_flash_done.set(true);
+                            crate::firmware::start_flash(state().radio.clone(), req);
+                            flasher_tick.with_mut(|n| *n = n.wrapping_add(1));
+                        },
+                        "Skip backup — flash now"
+                    }
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        onclick: move |_| {
+                            kit_flash_backup_open.set(false);
+                            kit_pending_flash.set(None);
+                        },
+                        "Cancel"
+                    }
+                }
+            }
+
+            Dialog {
+                open: kit_restore_after_open(),
+                title: "Restore identity after flash?".to_string(),
+                on_close: move |_| kit_restore_after_open.set(false),
+                p { class: "mb-3 text-sm text-muted-foreground",
+                    "Flash finished. Restore a .metisnode kit over USB to bring back the previous public key (requires the kit passphrase)."
+                }
+                {
+                    let _ = kit_tick();
+                    let kits = crate::node_kit::list_kit_entries(&crate::data_dir());
+                    rsx! {
+                        div { class: "mb-3",
+                            SelectInput {
+                                id: "kit-restore-after-select".to_string(),
+                                value: kit_selected(),
+                                onchange: move |event: FormEvent| kit_selected.set(event.value()),
+                                option { value: "", style: "background-color:#151a20;color:#f4f4f5;", "Choose a kit…" }
+                                for entry in kits.iter() {
+                                    {
+                                        let path_s = entry.path.display().to_string();
+                                        let label = format!(
+                                            "{} · {}…",
+                                            entry.name,
+                                            entry.public_key_prefix
+                                        );
+                                        rsx! {
+                                            option {
+                                                key: "{path_s}",
+                                                value: "{path_s}",
+                                                style: "background-color:#151a20;color:#f4f4f5;",
+                                                "{label}"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        TextInput {
+                            value: kit_flash_pass(),
+                            placeholder: "Kit passphrase",
+                            kind: "password".to_string(),
+                            oninput: move |event: FormEvent| kit_flash_pass.set(event.value()),
+                        }
+                        div { class: "mt-3 flex flex-wrap gap-2",
+                            Button {
+                                kind: ButtonKind::Primary,
+                                disabled: kit_selected().trim().is_empty()
+                                    || kit_flash_pass().trim().is_empty()
+                                    || flasher_port().trim().is_empty(),
+                                onclick: move |_| {
+                                    let path = kit_selected();
+                                    let pass = kit_flash_pass();
+                                    let port = flasher_port();
+                                    match crate::node_kit::read_kit_file(
+                                        std::path::Path::new(path.trim()),
+                                        pass.trim(),
+                                    ) {
+                                        Ok(kit) => match crate::node_kit::restore_to_usb(port.trim(), &kit) {
+                                            Ok(msg) => {
+                                                let _ = state().db.audit(
+                                                    "node_kit_restore",
+                                                    &kit.public_key.chars().take(16).collect::<String>(),
+                                                    port.trim(),
+                                                );
+                                                status_note(msg);
+                                                kit_restore_after_open.set(false);
+                                                kit_flash_pass.set(String::new());
+                                            }
+                                            Err(err) => crate::toast::push(
+                                                crate::toast::ToastKind::Error,
+                                                err.to_string(),
+                                            ),
+                                        },
+                                        Err(err) => crate::toast::push(
+                                            crate::toast::ToastKind::Error,
+                                            err.to_string(),
+                                        ),
+                                    }
+                                },
+                                "Restore to USB"
+                            }
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| kit_restore_after_open.set(false),
+                                "Not now"
+                            }
+                        }
                     }
                 }
             }

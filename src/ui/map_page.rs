@@ -18,7 +18,8 @@ use super::map_host::{
     map_fit_bounds, map_fly_to, map_get_camera, map_init, map_pulse_at, map_set_geojson,
     map_camera_from_global, map_clear_region_draft, map_is_moving, map_place_region_draft,
     map_region_draft_seq, map_set_nodes, map_set_style, map_set_temp_pin, map_set_visibility,
-    map_snapshot_region_draft, map_take_favorite_toggle, map_take_selection, map_zoom_by,
+    map_play_ping_fx, map_set_ping_result, map_snapshot_region_draft, map_take_favorite_toggle,
+    map_take_ping, map_take_selection, map_zoom_by,
     region_draft_from_placement, save_basemap, save_camera, BasemapKind, MapCamera,
     RegionDraftConfirm, MAP_CONTAINER_ID,
 };
@@ -346,6 +347,95 @@ fn highlight_feature(line: &MapLine, direction: &str) -> Value {
             "coordinates": line.coords,
         }
     })
+}
+
+/// Mid-hop `[lng, lat]` pins for the ping beam when hop hashes resolve to GPS.
+fn ping_path_waypoints(pubkey: &str) -> Vec<(f64, f64)> {
+    let db = &state().db;
+    let path_nodes = db.known_nodes_for_paths().unwrap_or_default();
+    let hq_pos = db
+        .hq_position()
+        .ok()
+        .flatten()
+        .map(|(_, lat, lon)| (lon, lat));
+    let peer_pos = path_nodes
+        .iter()
+        .find(|n| hex::encode(&n.pubkey) == pubkey)
+        .and_then(|n| Some((n.lon?, n.lat?)));
+    let (path, hash_size, hops) = if let Some(node) = db.get_node(pubkey).ok().flatten() {
+        if !node.hop_bytes.is_empty() {
+            (
+                node.hop_bytes.clone(),
+                1usize,
+                node.hop_bytes.len() as u32,
+            )
+        } else if let Some(stored) = db.latest_path_for_pubkey(pubkey).ok().flatten() {
+            let hs = stored.hash_size.max(1) as usize;
+            let hops = if hs > 0 {
+                (stored.path.len() as u32) / (hs as u32)
+            } else {
+                0
+            };
+            (stored.path, hs, hops)
+        } else {
+            return Vec::new();
+        }
+    } else {
+        return Vec::new();
+    };
+    let Some(line) = build_line(true, hq_pos, peer_pos, &path, hash_size, &path_nodes, hops)
+    else {
+        return Vec::new();
+    };
+    // Drop HQ start and peer end — playPingFx adds those.
+    if line.coords.len() <= 2 {
+        return Vec::new();
+    }
+    line.coords[1..line.coords.len() - 1].to_vec()
+}
+
+fn ping_path_note(pubkey: &str) -> String {
+    let hops = state()
+        .db
+        .get_node(pubkey)
+        .ok()
+        .flatten()
+        .and_then(|n| {
+            if !n.hop_bytes.is_empty() {
+                Some(n.hop_bytes.len() as i64)
+            } else if n.path_len == 0 {
+                Some(0)
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            state()
+                .db
+                .latest_path_for_pubkey(pubkey)
+                .ok()
+                .flatten()
+                .map(|p| {
+                    let hs = p.hash_size.max(1);
+                    if hs > 0 {
+                        (p.path.len() as i64) / hs
+                    } else {
+                        0
+                    }
+                })
+        });
+    match hops {
+        Some(0) => " · direct".into(),
+        Some(n) if n > 0 => {
+            let via = ping_path_waypoints(pubkey).len();
+            if via > 0 {
+                format!(" · {n} hop(s), {via} on map")
+            } else {
+                format!(" · {n} hop(s), no repeater pins")
+            }
+        }
+        _ => " · no cached route".into(),
+    }
 }
 
 fn neighbor_feature(a: (f64, f64), b: (f64, f64), snr: f64) -> Value {
@@ -1615,6 +1705,64 @@ pub fn MapPage() -> Element {
                             }
                             save_favorites(set);
                         });
+                    }
+                }
+                if let Some(key) = map_take_ping().await {
+                    if !key.is_empty() {
+                        let short: String = key.chars().take(12).collect();
+                        let label = state()
+                            .db
+                            .get_node(&key)
+                            .ok()
+                            .flatten()
+                            .map(|n| n.name)
+                            .filter(|n| !n.trim().is_empty())
+                            .unwrap_or_else(|| short.clone());
+                        let path_note = ping_path_note(&key);
+                        map_set_ping_result(
+                            &key,
+                            "pending",
+                            &format!("Pinging…{path_note}"),
+                        )
+                        .await;
+                        // Visual: beam HQ → resolved hop pins → target (straight if no hops).
+                        let waypoints = ping_path_waypoints(&key);
+                        if let Some((_, hq_lat, hq_lon)) =
+                            state().db.hq_position().ok().flatten()
+                        {
+                            map_play_ping_fx(
+                                &key,
+                                hq_lon,
+                                hq_lat,
+                                Some("rgba(134, 239, 172, 0.95)"),
+                                &waypoints,
+                            )
+                            .await;
+                        } else {
+                            map_play_ping_fx(
+                                &key,
+                                f64::NAN,
+                                f64::NAN,
+                                Some("rgba(134, 239, 172, 0.95)"),
+                                &[],
+                            )
+                            .await;
+                        }
+                        let ping_key = key.clone();
+                        super::messages_rail::begin_node_ping_with(
+                            key,
+                            label,
+                            Some(Box::new(move |ok, summary| {
+                                spawn(async move {
+                                    map_set_ping_result(
+                                        &ping_key,
+                                        if ok { "ok" } else { "err" },
+                                        &summary,
+                                    )
+                                    .await;
+                                });
+                            })),
+                        );
                     }
                 }
                 // If a pin opened without a cached QR yet, enqueue background encode

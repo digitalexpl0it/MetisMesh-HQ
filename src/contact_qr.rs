@@ -115,6 +115,30 @@ pub fn parse_contact_add_uri(uri: &str) -> Option<(String, String, u8)> {
     Some((name, pubkey, ty))
 }
 
+/// Phone-app / channel contact share: `<64hex:type:name>`.
+/// `type` is MeshCore contact type 1–4; name may contain spaces/colons.
+pub fn parse_contact_bracket_share(raw: &str) -> Option<(String, String, u8)> {
+    let raw = raw.trim();
+    let inner = raw.strip_prefix('<')?.strip_suffix('>')?.trim();
+    let mut parts = inner.splitn(3, ':');
+    let pubkey = parts.next()?.trim().to_ascii_lowercase();
+    let ty_s = parts.next()?.trim();
+    let name = parts.next()?.trim();
+    if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let ty: u8 = ty_s.parse().ok()?;
+    if !(1..=4).contains(&ty) {
+        return None;
+    }
+    let name = if name.is_empty() {
+        pubkey.chars().take(12).collect()
+    } else {
+        name.to_string()
+    };
+    Some((name, pubkey, ty))
+}
+
 fn urldecode_component(raw: &str) -> String {
     let bytes = raw.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -356,6 +380,22 @@ mod tests {
         assert_eq!(pubkey, key);
         assert_eq!(ty, 2);
         assert!(parse_contact_add_uri("meshcore://aabbcc").is_none());
+    }
+
+    #[test]
+    fn parse_bracket_contact_share() {
+        let key = "dd20c627e76ee46c225fcb65f3de5da709600843806c4d436b0f1ed410a52dd8";
+        let raw = format!("<{key}:1:KG6LOE - Home>");
+        let (name, pubkey, ty) = parse_contact_bracket_share(&raw).expect("parse");
+        assert_eq!(name, "KG6LOE - Home");
+        assert_eq!(pubkey, key);
+        assert_eq!(ty, 1);
+        assert!(parse_contact_bracket_share("<not-a-key:1:x>").is_none());
+        assert!(parse_contact_bracket_share(&format!("<{key}:9:bad>")).is_none());
+        let with_colon = format!("<{key}:2:Base: A>");
+        let (n, _, t) = parse_contact_bracket_share(&with_colon).expect("colon name");
+        assert_eq!(n, "Base: A");
+        assert_eq!(t, 2);
     }
 
     #[test]

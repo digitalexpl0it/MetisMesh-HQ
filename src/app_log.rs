@@ -125,6 +125,8 @@ pub fn redact(text: &str) -> String {
         "pin:",
         "private key",
         "prv.key",
+        "private_key",
+        "metisnode",
         "wifi.pwd",
     ];
     if sensitive.iter().any(|needle| lower.contains(needle)) {

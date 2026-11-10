@@ -1319,6 +1319,187 @@ async fn handle_tls_client(
                 }
             }
         }
+        ("GET", "/api/node-kits") => {
+            if !authed {
+                http_json(401, &json!({ "error": "login required" }))
+            } else {
+                let dir = data_dir.clone();
+                let list = tokio::task::spawn_blocking(move || crate::node_kit::kit_list_json(&dir))
+                    .await
+                    .unwrap_or_default();
+                http_json(200, &json!({ "kits": list }))
+            }
+        }
+        ("POST", "/api/node-kit") => {
+            if !authed {
+                http_json(401, &json!({ "error": "login required" }))
+            } else {
+                match serde_json::from_str::<Value>(&body) {
+                    Ok(v) => {
+                        let passphrase = v
+                            .get("passphrase")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if passphrase.trim().is_empty() {
+                            http_json(400, &json!({ "error": "passphrase required" }))
+                        } else {
+                            let mut payload = crate::node_kit::new_payload_shell("lan-locker");
+                            payload.public_key = v
+                                .get("public_key")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            payload.private_key = v
+                                .get("private_key")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            payload.name = v
+                                .get("name")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            payload.role_hint = v
+                                .get("role_hint")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            payload.board = v
+                                .get("board")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            payload.radio = v
+                                .get("radio")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            payload.lat = v
+                                .get("lat")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            payload.lon = v
+                                .get("lon")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            payload.advert_interval = v
+                                .get("advert_interval")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            payload.path_hash_mode = v
+                                .get("path_hash_mode")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            payload.guest_password = v
+                                .get("guest_password")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            payload.claimed_pubkey = v
+                                .get("claimed_pubkey")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let dir = data_dir.clone();
+                            let peer = peer_ip.to_string();
+                            let result = tokio::task::spawn_blocking(move || {
+                                crate::node_kit::write_kit_file(&dir, &payload, &passphrase)
+                            })
+                            .await;
+                            match result {
+                                Ok(Ok(path)) => {
+                                    let name = path
+                                        .file_name()
+                                        .and_then(|n| n.to_str())
+                                        .unwrap_or("kit.metisnode")
+                                        .to_string();
+                                    let _ = db.audit("flash_locker_node_kit", &name, &peer);
+                                    http_json(
+                                        200,
+                                        &json!({
+                                            "ok": true,
+                                            "id": name,
+                                            "file_name": name,
+                                        }),
+                                    )
+                                }
+                                Ok(Err(err)) => {
+                                    http_json(400, &json!({ "error": err.to_string() }))
+                                }
+                                Err(err) => {
+                                    http_json(500, &json!({ "error": err.to_string() }))
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => http_json(400, &json!({ "error": "invalid JSON" })),
+                }
+            }
+        }
+        ("POST", "/api/node-kit/unlock") => {
+            if !authed {
+                http_json(401, &json!({ "error": "login required" }))
+            } else if !take_rate_slot(pin_fail_buckets(), peer_ip, PIN_FAIL_LIMIT) {
+                http_json(429, &json!({ "error": "too many unlock attempts" }))
+            } else {
+                match serde_json::from_str::<Value>(&body) {
+                    Ok(v) => {
+                        let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                        let passphrase = v
+                            .get("passphrase")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let dir = data_dir.clone();
+                        let id_for_job = id.clone();
+                        let result = tokio::task::spawn_blocking(move || {
+                            let path = crate::node_kit::kit_path_by_name(&dir, &id_for_job)?;
+                            crate::node_kit::read_kit_file(&path, &passphrase)
+                        })
+                        .await;
+                        match result {
+                            Ok(Ok(kit)) => {
+                                let _ = db.audit(
+                                    "flash_locker_node_kit_unlock",
+                                    &id,
+                                    &peer_ip.to_string(),
+                                );
+                                // Return kit fields for in-browser restore only — never log body.
+                                http_json(
+                                    200,
+                                    &json!({
+                                        "ok": true,
+                                        "public_key": kit.public_key,
+                                        "private_key": kit.private_key,
+                                        "name": kit.name,
+                                        "lat": kit.lat,
+                                        "lon": kit.lon,
+                                        "advert_interval": kit.advert_interval,
+                                        "guest_password": kit.guest_password,
+                                        "admin_password": kit.admin_password,
+                                    }),
+                                )
+                            }
+                            Ok(Err(crate::node_kit::NodeKitError::Decrypt)) => {
+                                http_json(401, &json!({ "error": "wrong passphrase" }))
+                            }
+                            Ok(Err(err)) => {
+                                http_json(400, &json!({ "error": err.to_string() }))
+                            }
+                            Err(err) => {
+                                http_json(500, &json!({ "error": err.to_string() }))
+                            }
+                        }
+                    }
+                    Err(_) => http_json(400, &json!({ "error": "invalid JSON" })),
+                }
+            }
+        }
         ("GET" | "POST" | "PUT" | "DELETE", _) => {
             http_json(404, &json!({ "error": "not found" }))
         }

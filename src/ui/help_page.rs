@@ -373,11 +373,19 @@ pub fn HelpPage() -> Element {
                         ul { class: "help-bullets",
                             li {
                                 strong { "Messages" }
-                                " — Channels / DMs / Contacts rail. Channel traffic lists who posted this session under each channel name (cleared when HQ restarts). Direct threads need a public key from a contact card (`meshcore://contact/add`) or a synced companion contact — channel display names alone are not enough."
+                                " — Channels / DMs / Contacts rail. Channel traffic lists who posted this session under each channel name (cleared when HQ restarts). Direct threads need a public key from a contact card (`meshcore://contact/add` or phone-app `<pubkey:type:name>`) or a synced companion contact — channel display names alone are not enough. "
+                                strong { "Refresh contact / Ping" }
+                                " need a unicast route (or flood contact); hearing someone on a channel is flood and does not by itself give a path."
                             }
                             li {
                                 strong { "Inbox" }
                                 " — operator queue: pending signups and held service alerts (when auto-relay is off)."
+                            }
+                            li {
+                                strong { "Spellcheck" }
+                                " — OS dictionary on channel, DM, and Broadcast compose (default on; compose is a textarea so underlines show). Linux WebKit needs hunspell dictionaries installed (e.g. hunspell-en-us). Right-click a flagged word for suggestions. Turn off under Settings → Preferences → Compose. Callsigns, "
+                                code { "#weather" }
+                                ", and hex may false-positive."
                             }
                         }
                         p { "Ordinary DMs live under Messages → DMs (or Contacts with a known key), not Inbox." }
@@ -391,7 +399,9 @@ pub fn HelpPage() -> Element {
                         ul { class: "help-bullets",
                             li {
                                 strong { "Map" }
-                                " — pins from self-reported GPS (ignore 0,0). HQ site pin is separate (Settings). Trace (tracked or claimed pins) fetches a path via the companion only — no channel/DM posts; uses airtime. Traffic overlay weights overheard edges in the time window (passive)."
+                                " — pins from self-reported GPS (ignore 0,0). HQ site pin is separate (Settings). Pin detail "
+                                strong { "Ping" }
+                                " sends a mesh status request (reachability + SNR/RSSI/battery; uses airtime). On the map a beam grows from the HQ pin to the target, then the pin sonar-pulses. Trace (tracked or claimed pins, toolbar) fetches a path via the companion — no channel/DM posts; also uses airtime. Traffic overlay weights overheard edges in the time window (passive)."
                             }
                             li {
                                 strong { "Tracker" }
@@ -437,30 +447,50 @@ pub fn HelpPage() -> Element {
                             "Local API"
                         }
                         p {
-                            "Opt-in read-only JSON under Settings → Services → "
+                            "Opt-in read-only JSON (API v2) under Settings → Services → "
                             strong { "Local API" }
                             ". Default "
                             code { "127.0.0.1:8787" }
                             " with path prefix "
                             code { "/api/v1" }
-                            ". Bearer token required on every request (stored as "
+                            ". Bearer token required on data routes ("
+                            code { "/health" }
+                            ", status, nodes, chat, infra, …). "
+                            code { "/docs" }
+                            " and "
+                            code { "/openapi.json" }
+                            " are open without a token so the browser can load the try-it UI (stored as "
                             code { "data/local-api.token" }
-                            ", mode 0600). Field names under "
-                            code { "/api/v1" }
-                            " are stable; breaking changes would use a new version prefix."
+                            ", mode 0600)."
                         }
                         p {
+                            strong { "Readable: " }
+                            "status, roster, channels metadata, channel/DM message history, claimed infra + samples, "
+                            code { "/stats" }
+                            " / "
+                            code { "/metrics" }
+                            ". "
                             strong { "Never exposed: " }
-                            "channel secrets, keyring material, Compose/send, enroll/approve/deny, radio CLI, full message bodies, or GPS trails. Forbidden paths return "
+                            "channel secrets, keyring, Compose/send, enroll/approve/deny, radio CLI, or GPS trails. Forbidden roots return "
                             code { "403" }
-                            "."
+                            ". Message and sample routes use a tighter per-minute heavy-route limit."
                         }
                         p { class: "help-muted",
-                            "Prefer loopback. Binding to the LAN means anyone with the token on that network can read status."
+                            "Prefer loopback. Binding to the LAN means anyone with the token can read chat and infra status on that network."
+                        }
+                        h4 { class: "help-subtitle", "OpenAPI / docs" }
+                        p {
+                            "Machine-readable spec: "
+                            code { "GET /api/v1/openapi.json" }
+                            ". Offline try-it UI: Settings → Local API → "
+                            strong { "Open API docs" }
+                            " (or "
+                            code { "http://127.0.0.1:8787/api/v1/docs" }
+                            ") and paste the bearer token."
                         }
                         h4 { class: "help-subtitle", "curl" }
                         pre { class: "help-pre",
-                            {"TOKEN=…   # paste from Settings → Local API → Copy token\ncurl -sS -H \"Authorization: Bearer $TOKEN\" \\\n  http://127.0.0.1:8787/api/v1/health\ncurl -sS -H \"Authorization: Bearer $TOKEN\" \\\n  http://127.0.0.1:8787/api/v1/status\ncurl -sS -H \"Authorization: Bearer $TOKEN\" \\\n  http://127.0.0.1:8787/api/v1/stats\ncurl -sS -H \"Authorization: Bearer $TOKEN\" \\\n  http://127.0.0.1:8787/api/v1/infra"}
+                            {"TOKEN=…   # paste from Settings → Local API → Copy token\ncurl -sS -H \"Authorization: Bearer $TOKEN\" \\\n  http://127.0.0.1:8787/api/v1/health\ncurl -sS -H \"Authorization: Bearer $TOKEN\" \\\n  http://127.0.0.1:8787/api/v1/metrics\ncurl -sS -H \"Authorization: Bearer $TOKEN\" \\\n  http://127.0.0.1:8787/api/v1/channels/Public/messages?limit=20\ncurl -sS -H \"Authorization: Bearer $TOKEN\" \\\n  \"http://127.0.0.1:8787/api/v1/infra/<pubkey>/samples?limit=100\""}
                         }
                         h4 { class: "help-subtitle", "Home Assistant (REST)" }
                         p { class: "help-muted",
@@ -564,6 +594,17 @@ pub fn HelpPage() -> Element {
                             code { ".metisbak" }
                             " (passphrase) of the database and channel secrets. Prefer that over copying files by hand."
                         }
+                        p {
+                            "Separate "
+                            strong { "Node identity kits" }
+                            " ("
+                            code { ".metisnode" }
+                            ") back up a companion or repeater "
+                            code { "prv.key" }
+                            " over USB serial only — never LoRa. Use before erase/reflash; Flasher and the LAN locker prompt to back up / restore. Kits are not inside the HQ "
+                            code { ".metisbak" }
+                            "."
+                        }
                         p { "Live files are "
                             code { "metis.db" }
                             " plus optional "
@@ -591,7 +632,7 @@ pub fn HelpPage() -> Element {
                                 strong { "Settings → Flasher → Manage firmware" }
                                 ": select the boards and roles you actually own → "
                                 strong { "Save & sync" }
-                                ". Sync also pulls OTAFIX bootloader / erase images for selected nRF boards when the catalog lists them."
+                                ". Sync also pulls OTAFIX bootloader / erase images for selected nRF boards when the catalog lists them. For boards you may reflash later, use Settings → Data → Node identity kits (USB) before erase."
                             }
                             li {
                                 "Wait until Flasher says "

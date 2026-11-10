@@ -129,6 +129,7 @@ pub fn TextInput(
     #[props(default)] autofocus: bool,
     oninput: EventHandler<FormEvent>,
 ) -> Element {
+    let is_password = kind.eq_ignore_ascii_case("password");
     rsx! {
         input {
             class: "h-9 w-full rounded-md border border-border bg-card px-3 text-sm text-foreground outline-none",
@@ -138,7 +139,96 @@ pub fn TextInput(
             maxlength: maxlength.map(|value| value.to_string()),
             autofocus,
             autocomplete: "off",
+            spellcheck: !is_password,
             oninput: move |event| oninput.call(event),
+        }
+    }
+}
+
+pub const COMPOSE_SPELLCHECK_KEY: &str = "compose_spellcheck";
+
+/// Cached preference — avoid a SQLite read on every compose keystroke.
+static COMPOSE_SPELLCHECK: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+static COMPOSE_SPELLCHECK_LOADED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether Messages / Broadcast compose should use OS WebView spellcheck.
+pub fn compose_spellcheck_enabled() -> bool {
+    use std::sync::atomic::Ordering;
+    if !COMPOSE_SPELLCHECK_LOADED.load(Ordering::Relaxed) {
+        let on = crate::services::setting_bool(&super::state().db, COMPOSE_SPELLCHECK_KEY, true);
+        COMPOSE_SPELLCHECK.store(on, Ordering::Relaxed);
+        COMPOSE_SPELLCHECK_LOADED.store(true, Ordering::Relaxed);
+    }
+    COMPOSE_SPELLCHECK.load(Ordering::Relaxed)
+}
+
+/// Persist + cache the compose spellcheck preference (Settings toggle).
+pub fn set_compose_spellcheck_enabled(on: bool) {
+    use std::sync::atomic::Ordering;
+    COMPOSE_SPELLCHECK.store(on, Ordering::Relaxed);
+    COMPOSE_SPELLCHECK_LOADED.store(true, Ordering::Relaxed);
+    crate::services::set_setting_bool(&super::state().db, COMPOSE_SPELLCHECK_KEY, on);
+}
+
+/// Channel / DM / Broadcast compose editor with optional OS spellcheck and a
+/// native context menu (see `data-allow-context-menu` + main.rs boot script).
+///
+/// Always a `<textarea>` — browsers (and WebView2) do not show spell underlines
+/// on single-line `<input>`, even with `spellcheck=true`.
+///
+/// Pass a `Signal` that **this** component (or a small dock sibling) reads — do
+/// not read that signal from a parent that also paints the message list, or
+/// every keystroke will re-render the thread (cursor jump + lag).
+#[component]
+pub fn ComposeField(
+    mut text: Signal<String>,
+    placeholder: String,
+    #[props(default = false)] disabled: bool,
+    #[props(default = false)] multiline: bool,
+    #[props(default)] class_name: Option<String>,
+    #[props(default)] onkeydown: EventHandler<KeyboardEvent>,
+    /// Fired after the draft Signal updates (e.g. clear a canned-reply selection).
+    #[props(default)] on_change: EventHandler<String>,
+) -> Element {
+    let spellcheck = compose_spellcheck_enabled();
+    let class = class_name.unwrap_or_else(|| {
+        if multiline {
+            "compose-field compose-field-multi min-w-0 flex-1".into()
+        } else {
+            "compose-field compose-field-single min-w-0 flex-1".into()
+        }
+    });
+    let rows = if multiline { "4" } else { "1" };
+    let spell_attr = if spellcheck { "true" } else { "false" };
+    let shown = text();
+    rsx! {
+        textarea {
+            class: "{class}",
+            value: "{shown}",
+            placeholder,
+            disabled,
+            rows: "{rows}",
+            lang: "en",
+            autocomplete: "off",
+            autocorrect: "off",
+            autocapitalize: "off",
+            spellcheck: "{spell_attr}",
+            "data-allow-context-menu": "true",
+            oninput: move |event: FormEvent| {
+                let next = clamp_mesh_text(event.value());
+                if text.peek().as_str() != next {
+                    text.set(next.clone());
+                    on_change.call(next);
+                }
+            },
+            onkeydown: move |event: KeyboardEvent| {
+                if !multiline && event.key() == Key::Enter {
+                    event.prevent_default();
+                }
+                onkeydown.call(event);
+            },
         }
     }
 }

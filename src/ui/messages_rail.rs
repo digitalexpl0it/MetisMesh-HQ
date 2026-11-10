@@ -155,6 +155,99 @@ fn rail_block_label(label: &str) -> String {
         .to_string()
 }
 
+/// Mesh status ping (binary Status request). Shared by map, rail, roster, bubbles.
+/// `on_result` receives `(ok, summary)` for map detail card updates.
+pub(crate) fn begin_node_ping(pubkey: String, label: impl Into<String>) {
+    begin_node_ping_with(pubkey, label, None);
+}
+
+pub(crate) fn begin_node_ping_with(
+    pubkey: String,
+    label: impl Into<String>,
+    on_result: Option<Box<dyn FnOnce(bool, String) + Send>>,
+) {
+    let label = label.into();
+    let key = pubkey.trim().to_ascii_lowercase();
+    if key.len() < 12 || !key.chars().all(|c| c.is_ascii_hexdigit()) {
+        let msg = "No public key to ping.".to_string();
+        crate::toast::push(crate::toast::ToastKind::Warn, msg.clone());
+        if let Some(cb) = on_result {
+            cb(false, msg);
+        }
+        return;
+    }
+    let snap = state().radio.snapshot();
+    if snap.state != "connected" {
+        let msg = "Connect a companion before pinging.".to_string();
+        crate::toast::push(crate::toast::ToastKind::Error, msg.clone());
+        if let Some(cb) = on_result {
+            cb(false, msg);
+        }
+        return;
+    }
+    let shown = {
+        let t = label.trim();
+        if t.is_empty() {
+            key.chars().take(12).collect::<String>()
+        } else {
+            t.to_string()
+        }
+    };
+    let path_hint = {
+        let db = &state().db;
+        if let Ok(Some(n)) = db.get_node(&key) {
+            if !n.hop_bytes.is_empty() {
+                format!(" · {} hop(s)", n.hop_bytes.len())
+            } else if n.path_len == 0 {
+                " · direct".into()
+            } else {
+                " · no cached route".into()
+            }
+        } else {
+            String::new()
+        }
+    };
+    crate::toast::push(
+        crate::toast::ToastKind::Info,
+        format!("Pinging {shown}…{path_hint}"),
+    );
+    let rx = state().radio.ping_node(key.clone());
+    spawn(async move {
+        let result = rx
+            .await
+            .unwrap_or_else(|_| Err("Radio task ended.".into()));
+        match result {
+            Ok(info) => {
+                let prior_tx = state()
+                    .db
+                    .get_infra_status_latest(&key)
+                    .ok()
+                    .flatten()
+                    .and_then(|r| r.tx_power_dbm);
+                crate::radio::persist_infra_status_probe(&state().db, &key, &info, prior_tx);
+                let batt = info.battery_mv as f64 / 1000.0;
+                let summary = format!(
+                    "ok · SNR {:.1} · RSSI {} · noise {} · {:.2} V",
+                    info.snr, info.last_rssi, info.noise_floor, batt
+                );
+                crate::toast::push(
+                    crate::toast::ToastKind::Success,
+                    format!("Ping ok · {shown} · {}", summary.trim_start_matches("ok · ")),
+                );
+                if let Some(cb) = on_result {
+                    cb(true, summary);
+                }
+            }
+            Err(err) => {
+                crate::toast::push(crate::toast::ToastKind::Error, err.clone());
+                if let Some(cb) = on_result {
+                    cb(false, err);
+                }
+            }
+        }
+    });
+}
+
 fn rail_begin_contact_refresh(
     key: String,
     mut refreshing: Signal<HashSet<String>>,
@@ -2075,6 +2168,8 @@ fn RailItemMenuPanel(
     #[props(default = false)] is_contact_pin: bool,
     /// Contact/DM with a real pubkey — offer companion advert-path fetch.
     #[props(default = false)] show_fetch_path: bool,
+    /// Same gate as fetch — mesh status ping (uses airtime).
+    #[props(default = false)] show_ping: bool,
     #[props(default = false)] show_block: bool,
     #[props(default = false)] is_blocked: bool,
     #[props(default)] item_label: String,
@@ -2087,6 +2182,7 @@ fn RailItemMenuPanel(
     on_details: EventHandler<()>,
     on_block: EventHandler<(String, String)>,
     on_refresh_contact: EventHandler<String>,
+    #[props(default)] on_ping: EventHandler<String>,
 ) -> Element {
     let mut move_open = use_signal(|| false);
     let fav_kind = item_kind.clone();
@@ -2096,6 +2192,7 @@ fn RailItemMenuPanel(
     let add_kind = item_kind.clone();
     let add_key = item_key.clone();
     let fetch_key = item_key.clone();
+    let ping_key = item_key.clone();
     let block_key = item_key.clone();
     let block_label = item_label.clone();
     let unblock_key = item_key.clone();
@@ -2170,12 +2267,26 @@ fn RailItemMenuPanel(
                 Icon { name: IconName::Help, size: 12 }
                 "Details"
             }
+            if show_ping {
+                button {
+                    r#type: "button",
+                    class: "rail-item-menu-item",
+                    role: "menuitem",
+                    title: "Mesh status ping — SNR / RSSI / battery (uses airtime)",
+                    onclick: move |_| {
+                        on_close.call(());
+                        on_ping.call(ping_key.clone());
+                    },
+                    Icon { name: IconName::Radio, size: 12 }
+                    "Ping"
+                }
+            }
             if show_fetch_path {
                 button {
                     r#type: "button",
                     class: "rail-item-menu-item",
                     role: "menuitem",
-                    title: "Sync companion contact, fetch path, then request status and telemetry (uses airtime)",
+                    title: "Sync radio contact, fetch path, then status/telemetry (uses airtime). Channel chat is flood — unicast status needs a route or flood contact.",
                     onclick: move |_| {
                         on_close.call(());
                         on_refresh_contact.call(fetch_key.clone());
@@ -2634,6 +2745,7 @@ fn DmRailItem(
                         sections: sections.clone(),
                         show_clear: true,
                         show_fetch_path: true,
+                        show_ping: true,
                         show_block: true,
                         is_blocked: blocked,
                         on_close: move |_| menu.set(None),
@@ -2648,6 +2760,10 @@ fn DmRailItem(
                         on_block: move |pair| on_block.call(pair),
                         on_refresh_contact: move |key| {
                             rail_begin_contact_refresh(key, refreshing, on_changed);
+                        },
+                        on_ping: {
+                            let ping_label = menu_label.clone();
+                            move |key| begin_node_ping(key, ping_label.clone())
                         },
                     }
                 }
@@ -2780,6 +2896,7 @@ fn ContactNodeItem(
                         sections: sections.clone(),
                         is_contact_pin: true,
                         show_fetch_path: has_pubkey,
+                        show_ping: has_pubkey,
                         show_block: true,
                         is_blocked: blocked,
                         on_close: move |_| menu.set(None),
@@ -2794,6 +2911,10 @@ fn ContactNodeItem(
                         on_block: move |pair| on_block.call(pair),
                         on_refresh_contact: move |key| {
                             rail_begin_contact_refresh(key, refreshing, on_changed);
+                        },
+                        on_ping: {
+                            let ping_label = menu_label.clone();
+                            move |key| begin_node_ping(key, ping_label.clone())
                         },
                     }
                 }

@@ -1,0 +1,217 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Metis Mesh HQ Local API",
+    "version": "2",
+    "description": "Opt-in read-only JSON API. Bearer token required on data routes. /docs and /openapi.json are public so a browser can load the try-it UI. No compose, send, enroll, CLI, or channel secrets."
+  },
+  "servers": [{ "url": "/api/v1" }],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "token"
+      }
+    }
+  },
+  "security": [{ "bearerAuth": [] }],
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Health check",
+        "responses": {
+          "200": { "description": "OK" },
+          "401": { "description": "Unauthorized" },
+          "429": { "description": "Rate limited" }
+        }
+      }
+    },
+    "/status": {
+      "get": {
+        "summary": "HQ and companion status",
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/nodes": {
+      "get": {
+        "summary": "Roster nodes",
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/nodes/{id}": {
+      "get": {
+        "summary": "Single node by pubkey or unique prefix (≥12 hex)",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": { "description": "OK" },
+          "404": { "description": "Not found" }
+        }
+      }
+    },
+    "/channels": {
+      "get": {
+        "summary": "Channel metadata (no secrets)",
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/channels/{name}": {
+      "get": {
+        "summary": "Single channel metadata",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": { "description": "OK" },
+          "404": { "description": "Not found" }
+        }
+      }
+    },
+    "/channels/{name}/messages": {
+      "get": {
+        "summary": "Channel message page (newest first page, ASC within page)",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "schema": { "type": "integer" },
+            "description": "Return messages older than this message id"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "default": 50, "maximum": 100 }
+          }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/dms": {
+      "get": {
+        "summary": "DM threads",
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/dms/{pubkey}/messages": {
+      "get": {
+        "summary": "DM message page",
+        "parameters": [
+          {
+            "name": "pubkey",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "schema": { "type": "integer" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "default": 50, "maximum": 100 }
+          }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/infra": {
+      "get": {
+        "summary": "Claimed infrastructure + latest status",
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/infra/{pubkey}": {
+      "get": {
+        "summary": "Claimed node detail",
+        "parameters": [
+          {
+            "name": "pubkey",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": { "description": "OK" },
+          "404": { "description": "Not found" }
+        }
+      }
+    },
+    "/infra/{pubkey}/samples": {
+      "get": {
+        "summary": "Infra status sample history",
+        "parameters": [
+          {
+            "name": "pubkey",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "schema": { "type": "integer" },
+            "description": "Unix seconds lower bound (default now-24h)"
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "schema": { "type": "integer" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "default": 200, "maximum": 500 }
+          }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/stats": {
+      "get": {
+        "summary": "Aggregate counts and hourly message series",
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "summary": "Stable metrics object for scrapers",
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "summary": "This OpenAPI document (no bearer required)",
+        "security": [],
+        "responses": { "200": { "description": "OpenAPI 3 JSON" } }
+      }
+    },
+    "/docs": {
+      "get": {
+        "summary": "Offline API docs UI (no bearer required)",
+        "security": [],
+        "responses": { "200": { "description": "HTML" } }
+      }
+    }
+  }
+}

@@ -9,7 +9,7 @@ One page for church / community volunteers running **Metis Mesh HQ** when the WA
 
 1. Install Metis Mesh HQ and finish the setup wizard (Bluetooth / USB dialout / optional flashers).
 2. Connect the MeshCore companion radio (BLE, USB, or TCP).
-3. **Settings → Flasher → Manage firmware**: select the boards and roles you actually own → **Save & sync**. Sync also pulls OTAFIX bootloader / erase images for selected nRF boards when the catalog lists them.
+3. **Settings → Flasher → Manage firmware**: select the boards and roles you actually own → **Save & sync**. Sync also pulls OTAFIX bootloader / erase images for selected nRF boards when the catalog lists them. For owned repeaters/companions you may reflash later, use Settings → Data → **Node identity kits** (USB) to save encrypted `.metisnode` files before any erase.
 4. Wait until the Flasher page says **Ready for outage**. Optionally **Check integrity**, then **Export pack** to a `MetisMeshHQ-firmware-*.zip` on a USB stick.
 5. Optional: enable the **LAN flash locker** (Settings → Flasher) while you still have LAN peers who need to flash from another laptop — they use the room PIN over HTTPS (self-signed cert). Web Serial needs Chrome/Edge; OTAFIX remains UF2 drag-drop.
 6. Leave the laptop plugged into a UPS or wall power; disable sleep while HQ is the desk radio.
@@ -22,7 +22,7 @@ One page for church / community volunteers running **Metis Mesh HQ** when the WA
 4. **Map** — open Map; confirm local pins / last-heard nodes (self-reported GPS only).
 5. **Channel** — open Messages → Channels; post a short check-in on your community channel so volunteers know HQ is live. Speakers who post appear under the channel for this session only.
 6. **Roster / Contacts** — approve pending enrollments only for people you trust; secrets are never shown in the log. DMs need a contact card or companion contact key — not a channel display name alone.
-7. **Flash only from cache** — Settings → Flasher on the HQ machine, or the LAN locker page from a PIN session. Indexed flash is blocked if a file fails checksum. Custom local files on the LAN page are operator-supplied (not HQ-verified). If the locker is empty, **Import pack** and pick the USB `.zip`.
+7. **Flash only from cache** — Settings → Flasher on the HQ machine, or the LAN locker page from a PIN session. Indexed flash is blocked if a file fails checksum. Custom local files on the LAN page are operator-supplied (not HQ-verified). If the locker is empty, **Import pack** and pick the USB `.zip`. Before erase, accept the identity-kit backup prompt (or restore a kit afterward over USB).
 
 ## What the HQ computer needs on battery / UPS
 
@@ -31,7 +31,7 @@ One page for church / community volunteers running **Metis Mesh HQ** when the WA
 | Runtime | Size the UPS for laptop + USB radio (often 2–4 hours minimum for a desk shift). |
 | Sleep | Turn off suspend/hibernate while HQ is on duty. |
 | Display | Dim the screen to save power; keep the window open so status stays visible. |
-| Network | Internet is optional once firmware is synced. Mesh traffic is radio-local. |
+| Network | Internet is optional once firmware is synced. Mesh traffic is radio-local. Optional Local API (Settings) can feed a LAN dashboard when enabled — still no cloud. |
 | Heat / dust | Keep vents clear; a closed closet kills laptops on UPS. |
 
 ## Do / don’t

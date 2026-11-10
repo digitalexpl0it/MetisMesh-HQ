@@ -28,12 +28,13 @@ pub use ha_mqtt::{
     ha_mqtt_password_present, ha_mqtt_status_line, save_ha_mqtt_password,
 };
 pub use local_api::{
-    bump_local_api_config, clamp_rate_limit as clamp_local_api_rate_limit,
-    clear_token as clear_local_api_token, ensure_token as ensure_local_api_token,
+    bump_local_api_config, clamp_heavy_rate_limit as clamp_local_api_heavy_rate_limit,
+    clamp_rate_limit as clamp_local_api_rate_limit, clear_token as clear_local_api_token,
+    docs_url_from_db as local_api_docs_url, ensure_token as ensure_local_api_token,
     generate_token as generate_local_api_token, is_loopback_bind,
     load_token as load_local_api_token, local_api_status_line,
-    normalize_prefix as normalize_local_api_prefix, save_token as save_local_api_token,
-    token_file_present as local_api_token_present,
+    normalize_prefix as normalize_local_api_prefix, open_docs_in_browser as open_local_api_docs,
+    save_token as save_local_api_token, token_file_present as local_api_token_present,
 };
 pub use map_upload::{
     authorize_map_upload, map_upload_status_line, revoke_map_upload_auth,

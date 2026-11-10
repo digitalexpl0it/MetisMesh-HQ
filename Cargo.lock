@@ -3693,6 +3693,7 @@ dependencies = [
  "unicode-segmentation",
  "ureq",
  "uuid",
+ "webkit2gtk",
  "webpki-roots 0.26.11",
  "windows 0.62.2",
  "windows-sys 0.59.0",

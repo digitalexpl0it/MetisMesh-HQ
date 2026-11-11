@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.1.15 — 2026-11-10
+
+Package version `0.1.15` (Cargo / About). Windows Details may show `0.1.15.0`.
+
+### Packaging
+
+- Linux **AppImage**: bundle WebKitGTK helper processes (`WebKitNetworkProcess` / `WebKitWebProcess` / `WebKitGPUProcess`) and set `WEBKIT_EXEC_PATH` so startup no longer depends on Debian multiarch paths (fixes Arch / CachyOS crash — [issue #1](https://github.com/digitalexpl0it/MetisMesh-HQ/issues/1))
+
 ### Radio / CLI
 
 - Device → Identity **Companion tools**: **Advert zero-hop** / **Advert flood** (labels aligned with MeshCore); Discover nearby stays under Network
@@ -105,7 +113,7 @@ Package version `0.1.11` (Cargo / About). Windows Details may show `0.1.11.0`.
 ### Platforms / packaging
 
 - Supported releases are **Windows** and **Linux** only — macOS CI and release artifacts are dropped
-- Linux AppImage (`metis-mesh-hq-x86_64.AppImage`) built with linuxdeploy + GTK shell plugin so GTK/WebKit ship inside the image; use this on non-Ubuntu or older distros. Host still needs BlueZ (Bluetooth) and dialout/udev for USB serial
+- Linux AppImage (`metis-mesh-hq-x86_64.AppImage`) built with linuxdeploy + GTK shell plugin so GTK/WebKit ship inside the image; use this on non-Ubuntu or older distros. Host still needs BlueZ (Bluetooth) and dialout/udev for USB serial. (WebKit helper processes / Arch fix landed in **0.1.15**.)
 - Ubuntu 26.04 `.tar.gz` remains for thin installs that already have the system WebKit/GTK packages
 
 ## 0.1.10 — 2026-11-06

@@ -58,7 +58,7 @@ Supported release targets are **Windows** (`x86_64`) and **Linux** (`x86_64`). m
 Critical UI libraries are probed before the window opens. On Debian/Ubuntu the app will try `pkexec apt-get install` for WebKitGTK/GTK if they are missing; on Windows it can download the WebView2 Evergreen bootstrapper. You can still install manually:
 
 - **Ubuntu `.deb`:** Depends pulls WebKit/GTK. You still want **BlueZ** for Bluetooth and membership in `dialout` for USB serial (log out/in after the wizard adds you).
-- **Linux AppImage:** GTK/WebKit travel inside the image. Host still needs **BlueZ** and `dialout` (or equivalent).
+- **Linux AppImage:** GTK/WebKit libraries **and** WebKit helper processes travel inside the image (`WEBKIT_EXEC_PATH`). Host still needs **BlueZ** and `dialout` (or equivalent).
 - **Linux tarball (Ubuntu 26.04+):**
 
   ```bash
@@ -76,11 +76,11 @@ Critical UI libraries are probed before the window opens. On Debian/Ubuntu the a
 Releases are created only from version tags (not every `main` push):
 
 ```bash
-git tag v0.1.14
-git push origin v0.1.14
+git tag v0.1.15
+git push origin v0.1.15
 ```
 
-That attaches the Windows `.zip`, Ubuntu `.deb`, Linux `.tar.gz`, and Linux `.AppImage`. If the tag already exists on an older commit, move it after the release commit (`git tag -f v0.1.14` then `git push --force origin v0.1.14`) or use the next patch version.
+That attaches the Windows `.zip`, Ubuntu `.deb`, Linux `.tar.gz`, and Linux `.AppImage`. If the tag already exists on an older commit, move it after the release commit (`git tag -f v0.1.15` then `git push --force origin v0.1.15`) or use the next patch version.
 
 ## Requirements (build from source)
 

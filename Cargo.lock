@@ -3657,7 +3657,7 @@ dependencies = [
 
 [[package]]
 name = "metis-mesh-hq"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "argon2",
  "base64",

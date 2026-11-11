@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Radio / CLI
+
+- Device → Identity **Companion tools**: **Advert zero-hop** / **Advert flood** (labels aligned with MeshCore); Discover nearby stays under Network
+- Device CLI → **RX log** tab: live overheard RF frames (SNR / RSSI / route / type); companion `LogData` subscribes only while that tab is open (unsubscribes when you leave unless map upload still needs it); in-memory ring, no payload dump
+
 ### Map
 
 - Pin detail **Ping**: mesh binary status probe (SNR / RSSI / noise / battery toast); uses airtime; 8s rate limit shared with Trace
@@ -18,6 +23,7 @@
 - Linux: enable WebKitGTK WebContext spellcheck + dictionary languages (HTML `spellcheck` alone showed Cut/Copy/Paste with no suggestions)
 - Compose typing: draft Signal reads stay in a compose dock (not the message list) so keystrokes no longer re-render the thread; spellcheck preference cached (no SQLite per key)
 - Map Ping beam follows resolved hop pins when HQ has repeater GPS; otherwise straight HQ→target (dashed). Toast/detail note shows direct / hop count / “no repeater pins”
+- **Advert path** on map pin, rail menus, roster, and message bubbles (companion path cache). **Ping** only when HQ already has a unicast route
 - **Ping** also on Messages rail right-click (DM/Contacts), channel/DM bubble actions when a pubkey is known, and Roster row actions
 
 ### Help

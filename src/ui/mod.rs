@@ -3101,20 +3101,39 @@ fn RosterPage() -> Element {
                                         }
                                         button {
                                             r#type: "button",
-                                            class: "roster-icon-btn roster-icon-btn-ping",
-                                            title: "Mesh status ping (uses airtime)",
-                                            "aria-label": "Ping",
+                                            class: "roster-icon-btn roster-icon-btn-path",
+                                            title: "Companion advert-path cache (builds a route for Ping)",
+                                            "aria-label": "Advert path",
                                             onclick: {
                                                 let pubkey = node.pubkey.clone();
                                                 let name = title.clone();
                                                 move |_| {
-                                                    messages_rail::begin_node_ping(
+                                                    messages_rail::begin_advert_path_fetch(
                                                         pubkey.clone(),
                                                         name.clone(),
                                                     );
                                                 }
                                             },
-                                            Icon { name: IconName::Radio, size: 15 }
+                                            Icon { name: IconName::Locate, size: 15 }
+                                        }
+                                        if messages_rail::node_has_unicast_route(&node.pubkey) {
+                                            button {
+                                                r#type: "button",
+                                                class: "roster-icon-btn roster-icon-btn-ping",
+                                                title: "Mesh status ping (uses airtime; needs a unicast route)",
+                                                "aria-label": "Ping",
+                                                onclick: {
+                                                    let pubkey = node.pubkey.clone();
+                                                    let name = title.clone();
+                                                    move |_| {
+                                                        messages_rail::begin_node_ping(
+                                                            pubkey.clone(),
+                                                            name.clone(),
+                                                        );
+                                                    }
+                                                },
+                                                Icon { name: IconName::Radio, size: 15 }
+                                            }
                                         }
                                         if can_claim {
                                             button {
@@ -4928,20 +4947,38 @@ fn MessagesPage() -> Element {
                                                 }
                                                 div { class: "message-actions",
                                                     button {
-                                                        class: "message-action-btn message-action-btn-ping",
-                                                        title: "Mesh status ping (uses airtime)",
+                                                        class: "message-action-btn",
+                                                        title: "Companion advert-path cache (builds a route for Ping)",
                                                         onclick: {
                                                             let pk = dm_pubkey.clone();
                                                             let nm = title.clone();
                                                             move |_| {
-                                                                messages_rail::begin_node_ping(
+                                                                messages_rail::begin_advert_path_fetch(
                                                                     pk.clone(),
                                                                     nm.clone(),
                                                                 );
                                                             }
                                                         },
-                                                        Icon { name: IconName::Radio, size: 12 }
-                                                        "Ping"
+                                                        Icon { name: IconName::Locate, size: 12 }
+                                                        "Advert path"
+                                                    }
+                                                    if messages_rail::node_has_unicast_route(&dm_pubkey) {
+                                                        button {
+                                                            class: "message-action-btn message-action-btn-ping",
+                                                            title: "Mesh status ping (uses airtime; needs a unicast route)",
+                                                            onclick: {
+                                                                let pk = dm_pubkey.clone();
+                                                                let nm = title.clone();
+                                                                move |_| {
+                                                                    messages_rail::begin_node_ping(
+                                                                        pk.clone(),
+                                                                        nm.clone(),
+                                                                    );
+                                                                }
+                                                            },
+                                                            Icon { name: IconName::Radio, size: 12 }
+                                                            "Ping"
+                                                        }
                                                     }
                                                     if !outgoing {
                                                         button {
@@ -5592,19 +5629,43 @@ fn MessagesPage() -> Element {
                                                     }
                                                     if let Some(pk) = known_pk.clone().filter(|k| !k.is_empty()) {
                                                         {
-                                                            let ping_name = device_name.clone();
+                                                            let path_name = device_name.clone();
+                                                            let can_ping =
+                                                                messages_rail::node_has_unicast_route(&pk);
                                                             rsx! {
                                                                 button {
-                                                                    class: "message-action-btn message-action-btn-ping",
-                                                                    title: "Mesh status ping (uses airtime)",
-                                                                    onclick: move |_| {
-                                                                        messages_rail::begin_node_ping(
-                                                                            pk.clone(),
-                                                                            ping_name.clone(),
-                                                                        );
+                                                                    class: "message-action-btn",
+                                                                    title: "Companion advert-path cache (builds a route for Ping)",
+                                                                    onclick: {
+                                                                        let pk = pk.clone();
+                                                                        let path_name = path_name.clone();
+                                                                        move |_| {
+                                                                            messages_rail::begin_advert_path_fetch(
+                                                                                pk.clone(),
+                                                                                path_name.clone(),
+                                                                            );
+                                                                        }
                                                                     },
-                                                                    Icon { name: IconName::Radio, size: 12 }
-                                                                    "Ping"
+                                                                    Icon { name: IconName::Locate, size: 12 }
+                                                                    "Advert path"
+                                                                }
+                                                                if can_ping {
+                                                                    button {
+                                                                        class: "message-action-btn message-action-btn-ping",
+                                                                        title: "Mesh status ping (uses airtime; needs a unicast route)",
+                                                                        onclick: {
+                                                                            let pk = pk.clone();
+                                                                            let path_name = path_name.clone();
+                                                                            move |_| {
+                                                                                messages_rail::begin_node_ping(
+                                                                                    pk.clone(),
+                                                                                    path_name.clone(),
+                                                                                );
+                                                                            }
+                                                                        },
+                                                                        Icon { name: IconName::Radio, size: 12 }
+                                                                        "Ping"
+                                                                    }
                                                                 }
                                                             }
                                                         }
@@ -12314,18 +12375,26 @@ fn SettingsPage(
                                     "Set location"
                                 }
                             }
-                            div { class: "mt-3 flex flex-wrap gap-2",
-                                Button {
-                                    kind: ButtonKind::Ghost,
-                                    onclick: move |_| state().radio.send_advert(false),
-                                    Icon { name: IconName::Radio, size: 14 }
-                                    "Send advert"
+                            div { class: "mt-4 border-t border-border pt-4",
+                                p { class: "mb-1 text-xs uppercase tracking-[0.14em] text-muted-foreground",
+                                    "Companion tools"
                                 }
-                                Button {
-                                    kind: ButtonKind::Ghost,
-                                    onclick: move |_| state().radio.send_advert(true),
-                                    Icon { name: IconName::Radio, size: 14 }
-                                    "Flood advert"
+                                p { class: "mb-2 text-xs text-muted-foreground",
+                                    "Beacon this companion’s identity. Zero-hop reaches direct neighbors only; flood is mesh-routed. Discover nearby is under Network. Per-contact Advert path (Messages / Map) fetches a unicast route — it does not send an advert."
+                                }
+                                div { class: "flex flex-wrap gap-2",
+                                    Button {
+                                        kind: ButtonKind::Ghost,
+                                        onclick: move |_| state().radio.send_advert(false),
+                                        Icon { name: IconName::Radio, size: 14 }
+                                        "Advert zero-hop"
+                                    }
+                                    Button {
+                                        kind: ButtonKind::Ghost,
+                                        onclick: move |_| state().radio.send_advert(true),
+                                        Icon { name: IconName::Radio, size: 14 }
+                                        "Advert flood"
+                                    }
                                 }
                             }
                         }
@@ -12777,7 +12846,7 @@ fn SettingsPage(
                                     "Discover nearby"
                                 }
                                 p { class: "mb-2 text-xs text-muted-foreground",
-                                    "Zero-hop scan (direct radio range). Repeaters/rooms or sensors that answer are added to the companion contact table and HQ roster."
+                                    "Companion tool: zero-hop scan (direct radio range). Repeaters/rooms or sensors that answer are added to the companion contact table and HQ roster. Identity → Companion tools has advert zero-hop / flood."
                                 }
                                 div { class: "mb-2 flex flex-wrap gap-2",
                                     if node_discover_busy() {

@@ -428,6 +428,17 @@ pub async fn map_take_ping() -> Option<String> {
     .await
 }
 
+pub async fn map_take_advert_path() -> Option<String> {
+    eval_string(
+        r#"(() => {
+  var raw = window.__metisMapAdvertPath || "";
+  window.__metisMapAdvertPath = null;
+  return raw;
+})()"#,
+    )
+    .await
+}
+
 /// True while the operator is panning/zooming (JS sets `__metisMapMoving`).
 pub async fn map_is_moving() -> bool {
     eval_value(r#"!!window.__metisMapMoving"#)

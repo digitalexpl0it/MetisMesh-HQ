@@ -18,8 +18,8 @@ use super::map_host::{
     map_fit_bounds, map_fly_to, map_get_camera, map_init, map_pulse_at, map_set_geojson,
     map_camera_from_global, map_clear_region_draft, map_is_moving, map_place_region_draft,
     map_region_draft_seq, map_set_nodes, map_set_style, map_set_temp_pin, map_set_visibility,
-    map_play_ping_fx, map_set_ping_result, map_snapshot_region_draft, map_take_favorite_toggle,
-    map_take_ping, map_take_selection, map_zoom_by,
+    map_play_ping_fx, map_set_ping_result, map_snapshot_region_draft, map_take_advert_path,
+    map_take_favorite_toggle, map_take_ping, map_take_selection, map_zoom_by,
     region_draft_from_placement, save_basemap, save_camera, BasemapKind, MapCamera,
     RegionDraftConfirm, MAP_CONTAINER_ID,
 };
@@ -906,6 +906,7 @@ fn build_model(
                         .and_then(|id| radio_labels.get(&id).cloned())
                         .unwrap_or_default(),
                     "hops": hops,
+                    "can_ping": !node.hop_bytes.is_empty() || node.path_len == 0,
                     "noise": rf.map(|s| s.0),
                     "rssi": rf.map(|s| s.1),
                     "snr": rf.map(|s| s.2),
@@ -1705,6 +1706,21 @@ pub fn MapPage() -> Element {
                             }
                             save_favorites(set);
                         });
+                    }
+                }
+                if let Some(key) = map_take_advert_path().await {
+                    if !key.is_empty() {
+                        let short: String = key.chars().take(12).collect();
+                        let label = state()
+                            .db
+                            .get_node(&key)
+                            .ok()
+                            .flatten()
+                            .map(|n| n.name)
+                            .filter(|n| !n.trim().is_empty())
+                            .unwrap_or_else(|| short);
+                        super::messages_rail::begin_advert_path_fetch(key, label);
+                        tick.with_mut(|n| *n = n.wrapping_add(1));
                     }
                 }
                 if let Some(key) = map_take_ping().await {

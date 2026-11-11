@@ -292,6 +292,18 @@ pub fn HelpPage() -> Element {
                             li { "Bluetooth: phone app must disconnect from that radio first; enter the six-digit companion PIN when asked. If HQ stops with Companion busy, free the radio on the phone (or other client), then Connect again — HQ will not reconnect forever while the link is held." }
                             li { "USB: pick the port; sticky identity survives OS renumbering when possible." }
                             li { "TCP: host + port; no PIN." }
+                            li {
+                                strong { "Companion tools" }
+                                " — Settings → Device → Identity: "
+                                strong { "Advert zero-hop" }
+                                " / "
+                                strong { "Advert flood" }
+                                ". Network → "
+                                strong { "Discover nearby" }
+                                " for zero-hop neighbor scan. Contact "
+                                strong { "Advert path" }
+                                " (Messages / Map) is a local path cache, not an advert send."
+                            }
                         }
                         p { "Pick a "
                             strong { "primary" }
@@ -374,8 +386,10 @@ pub fn HelpPage() -> Element {
                             li {
                                 strong { "Messages" }
                                 " — Channels / DMs / Contacts rail. Channel traffic lists who posted this session under each channel name (cleared when HQ restarts). Direct threads need a public key from a contact card (`meshcore://contact/add` or phone-app `<pubkey:type:name>`) or a synced companion contact — channel display names alone are not enough. "
-                                strong { "Refresh contact / Ping" }
-                                " need a unicast route (or flood contact); hearing someone on a channel is flood and does not by itself give a path."
+                                strong { "Advert path" }
+                                " reads the companion advert-path cache (builds a route). "
+                                strong { "Ping" }
+                                " is status over the air and only appears when HQ already has a unicast route (direct or hop bytes). Channel chat alone is not enough."
                             }
                             li {
                                 strong { "Inbox" }
@@ -401,7 +415,9 @@ pub fn HelpPage() -> Element {
                                 strong { "Map" }
                                 " — pins from self-reported GPS (ignore 0,0). HQ site pin is separate (Settings). Pin detail "
                                 strong { "Ping" }
-                                " sends a mesh status request (reachability + SNR/RSSI/battery; uses airtime). On the map a beam grows from the HQ pin to the target, then the pin sonar-pulses. Trace (tracked or claimed pins, toolbar) fetches a path via the companion — no channel/DM posts; also uses airtime. Traffic overlay weights overheard edges in the time window (passive)."
+                                " (pin detail) is status over the air when HQ already has a unicast route; beam grows HQ→target (via hop pins when known). "
+                                strong { "Advert path" }
+                                " reads the companion path cache first when Ping is hidden. Trace (tracked/claimed, toolbar) is the map path highlight. Traffic overlay weights overheard edges in the time window (passive)."
                             }
                             li {
                                 strong { "Tracker" }
@@ -532,6 +548,10 @@ pub fn HelpPage() -> Element {
                             li {
                                 strong { "CLI" }
                                 " — run MeshCore CLI on this companion or a remote repeater / room / sensor (role-aware command list)."
+                            }
+                            li {
+                                strong { "RX log" }
+                                " — CLI page tab that shows overheard RF frames (SNR / RSSI / route / type). Subscribes companion LogData only while that tab is open (map upload may keep LogData if enabled)."
                             }
                             li {
                                 strong { "Flasher" }

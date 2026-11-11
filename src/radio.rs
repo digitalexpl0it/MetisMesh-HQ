@@ -2,13 +2,16 @@
 //! the window only sends commands. Only the primary companion transmits for HQ:
 //! operator sends, bot replies, enrollment DMs, and channel pushes.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use meshcore_rs::commands::Destination;
-use meshcore_rs::events::{Contact, ContactMessage, EventPayload, EventType, MeshCoreEvent};
+use meshcore_rs::events::{
+    Contact, ContactMessage, EventPayload, EventType, LogData, MeshCoreEvent, Subscription,
+};
+use meshcore_rs::packets::{PayloadType, RouteType};
 use meshcore_rs::MeshCore;
 use rand::RngCore;
 use serde_json::json;
@@ -36,10 +39,21 @@ pub const DISCOVER_FILTER_REPEATERS: u8 = (1 << 2) | (1 << 3);
 /// Sensor (4).
 pub const DISCOVER_FILTER_SENSORS: u8 = 1 << 4;
 
+/// Cap in-memory RF RX log lines (CLI → RX log tab).
+const RX_LOG_CAP: usize = 400;
+
 #[derive(Debug, Clone)]
 pub struct DiscoverSummary {
     pub returned: usize,
     pub added: usize,
+}
+
+/// One overheard RF frame for the CLI RX log (from companion `LogData`).
+#[derive(Debug, Clone)]
+pub struct RxLogLine {
+    pub seq: u64,
+    pub at: i64,
+    pub text: String,
 }
 
 /// Result of an operator / passive advert-path fetch (`CMD_GET_ADVERT_PATH`).
@@ -556,6 +570,10 @@ struct PoolShared {
     idle: Arc<Mutex<RadioStatus>>,
     next_token: AtomicU64,
     ble_scan_busy: AtomicBool,
+    /// CLI RX log tab is open — session should subscribe `LogData` (unless map upload already does).
+    rx_log_wanted: AtomicBool,
+    rx_log: Mutex<VecDeque<RxLogLine>>,
+    rx_log_seq: AtomicU64,
 }
 
 /// The slot the header and Settings describe: primary, else a companion, else any.
@@ -1400,6 +1418,35 @@ impl RadioHandle {
         self.pool.route_to_primary(RadioCmd::SendAdvert { flood });
     }
 
+    /// CLI → RX log tab visibility. When true, the primary session subscribes `LogData`.
+    pub fn set_rx_log_wanted(&self, wanted: bool) {
+        self.pool.rx_log_wanted.store(wanted, Ordering::SeqCst);
+    }
+
+    /// Snapshot of the in-memory RF RX log (`seq` is the latest line id).
+    pub fn rx_log_snapshot(&self) -> (u64, Vec<RxLogLine>) {
+        let seq = self.pool.rx_log_seq.load(Ordering::SeqCst);
+        let lines = self
+            .pool
+            .rx_log
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .iter()
+            .cloned()
+            .collect();
+        (seq, lines)
+    }
+
+    pub fn clear_rx_log(&self) {
+        self.pool
+            .rx_log
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clear();
+        // Bump so the UI refreshes an empty list.
+        self.pool.rx_log_seq.fetch_add(1, Ordering::SeqCst);
+    }
+
     pub fn reboot(&self) {
         self.pool.reboot_primary();
     }
@@ -1531,6 +1578,9 @@ pub fn spawn_radio(db: Arc<Db>, secrets: Arc<Secrets>) -> RadioHandle {
         idle: Arc::new(Mutex::new(RadioStatus::default())),
         next_token: AtomicU64::new(1),
         ble_scan_busy: AtomicBool::new(false),
+        rx_log_wanted: AtomicBool::new(false),
+        rx_log: Mutex::new(VecDeque::new()),
+        rx_log_seq: AtomicU64::new(0),
     });
     let _ = RADIO_POOL.set(pool.clone());
     let pool_thread = pool.clone();
@@ -2791,6 +2841,73 @@ fn push_cli_line(status: &Mutex<RadioStatus>, line: impl Into<String>) {
     let mut guard = status.lock().unwrap_or_else(|err| err.into_inner());
     guard.cli_seq = guard.cli_seq.wrapping_add(1);
     guard.cli_line = line.into();
+}
+
+fn route_type_label(route: RouteType) -> &'static str {
+    match route {
+        RouteType::Flood => "flood",
+        RouteType::Direct => "direct",
+        RouteType::TransportFlood => "tflood",
+        RouteType::TransportDirect => "tdirect",
+    }
+}
+
+fn payload_type_label(payload: PayloadType) -> &'static str {
+    match payload {
+        PayloadType::Req => "req",
+        PayloadType::Response => "resp",
+        PayloadType::TextMsg => "dm",
+        PayloadType::Ack => "ack",
+        PayloadType::Advert => "advert",
+        PayloadType::GroupText => "channel",
+        PayloadType::GroupData => "ch-data",
+        PayloadType::AnonReq => "anon",
+        PayloadType::Path => "path",
+        PayloadType::Trace => "trace",
+        PayloadType::Multipart => "multi",
+        PayloadType::Control => "ctrl",
+        PayloadType::RawCustom => "raw",
+        PayloadType::Unknown => "?",
+    }
+}
+
+/// Human line for CLI RX log — no encrypted payload bytes.
+pub(crate) fn format_rx_log_line(log: &LogData) -> String {
+    let mut parts = Vec::with_capacity(6);
+    parts.push(format!("SNR {:+.1}", log.snr));
+    parts.push(format!("RSSI {} dBm", log.rssi));
+    if let Some(header) = log.header.as_ref() {
+        parts.push(route_type_label(header.route_type).to_string());
+        parts.push(payload_type_label(header.payload_type).to_string());
+        parts.push(format!("hops={}", header.path_len));
+    } else {
+        parts.push("header?".into());
+    }
+    if let Some(adv) = log.advertisement.as_ref() {
+        if let Some(name) = adv.name.as_ref().map(|n| n.trim()).filter(|n| !n.is_empty()) {
+            parts.push(name.to_string());
+        } else {
+            parts.push(hex::encode(&adv.public_key[..6]));
+        }
+    }
+    parts.join(" · ")
+}
+
+fn push_rx_log_line(pool: &PoolShared, log: &LogData) {
+    if !pool.rx_log_wanted.load(Ordering::SeqCst) {
+        return;
+    }
+    let seq = pool.rx_log_seq.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
+    let line = RxLogLine {
+        seq,
+        at: unix_now(),
+        text: format_rx_log_line(log),
+    };
+    let mut guard = pool.rx_log.lock().unwrap_or_else(|err| err.into_inner());
+    guard.push_back(line);
+    while guard.len() > RX_LOG_CAP {
+        guard.pop_front();
+    }
 }
 
 fn parse_pubkey_prefix(hex_key: &str) -> Result<[u8; 6], String> {
@@ -4307,8 +4424,7 @@ async fn run_session(
 
     let (event_tx, mut event_rx) = unbounded_channel();
     let mut subscriptions = Vec::new();
-    let map_upload_on = crate::services::map_upload::upload_enabled(db);
-    let mut kinds = vec![
+    let kinds = [
         EventType::ContactMsgRecv,
         EventType::ChannelMsgRecv,
         EventType::Advertisement,
@@ -4319,13 +4435,6 @@ async fn run_session(
         EventType::LoginSuccess,
         EventType::LoginFailed,
     ];
-    // LogData carries raw ADVERT packets for map.meshcore.io (E4). Only when enabled
-    // so we do not flood BLE with every overheard frame by default.
-    let mut logdata_subscribed = false;
-    if map_upload_on {
-        kinds.push(EventType::LogData);
-        logdata_subscribed = true;
-    }
     for kind in kinds {
         let event_tx = event_tx.clone();
         let subscription = meshcore
@@ -4337,10 +4446,27 @@ async fn run_session(
     }
     let event_tx_late = event_tx.clone();
     drop(event_tx);
+    // LogData: every overheard frame. Only while map upload and/or CLI RX log wants it —
+    // otherwise BLE floods with noise. Held separately so we can unsubscribe mid-session.
+    let mut logdata_sub: Option<Subscription> = None;
+    {
+        let need_logdata = crate::services::map_upload::upload_enabled(db)
+            || ctx.pool.rx_log_wanted.load(Ordering::SeqCst);
+        if need_logdata {
+            let event_tx = event_tx_late.clone();
+            logdata_sub = Some(
+                meshcore
+                    .subscribe(EventType::LogData, HashMap::new(), move |event| {
+                        let _ = event_tx.send(event);
+                    })
+                    .await,
+            );
+            hq_log!(info, "LogData subscribed (map upload / RX log)");
+        }
+    }
     // Do NOT use meshcore-rs start_auto_message_fetching(): it spawns tasks that
     // hold the command mutex across get_msg and starve channel sends / CLI.
     // MessagesWaiting is drained in the session loop instead.
-    // Keep `subscriptions` mut so mid-session LogData subscribe can append.
 
     let mut replies: HashMap<String, Instant> = HashMap::new();
     let mut pushed_generation = 0i64;
@@ -4909,9 +5035,10 @@ async fn run_session(
                             need_contact_retry = true;
                             contact_retry_at = Instant::now();
                         }
-                        // Map uploader: rebuild infra ADVERTs from LogData (non-blocking).
+                        // Map uploader + optional CLI RX log from LogData.
                         if let EventPayload::LogData(ref log) = event.payload {
                             if ctx.is_primary() {
+                                push_rx_log_line(&ctx.pool, log);
                                 let guard = status.lock().unwrap_or_else(|err| err.into_inner());
                                 let params = crate::services::map_upload::radio_params_from_mhz(
                                     guard.radio_freq_mhz,
@@ -4940,17 +5067,25 @@ async fn run_session(
             }
             _ = tick.tick() => {
                 let _ = db.fail_stale_tx_messages(90);
-                // Mid-session enable of map upload: subscribe LogData without reconnect.
-                if !logdata_subscribed && crate::services::map_upload::upload_enabled(db) {
+                // Mid-session LogData: subscribe while map upload or CLI RX log wants it;
+                // unsubscribe when neither needs the flood of every overheard frame.
+                let need_logdata = crate::services::map_upload::upload_enabled(db)
+                    || ctx.pool.rx_log_wanted.load(Ordering::SeqCst);
+                if need_logdata && logdata_sub.is_none() {
                     let event_tx = event_tx_late.clone();
-                    let subscription = meshcore
-                        .subscribe(EventType::LogData, HashMap::new(), move |event| {
-                            let _ = event_tx.send(event);
-                        })
-                        .await;
-                    subscriptions.push(subscription);
-                    logdata_subscribed = true;
-                    hq_log!(info, "map upload: subscribed LogData");
+                    logdata_sub = Some(
+                        meshcore
+                            .subscribe(EventType::LogData, HashMap::new(), move |event| {
+                                let _ = event_tx.send(event);
+                            })
+                            .await,
+                    );
+                    hq_log!(info, "LogData subscribed (map upload / RX log)");
+                } else if !need_logdata {
+                    if let Some(sub) = logdata_sub.take() {
+                        sub.unsubscribe().await;
+                        hq_log!(info, "LogData unsubscribed");
+                    }
                 }
                 let primary = ctx.is_primary();
                 if primary {
@@ -7400,5 +7535,20 @@ mod tests {
         assert_eq!(ty, 2);
         assert_eq!(key, pubkey);
         assert!(parse_discover_resp_payload(&payload, [9, 9, 9, 9]).is_none());
+    }
+
+    #[test]
+    fn rx_log_line_omits_payload_bytes() {
+        let log = LogData {
+            snr: 8.5,
+            rssi: -91,
+            header: None,
+            advertisement: None,
+            payload: vec![0xDE, 0xAD],
+        };
+        let line = format_rx_log_line(&log);
+        assert!(line.contains("SNR +8.5"), "{line}");
+        assert!(line.contains("RSSI -91 dBm"), "{line}");
+        assert!(!line.contains("dead") && !line.contains("DE AD"), "{line}");
     }
 }

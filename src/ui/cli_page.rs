@@ -1,4 +1,4 @@
-//! In-app MeshCore CLI terminal (local companion + remote contacts).
+//! In-app MeshCore CLI terminal (local companion + remote contacts) + RF RX log.
 
 use dioxus::prelude::*;
 
@@ -6,6 +6,21 @@ use super::icons::{Icon, IconName};
 use super::state;
 use super::widgets::{Button, ButtonKind, Dialog, PageHeading, SelectInput, TextInput};
 use crate::radio::RadioStatus;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CliPageTab {
+    Cli,
+    RxLog,
+}
+
+fn rx_log_clock(at: i64) -> String {
+    use chrono::{Local, TimeZone};
+    Local
+        .timestamp_opt(at, 0)
+        .single()
+        .map(|t| t.format("%H:%M:%S").to_string())
+        .unwrap_or_else(|| at.to_string())
+}
 
 /// Firmware role for which CLI vocabulary to offer.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -185,6 +200,7 @@ fn contact_type_label(value: u8) -> &'static str {
 
 #[component]
 pub fn CliPage(radio: RadioStatus) -> Element {
+    let mut page_tab = use_signal(|| CliPageTab::Cli);
     let mut draft = use_signal(String::new);
     let mut target = use_signal(|| "local".to_string());
     let mut preset = use_signal(|| String::new());
@@ -200,6 +216,9 @@ pub fn CliPage(radio: RadioStatus) -> Element {
     let mut last_seq = use_signal(|| 0u64);
     let mut poll = use_signal(|| 0u32);
     let mut poll_started = use_signal(|| false);
+    let mut rx_seq = use_signal(|| 0u64);
+    let mut rx_lines = use_signal(Vec::<crate::radio::RxLogLine>::new);
+    let mut rx_autoscroll = use_signal(|| true);
 
     if !poll_started() {
         poll_started.set(true);
@@ -210,6 +229,15 @@ pub fn CliPage(radio: RadioStatus) -> Element {
             }
         });
     }
+
+    // Subscribe LogData only while the RX log tab is visible.
+    use_effect(move || {
+        let want = page_tab() == CliPageTab::RxLog;
+        state().radio.set_rx_log_wanted(want);
+    });
+    use_drop(move || {
+        state().radio.set_rx_log_wanted(false);
+    });
 
     let linked = radio.state == "connected";
     let contacts = state()
@@ -238,15 +266,35 @@ pub fn CliPage(radio: RadioStatus) -> Element {
         .map(|(cmd, _)| (*cmd).to_string())
         .unwrap_or_else(|| "ver".into());
 
-    // Poll radio status for CLI replies (avoid mutating signals during render).
+    // Poll radio status for CLI replies + RX log (avoid mutating signals during render).
     use_effect(move || {
         let _ = poll();
         let snap = state().radio.snapshot();
-        if snap.cli_seq == 0 || snap.cli_seq == last_seq() || snap.cli_line.is_empty() {
+        if snap.cli_seq != 0 && snap.cli_seq != last_seq() && !snap.cli_line.is_empty() {
+            last_seq.set(snap.cli_seq);
+            append_transcript(transcript, &snap.cli_line);
+        }
+        if page_tab() == CliPageTab::RxLog {
+            let (seq, lines) = state().radio.rx_log_snapshot();
+            if seq != rx_seq() {
+                rx_seq.set(seq);
+                rx_lines.set(lines);
+            }
+        }
+    });
+
+    use_effect(move || {
+        let _ = rx_seq();
+        if page_tab() != CliPageTab::RxLog || !rx_autoscroll() {
             return;
         }
-        last_seq.set(snap.cli_seq);
-        append_transcript(transcript, &snap.cli_line);
+        spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            let _ = document::eval(
+                r#"const el = document.getElementById('hq-rx-log-transcript');
+                   if (el) { el.scrollTop = el.scrollHeight; }"#,
+            );
+        });
     });
 
     let send_command = move |text: String| {
@@ -293,152 +341,227 @@ pub fn CliPage(radio: RadioStatus) -> Element {
         });
     };
 
+    let heading_blurb = if page_tab() == CliPageTab::RxLog {
+        "Live overheard RF frames from the companion (SNR / RSSI / route). Listening only while this tab is open."
+    } else {
+        "Run MeshCore CLI on this companion or a remote repeater, room / data server, or sensor. Command list follows the target role."
+    };
+
     rsx! {
         div { class: "mx-auto flex h-full min-h-0 max-w-4xl flex-col gap-3",
             PageHeading { icon: IconName::Terminal, title: "Device CLI".to_string(),
-                "Run MeshCore CLI on this companion or a remote repeater, room / data server, or sensor. Command list follows the target role."
+                "{heading_blurb}"
             }
-            if !linked {
-                p { class: "text-sm text-muted-foreground",
-                    "Connect a companion radio to use the CLI."
+            div { class: "settings-subtabs",
+                button {
+                    r#type: "button",
+                    class: if page_tab() == CliPageTab::Cli { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
+                    onclick: move |_| page_tab.set(CliPageTab::Cli),
+                    "CLI"
+                }
+                button {
+                    r#type: "button",
+                    class: if page_tab() == CliPageTab::RxLog { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
+                    onclick: move |_| page_tab.set(CliPageTab::RxLog),
+                    "RX log"
                 }
             }
-            div { class: "flex flex-wrap items-end gap-2",
-                div { class: "min-w-[14rem] flex-1",
-                    label { class: "mb-1 block text-xs text-muted-foreground", "Target" }
+            if page_tab() == CliPageTab::Cli {
+                if !linked {
+                    p { class: "text-sm text-muted-foreground",
+                        "Connect a companion radio to use the CLI."
+                    }
+                }
+                div { class: "flex flex-wrap items-end gap-2",
+                    div { class: "min-w-[14rem] flex-1",
+                        label { class: "mb-1 block text-xs text-muted-foreground", "Target" }
+                        SelectInput {
+                            id: "cli-target".to_string(),
+                            value: target(),
+                            onchange: move |event: FormEvent| {
+                                target.set(event.value());
+                                preset.set(String::new());
+                                draft.set(String::new());
+                            },
+                            option {
+                                value: "local",
+                                style: "background-color:#101418;color:#f4f4f5;",
+                                "This companion"
+                            }
+                            for node in contacts.iter() {
+                                option {
+                                    key: "{node.pubkey}",
+                                    value: "{node.pubkey}",
+                                    style: "background-color:#101418;color:#f4f4f5;",
+                                    "{node.name} · {contact_type_label(node.contact_type)}"
+                                }
+                            }
+                        }
+                    }
+                    div { class: "flex items-center gap-2 pb-1 text-xs text-muted-foreground",
+                        span { class: "rounded-md border border-border bg-card px-2 py-1",
+                            "Mode: {mode.label()}"
+                        }
+                    }
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        onclick: move |_| transcript.set(Vec::new()),
+                        "Clear"
+                    }
+                }
+                div { class: "min-w-0",
+                    label { class: "mb-1 block text-xs text-muted-foreground",
+                        "Command ({mode.label()} presets — or type below)"
+                    }
                     SelectInput {
-                        id: "cli-target".to_string(),
-                        value: target(),
+                        id: "cli-preset".to_string(),
+                        value: preset(),
                         onchange: move |event: FormEvent| {
-                            target.set(event.value());
-                            preset.set(String::new());
-                            draft.set(String::new());
+                            let value = event.value();
+                            preset.set(value.clone());
+                            if !value.is_empty() {
+                                draft.set(value);
+                            }
                         },
                         option {
-                            value: "local",
+                            value: "",
                             style: "background-color:#101418;color:#f4f4f5;",
-                            "This companion"
+                            "Select a command…"
                         }
-                        for node in contacts.iter() {
+                        for (cmd, hint) in catalog.iter() {
                             option {
-                                key: "{node.pubkey}",
-                                value: "{node.pubkey}",
+                                key: "{cmd}",
+                                value: "{cmd}",
                                 style: "background-color:#101418;color:#f4f4f5;",
-                                "{node.name} · {contact_type_label(node.contact_type)}"
+                                "{cmd} — {hint}"
                             }
                         }
                     }
                 }
-                div { class: "flex items-center gap-2 pb-1 text-xs text-muted-foreground",
-                    span { class: "rounded-md border border-border bg-card px-2 py-1",
-                        "Mode: {mode.label()}"
+                pre { class: "cli-transcript",
+                    for (idx, line) in transcript().iter().enumerate() {
+                        span { key: "{idx}", "{line}\n" }
                     }
                 }
-                Button {
-                    kind: ButtonKind::Ghost,
-                    onclick: move |_| transcript.set(Vec::new()),
-                    "Clear"
-                }
-            }
-            div { class: "min-w-0",
-                label { class: "mb-1 block text-xs text-muted-foreground",
-                    "Command ({mode.label()} presets — or type below)"
-                }
-                SelectInput {
-                    id: "cli-preset".to_string(),
-                    value: preset(),
-                    onchange: move |event: FormEvent| {
-                        let value = event.value();
-                        preset.set(value.clone());
-                        if !value.is_empty() {
-                            draft.set(value);
-                        }
-                    },
-                    option {
-                        value: "",
-                        style: "background-color:#101418;color:#f4f4f5;",
-                        "Select a command…"
+                div { class: "flex gap-2",
+                    TextInput {
+                        value: draft(),
+                        placeholder: "{placeholder}",
+                        oninput: move |event: FormEvent| {
+                            let v = event.value();
+                            draft.set(v.clone());
+                            // Keep preset in sync when the line still matches a catalog entry.
+                            if catalog.iter().any(|(cmd, _)| *cmd == v) {
+                                preset.set(v);
+                            } else if !preset().is_empty() && preset() != v {
+                                preset.set(String::new());
+                            }
+                        },
                     }
-                    for (cmd, hint) in catalog.iter() {
-                        option {
-                            key: "{cmd}",
-                            value: "{cmd}",
-                            style: "background-color:#101418;color:#f4f4f5;",
-                            "{cmd} — {hint}"
+                    Button {
+                        disabled: !linked || draft().trim().is_empty(),
+                        onclick: move |_| {
+                            let text = draft().trim().to_string();
+                            if text.is_empty() {
+                                return;
+                            }
+                            if is_destructive_cli(&text) {
+                                pending.set(text);
+                                confirm_open.set(true);
+                            } else {
+                                draft.set(String::new());
+                                preset.set(String::new());
+                                send_command(text);
+                            }
+                        },
+                        Icon { name: IconName::Check, size: 14 }
+                        "Send"
+                    }
+                }
+                Dialog {
+                    open: confirm_open(),
+                    title: "Confirm destructive CLI".to_string(),
+                    on_close: move |_| {
+                        confirm_open.set(false);
+                        pending.set(String::new());
+                    },
+                    p { class: "mb-3 text-sm text-muted-foreground",
+                        "Send `{pending()}`? This may reboot or erase the target device."
+                    }
+                    div { class: "flex flex-wrap items-center gap-2",
+                        Button {
+                            kind: ButtonKind::Danger,
+                            onclick: move |_| {
+                                let text = pending();
+                                confirm_open.set(false);
+                                pending.set(String::new());
+                                draft.set(String::new());
+                                preset.set(String::new());
+                                send_command(text);
+                            },
+                            "Send anyway"
+                        }
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| {
+                                confirm_open.set(false);
+                                pending.set(String::new());
+                            },
+                            "Cancel"
                         }
                     }
                 }
-            }
-            pre { class: "cli-transcript",
-                for (idx, line) in transcript().iter().enumerate() {
-                    span { key: "{idx}", "{line}\n" }
-                }
-            }
-            div { class: "flex gap-2",
-                TextInput {
-                    value: draft(),
-                    placeholder: "{placeholder}",
-                    oninput: move |event: FormEvent| {
-                        let v = event.value();
-                        draft.set(v.clone());
-                        // Keep preset in sync when the line still matches a catalog entry.
-                        if catalog.iter().any(|(cmd, _)| *cmd == v) {
-                            preset.set(v);
-                        } else if !preset().is_empty() && preset() != v {
-                            preset.set(String::new());
-                        }
-                    },
-                }
-                Button {
-                    disabled: !linked || draft().trim().is_empty(),
-                    onclick: move |_| {
-                        let text = draft().trim().to_string();
-                        if text.is_empty() {
-                            return;
-                        }
-                        if is_destructive_cli(&text) {
-                            pending.set(text);
-                            confirm_open.set(true);
-                        } else {
-                            draft.set(String::new());
-                            preset.set(String::new());
-                            send_command(text);
-                        }
-                    },
-                    Icon { name: IconName::Check, size: 14 }
-                    "Send"
-                }
-            }
-            Dialog {
-                open: confirm_open(),
-                title: "Confirm destructive CLI".to_string(),
-                on_close: move |_| {
-                    confirm_open.set(false);
-                    pending.set(String::new());
-                },
-                p { class: "mb-3 text-sm text-muted-foreground",
-                    "Send `{pending()}`? This may reboot or erase the target device."
+            } else {
+                // RX log tab
+                if !linked {
+                    p { class: "text-sm text-muted-foreground",
+                        "Connect a companion radio to listen for RF frames."
+                    }
+                } else {
+                    p { class: "text-sm text-muted-foreground",
+                        "Listening for overheard packets… Leave this tab to stop (map upload may keep LogData if enabled)."
+                    }
                 }
                 div { class: "flex flex-wrap items-center gap-2",
-                    Button {
-                        kind: ButtonKind::Danger,
-                        onclick: move |_| {
-                            let text = pending();
-                            confirm_open.set(false);
-                            pending.set(String::new());
-                            draft.set(String::new());
-                            preset.set(String::new());
-                            send_command(text);
-                        },
-                        "Send anyway"
+                    label { class: "flex cursor-pointer items-center gap-2 text-xs text-muted-foreground",
+                        input {
+                            r#type: "checkbox",
+                            checked: rx_autoscroll(),
+                            oninput: move |_| rx_autoscroll.set(!rx_autoscroll()),
+                        }
+                        "Auto-scroll"
                     }
                     Button {
                         kind: ButtonKind::Ghost,
                         onclick: move |_| {
-                            confirm_open.set(false);
-                            pending.set(String::new());
+                            state().radio.clear_rx_log();
+                            rx_lines.set(Vec::new());
+                            rx_seq.set(state().radio.rx_log_snapshot().0);
                         },
-                        "Cancel"
+                        "Clear"
+                    }
+                    span { class: "text-xs text-muted-foreground",
+                        "{rx_lines().len()} lines"
+                    }
+                }
+                pre {
+                    id: "hq-rx-log-transcript",
+                    class: "cli-transcript",
+                    if rx_lines().is_empty() {
+                        span { class: "text-muted-foreground",
+                            if linked {
+                                "Waiting for packets…"
+                            } else {
+                                "No frames yet."
+                            }
+                        }
+                    } else {
+                        for line in rx_lines().iter() {
+                            span {
+                                key: "{line.seq}",
+                                "{rx_log_clock(line.at)}  {line.text}\n"
+                            }
+                        }
                     }
                 }
             }

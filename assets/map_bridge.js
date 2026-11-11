@@ -215,10 +215,17 @@
     bits.push('<div class="metis-map-detail-actions">');
     if (pubkey) {
       bits.push(
-        '<button type="button" class="metis-map-action" data-metis-ping="' +
+        '<button type="button" class="metis-map-action" data-metis-advert-path="' +
           escapeHtml(pubkey) +
-          '" title="Mesh status ping (uses airtime)">Ping</button>'
+          '" title="Companion advert-path cache (builds a route for Ping)">Advert path</button>'
       );
+      if (props.can_ping) {
+        bits.push(
+          '<button type="button" class="metis-map-action" data-metis-ping="' +
+            escapeHtml(pubkey) +
+            '" title="Mesh status ping (uses airtime; needs a unicast route)">Ping</button>'
+        );
+      }
     }
     bits.push(
       '<button type="button" class="metis-map-action" data-metis-fav="' +
@@ -638,6 +645,12 @@
       wireSealedClick(btn, function () {
         var key = btn.getAttribute("data-metis-ping") || "";
         if (key) global.__metisMapPing = key;
+      });
+    });
+    root.querySelectorAll("[data-metis-advert-path]").forEach(function (btn) {
+      wireSealedClick(btn, function () {
+        var key = btn.getAttribute("data-metis-advert-path") || "";
+        if (key) global.__metisMapAdvertPath = key;
       });
     });
   }

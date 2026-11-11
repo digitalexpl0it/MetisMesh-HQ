@@ -155,6 +155,79 @@ fn rail_block_label(label: &str) -> String {
         .to_string()
 }
 
+/// True when HQ has a unicast route for Status/Ping (direct or hop bytes).
+/// Channel flood alone is not enough — see radio ensure_radio_contact_for_probe.
+pub(crate) fn node_has_unicast_route(pubkey: &str) -> bool {
+    let key = pubkey.trim().to_ascii_lowercase();
+    if key.len() != 64 || !key.chars().all(|c| c.is_ascii_hexdigit()) {
+        return false;
+    }
+    match state().db.get_node(&key) {
+        Ok(Some(n)) => !n.hop_bytes.is_empty() || n.path_len == 0,
+        _ => false,
+    }
+}
+
+/// Companion advert-path cache fetch (`CMD_GET_ADVERT_PATH`). Local to the
+/// radio — no channel/DM. Use when Ping is unavailable (no route yet).
+pub(crate) fn begin_advert_path_fetch(pubkey: String, label: impl Into<String>) {
+    let label = label.into();
+    let key = pubkey.trim().to_ascii_lowercase();
+    if key.len() != 64 || !key.chars().all(|c| c.is_ascii_hexdigit()) {
+        crate::toast::push(
+            crate::toast::ToastKind::Warn,
+            "No public key for advert path.".to_string(),
+        );
+        return;
+    }
+    if state().radio.snapshot().state != "connected" {
+        crate::toast::push(
+            crate::toast::ToastKind::Error,
+            "Connect a companion before fetching advert path.".to_string(),
+        );
+        return;
+    }
+    let shown = {
+        let t = label.trim();
+        if t.is_empty() {
+            key.chars().take(12).collect::<String>()
+        } else {
+            t.to_string()
+        }
+    };
+    crate::toast::push(
+        crate::toast::ToastKind::Info,
+        format!("Advert path · {shown}…"),
+    );
+    let rx = state().radio.fetch_advert_path(key.clone());
+    spawn(async move {
+        let result = rx
+            .await
+            .unwrap_or_else(|_| Err("Radio task ended.".into()));
+        match result {
+            Ok(fetch) => {
+                if fetch.path.is_empty() && fetch.hop_count == 0 {
+                    let _ = state().db.set_route(&key, &[]);
+                } else if !fetch.path.is_empty() {
+                    let _ = state().db.set_route(&key, &fetch.path);
+                }
+                let hops = if fetch.hop_count == 0 && fetch.source == "direct" {
+                    "direct".into()
+                } else {
+                    format!("{} hop(s)", fetch.hop_count)
+                };
+                crate::toast::push(
+                    crate::toast::ToastKind::Success,
+                    format!("Advert path · {shown} · {hops} ({})", fetch.source),
+                );
+            }
+            Err(err) => {
+                crate::toast::push(crate::toast::ToastKind::Error, err);
+            }
+        }
+    });
+}
+
 /// Mesh status ping (binary Status request). Shared by map, rail, roster, bubbles.
 /// `on_result` receives `(ok, summary)` for map detail card updates.
 pub(crate) fn begin_node_ping(pubkey: String, label: impl Into<String>) {
@@ -180,6 +253,15 @@ pub(crate) fn begin_node_ping_with(
     if snap.state != "connected" {
         let msg = "Connect a companion before pinging.".to_string();
         crate::toast::push(crate::toast::ToastKind::Error, msg.clone());
+        if let Some(cb) = on_result {
+            cb(false, msg);
+        }
+        return;
+    }
+    if !node_has_unicast_route(&key) {
+        let msg = "No unicast route yet — use Advert path first (Status cannot flood)."
+            .to_string();
+        crate::toast::push(crate::toast::ToastKind::Warn, msg.clone());
         if let Some(cb) = on_result {
             cb(false, msg);
         }
@@ -2168,7 +2250,9 @@ fn RailItemMenuPanel(
     #[props(default = false)] is_contact_pin: bool,
     /// Contact/DM with a real pubkey — offer companion advert-path fetch.
     #[props(default = false)] show_fetch_path: bool,
-    /// Same gate as fetch — mesh status ping (uses airtime).
+    /// Lightweight advert-path cache read (no mesh Status).
+    #[props(default = false)] show_advert_path: bool,
+    /// Mesh status ping — only when HQ already has a unicast route.
     #[props(default = false)] show_ping: bool,
     #[props(default = false)] show_block: bool,
     #[props(default = false)] is_blocked: bool,
@@ -2182,6 +2266,7 @@ fn RailItemMenuPanel(
     on_details: EventHandler<()>,
     on_block: EventHandler<(String, String)>,
     on_refresh_contact: EventHandler<String>,
+    #[props(default)] on_advert_path: EventHandler<String>,
     #[props(default)] on_ping: EventHandler<String>,
 ) -> Element {
     let mut move_open = use_signal(|| false);
@@ -2192,6 +2277,7 @@ fn RailItemMenuPanel(
     let add_kind = item_kind.clone();
     let add_key = item_key.clone();
     let fetch_key = item_key.clone();
+    let advert_key = item_key.clone();
     let ping_key = item_key.clone();
     let block_key = item_key.clone();
     let block_label = item_label.clone();
@@ -2267,12 +2353,26 @@ fn RailItemMenuPanel(
                 Icon { name: IconName::Help, size: 12 }
                 "Details"
             }
+            if show_advert_path {
+                button {
+                    r#type: "button",
+                    class: "rail-item-menu-item",
+                    role: "menuitem",
+                    title: "Read companion advert-path cache for this key (local — builds a route for Ping)",
+                    onclick: move |_| {
+                        on_close.call(());
+                        on_advert_path.call(advert_key.clone());
+                    },
+                    Icon { name: IconName::Locate, size: 12 }
+                    "Advert path"
+                }
+            }
             if show_ping {
                 button {
                     r#type: "button",
                     class: "rail-item-menu-item",
                     role: "menuitem",
-                    title: "Mesh status ping — SNR / RSSI / battery (uses airtime)",
+                    title: "Mesh status ping — SNR / RSSI / battery (uses airtime; needs a unicast route)",
                     onclick: move |_| {
                         on_close.call(());
                         on_ping.call(ping_key.clone());
@@ -2286,7 +2386,7 @@ fn RailItemMenuPanel(
                     r#type: "button",
                     class: "rail-item-menu-item",
                     role: "menuitem",
-                    title: "Sync radio contact, fetch path, then status/telemetry (uses airtime). Channel chat is flood — unicast status needs a route or flood contact.",
+                    title: "Sync radio contact, fetch path, then status/telemetry (uses airtime). Channel chat is flood — unicast status needs a route.",
                     onclick: move |_| {
                         on_close.call(());
                         on_refresh_contact.call(fetch_key.clone());
@@ -2745,7 +2845,8 @@ fn DmRailItem(
                         sections: sections.clone(),
                         show_clear: true,
                         show_fetch_path: true,
-                        show_ping: true,
+                        show_advert_path: true,
+                        show_ping: node_has_unicast_route(&menu_key),
                         show_block: true,
                         is_blocked: blocked,
                         on_close: move |_| menu.set(None),
@@ -2760,6 +2861,10 @@ fn DmRailItem(
                         on_block: move |pair| on_block.call(pair),
                         on_refresh_contact: move |key| {
                             rail_begin_contact_refresh(key, refreshing, on_changed);
+                        },
+                        on_advert_path: {
+                            let advert_label = menu_label.clone();
+                            move |key| begin_advert_path_fetch(key, advert_label.clone())
                         },
                         on_ping: {
                             let ping_label = menu_label.clone();
@@ -2896,7 +3001,8 @@ fn ContactNodeItem(
                         sections: sections.clone(),
                         is_contact_pin: true,
                         show_fetch_path: has_pubkey,
-                        show_ping: has_pubkey,
+                        show_advert_path: has_pubkey,
+                        show_ping: has_pubkey && node_has_unicast_route(&menu_key),
                         show_block: true,
                         is_blocked: blocked,
                         on_close: move |_| menu.set(None),
@@ -2911,6 +3017,10 @@ fn ContactNodeItem(
                         on_block: move |pair| on_block.call(pair),
                         on_refresh_contact: move |key| {
                             rail_begin_contact_refresh(key, refreshing, on_changed);
+                        },
+                        on_advert_path: {
+                            let advert_label = menu_label.clone();
+                            move |key| begin_advert_path_fetch(key, advert_label.clone())
                         },
                         on_ping: {
                             let ping_label = menu_label.clone();

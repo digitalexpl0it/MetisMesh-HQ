@@ -123,7 +123,7 @@ pub fn ensure_critical() -> Result<(), String> {
 fn critical_manual_hint() -> String {
     #[cfg(target_os = "linux")]
     {
-        "Install packages manually (Ubuntu 26.04+):\n  sudo apt-get install -y libwebkit2gtk-4.1-0 libgtk-3-0t64 \\\n    libayatana-appindicator3-1 libsoup-3.0-0 libjavascriptcoregtk-4.1-0 libdbus-1-3"
+        "Install WebKitGTK 4.1 (+ GTK) manually:\n  Ubuntu/Debian: sudo apt-get install -y libwebkit2gtk-4.1-0 libgtk-3-0t64 \\\n    libayatana-appindicator3-1 libsoup-3.0-0 libjavascriptcoregtk-4.1-0 libdbus-1-3\n  Arch/CachyOS: sudo pacman -S webkit2gtk-4.1\n  Fedora: sudo dnf install webkit2gtk4.1\n(AppImage builds use host WebKit — do not rely on a bundled copy.)"
             .into()
     }
     #[cfg(target_os = "windows")]

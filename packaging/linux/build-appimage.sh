@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Build a portable Linux AppImage from target/release/metis-mesh-hq.
-# Bundles GTK/WebKit shared libs via linuxdeploy so the image runs on
-# modern x86_64 desktops beyond Ubuntu 26.04. BlueZ / udev stay on the host.
 #
-# WebKitGTK also needs its helper processes (Network/Web/GPU). Shipping the
-# .so files alone still looks for Debian paths like
-# /usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitNetworkProcess and aborts on
-# Arch/CachyOS (GitHub issue #1). We copy those helpers and set WEBKIT_EXEC_PATH.
+# Bundles GTK (via linuxdeploy-plugin-gtk) but intentionally does **not**
+# ship WebKitGTK / JavaScriptCore. Ubuntu-built libwebkit2gtk hardcodes
+# Debian multiarch helper paths (/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/…)
+# and ignores WEBKIT_EXEC_PATH — so Arch/CachyOS/Fedora crash even when
+# helpers are copied into the AppImage (GitHub issue #1). Host webkit2gtk-4.1
+# works; that matches the confirmed CachyOS workaround.
+#
+# Host still needs: webkit2gtk-4.1 (+ JSC), BlueZ, dialout/udev for USB.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -51,62 +53,51 @@ cp -a assets "$APPDIR/usr/bin/assets"
 cp packaging/linux/metis-mesh-hq.desktop "$APPDIR/usr/share/applications/"
 cp assets/app_icon_512.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/metis-mesh-hq.png"
 
-# Locate WebKitGTK helper processes on the build host (Ubuntu CI path first).
-helper_src=""
-multiarch="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || true)"
-for cand in \
-  ${multiarch:+"/usr/lib/${multiarch}/webkit2gtk-4.1"} \
-  /usr/lib/x86_64-linux-gnu/webkit2gtk-4.1 \
-  /usr/lib64/webkit2gtk-4.1 \
-  /usr/lib/webkit2gtk-4.1; do
-  if [[ -d "$cand" ]]; then
-    helper_src="$cand"
-    break
-  fi
-done
-if [[ -z "$helper_src" ]]; then
-  echo "WebKitGTK 4.1 helper directory not found (install libwebkit2gtk-4.1-0 / -dev)." >&2
-  exit 1
-fi
-
-helper_dst="$APPDIR/usr/lib/webkit2gtk-4.1"
-mkdir -p "$helper_dst"
-helper_exec_args=()
-for bin in WebKitNetworkProcess WebKitWebProcess WebKitGPUProcess; do
-  if [[ -x "$helper_src/$bin" ]]; then
-    cp -a "$helper_src/$bin" "$helper_dst/$bin"
-    chmod +x "$helper_dst/$bin"
-    helper_exec_args+=(--executable "$helper_dst/$bin")
-    echo "bundled WebKit helper: $bin"
-  fi
-done
-if [[ ${#helper_exec_args[@]} -eq 0 ]]; then
-  echo "no WebKit helper executables in $helper_src" >&2
-  exit 1
-fi
-
-# AppRun sources every script under apprun-hooks/ (after extraction / in place).
-mkdir -p "$APPDIR/apprun-hooks"
-cat > "$APPDIR/apprun-hooks/zz-metis-webkit.sh" <<'EOF'
-# Use WebKit helpers shipped inside this AppImage instead of hard-coded
-# Debian multiarch paths (fixes Arch / CachyOS startup — GH #1).
-APPDIR="${APPDIR:-$(dirname "$(realpath "$0")")}"
-export WEBKIT_EXEC_PATH="${APPDIR}/usr/lib/webkit2gtk-4.1"
-EOF
-chmod +x "$APPDIR/apprun-hooks/zz-metis-webkit.sh"
-
 # CI runners often lack FUSE; extract-and-run works without it.
 export APPIMAGE_EXTRACT_AND_RUN=1
 export LINUXDEPLOY_OUTPUT_VERSION="${LINUXDEPLOY_OUTPUT_VERSION:-}"
 export DEPLOY_GTK_VERSION=3
 
+EXCLUDE_WEBKIT=(
+  --exclude-library '*webkit2gtk*'
+  --exclude-library '*javascriptcoregtk*'
+  --exclude-library '*WebKit*'
+)
+
+# Phase 1: populate AppDir (GTK plugin + deps) without packing yet.
 "$linuxdeploy" \
   --appdir "$APPDIR" \
   --executable "$APPDIR/usr/bin/metis-mesh-hq" \
-  "${helper_exec_args[@]}" \
   --desktop-file "$APPDIR/usr/share/applications/metis-mesh-hq.desktop" \
   --icon-file "$APPDIR/usr/share/icons/hicolor/256x256/apps/metis-mesh-hq.png" \
   --plugin gtk \
+  "${EXCLUDE_WEBKIT[@]}"
+
+# Belt-and-suspenders: remove any WebKit/JSC that still landed in AppDir.
+stripped=0
+while IFS= read -r -d '' path; do
+  rm -f "$path"
+  stripped=$((stripped + 1))
+done < <(find "$APPDIR" \( \
+  -name 'libwebkit2gtk*.so*' -o \
+  -name 'libjavascriptcoregtk*.so*' -o \
+  -name 'WebKitNetworkProcess' -o \
+  -name 'WebKitWebProcess' -o \
+  -name 'WebKitGPUProcess' \
+  \) -print0 2>/dev/null || true)
+if [[ "$stripped" -gt 0 ]]; then
+  echo "removed $stripped leftover WebKit/JSC file(s) from AppDir (use host webkit2gtk-4.1)"
+fi
+rmdir "$APPDIR/usr/lib/webkit2gtk-4.1" 2>/dev/null || true
+rmdir "$APPDIR/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1" 2>/dev/null || true
+
+# Phase 2: pack cleaned AppDir (excludes again so a dep rescan cannot re-add WebKit).
+"$linuxdeploy" \
+  --appdir "$APPDIR" \
+  --executable "$APPDIR/usr/bin/metis-mesh-hq" \
+  --desktop-file "$APPDIR/usr/share/applications/metis-mesh-hq.desktop" \
+  --icon-file "$APPDIR/usr/share/icons/hicolor/256x256/apps/metis-mesh-hq.png" \
+  "${EXCLUDE_WEBKIT[@]}" \
   --output appimage
 
 # linuxdeploy names the image from the desktop Name= field.
@@ -124,4 +115,23 @@ mv -f "${built[0]}" "$OUT_NAME"
 for extra in "${built[@]:1}"; do
   rm -f "$extra"
 done
+
+# Fail the build if WebKit still slipped into the published image.
+verify_dir="$(mktemp -d)"
+cleanup_verify() { rm -rf "$verify_dir"; }
+trap cleanup_verify EXIT
+OUT_ABS="$(realpath "$OUT_NAME")"
+(
+  cd "$verify_dir"
+  APPIMAGE_EXTRACT_AND_RUN=1 "$OUT_ABS" --appimage-extract >/dev/null
+)
+if find "$verify_dir" \( \
+  -name 'libwebkit2gtk*.so*' -o \
+  -name 'libjavascriptcoregtk*.so*' \
+  \) | grep -q .; then
+  echo "ERROR: AppImage still contains bundled WebKit/JSC (GH #1 will recur)" >&2
+  find "$verify_dir" \( -name 'libwebkit2gtk*.so*' -o -name 'libjavascriptcoregtk*.so*' \) >&2
+  exit 1
+fi
+echo "verified: no bundled libwebkit2gtk / libjavascriptcoregtk in $OUT_NAME"
 ls -lh "$OUT_NAME"

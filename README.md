@@ -35,7 +35,7 @@ Supported release targets are **Windows** (`x86_64`) and **Linux** (`x86_64`). m
 | **Windows** `.zip` | Windows 10/11 |
 | **Ubuntu 26.04** `.deb` | Ubuntu 26.04+ (`dpkg -i` / apt) |
 | **Linux** `.tar.gz` | Unpack-and-run on Ubuntu 26.04+ (install runtime libs below) |
-| **Linux** `.AppImage` | Portable — Fedora, Arch, Debian, older Ubuntu, etc. |
+| **Linux** `.AppImage` | Portable — Fedora, Arch, Debian, older Ubuntu, etc. (needs host **webkit2gtk-4.1**) |
 
 1. Download from a [GitHub Release](https://github.com/digitalexpl0it/MetisMesh-HQ/releases) (preferred), or from the Actions tab on `main`.
 2. Install / run:
@@ -58,7 +58,17 @@ Supported release targets are **Windows** (`x86_64`) and **Linux** (`x86_64`). m
 Critical UI libraries are probed before the window opens. On Debian/Ubuntu the app will try `pkexec apt-get install` for WebKitGTK/GTK if they are missing; on Windows it can download the WebView2 Evergreen bootstrapper. You can still install manually:
 
 - **Ubuntu `.deb`:** Depends pulls WebKit/GTK. You still want **BlueZ** for Bluetooth and membership in `dialout` for USB serial (log out/in after the wizard adds you).
-- **Linux AppImage:** GTK/WebKit libraries **and** WebKit helper processes travel inside the image (`WEBKIT_EXEC_PATH`). Host still needs **BlueZ** and `dialout` (or equivalent).
+- **Linux AppImage:** GTK may travel inside the image; **WebKitGTK 4.1 must come from the host** (bundled Ubuntu WebKit hardcodes Debian helper paths and breaks Arch/Fedora — see issue #1). Also need **BlueZ** and `dialout` (or equivalent).
+
+  ```bash
+  # Arch / CachyOS
+  sudo pacman -S webkit2gtk-4.1
+  # Fedora
+  sudo dnf install webkit2gtk4.1
+  # Debian / Ubuntu
+  sudo apt-get install -y libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0
+  ```
+
 - **Linux tarball (Ubuntu 26.04+):**
 
   ```bash
@@ -76,11 +86,11 @@ Critical UI libraries are probed before the window opens. On Debian/Ubuntu the a
 Releases are created only from version tags (not every `main` push):
 
 ```bash
-git tag v0.1.15
-git push origin v0.1.15
+git tag v0.1.16
+git push origin v0.1.16
 ```
 
-That attaches the Windows `.zip`, Ubuntu `.deb`, Linux `.tar.gz`, and Linux `.AppImage`. If the tag already exists on an older commit, move it after the release commit (`git tag -f v0.1.15` then `git push --force origin v0.1.15`) or use the next patch version.
+That attaches the Windows `.zip`, Ubuntu `.deb`, Linux `.tar.gz`, and Linux `.AppImage`. If the tag already exists on an older commit, move it after the release commit (`git tag -f v0.1.16` then `git push --force origin v0.1.16`) or use the next patch version.
 
 ## Requirements (build from source)
 

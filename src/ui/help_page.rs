@@ -559,7 +559,9 @@ pub fn HelpPage() -> Element {
                                 strong { "Ready for outage" }
                                 "; Export / Import a "
                                 code { ".zip" }
-                                " pack for USB sticks. Flash is blocked if a checksum fails."
+                                " pack for USB sticks. Flash is blocked if a checksum fails. Sync lists releases via GitHub (60 requests/hour without a token). Optional "
+                                strong { "GitHub token" }
+                                " under Settings → Flasher raises that limit; release pages are ETag-cached to cut repeat calls. Rate-limit errors say when to retry."
                             }
                             li {
                                 strong { "LAN flash locker" }

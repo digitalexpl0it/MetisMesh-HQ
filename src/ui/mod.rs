@@ -8376,6 +8376,8 @@ fn SettingsPage(
     let mut flasher_sync_interval = use_signal(|| {
         crate::firmware::sync_interval_hours(&state().db).to_string()
     });
+    let mut flasher_github_token_draft = use_signal(String::new);
+    let mut flasher_github_token_note = use_signal(String::new);
     let mut device_tab = use_signal(|| DeviceTab::Identity);
     let mut var_drafts = use_signal(std::collections::BTreeMap::<String, String>::new);
     let mut reboot_armed = use_signal(|| false);
@@ -13770,6 +13772,83 @@ fn SettingsPage(
                                             style: "background-color: #101418; color: #f4f4f5;",
                                             "30 days"
                                         }
+                                    }
+                                }
+                            }
+                            div { class: "mt-4 border-t border-border pt-4",
+                                p { class: "mb-1 text-xs uppercase tracking-[0.14em] text-muted-foreground",
+                                    "GitHub token (optional)"
+                                }
+                                p { class: "mb-2 text-xs text-muted-foreground",
+                                    "Unauthenticated sync shares GitHub’s 60 requests/hour per IP. A classic personal access token (public repo read) raises that to 5,000/hour. Stored as "
+                                    code { "github-firmware.token" }
+                                    " under the HQ data folder (0600) — never in logs. Leave blank to keep using anonymous access."
+                                }
+                                p { class: "mb-2 text-xs text-muted-foreground",
+                                    if crate::firmware::github_token_present() {
+                                        "A token file is present."
+                                    } else {
+                                        "No token on file."
+                                    }
+                                }
+                                div { class: "flex flex-col gap-2 sm:flex-row sm:items-end",
+                                    div { class: "min-w-0 flex-1",
+                                        TextInput {
+                                            value: flasher_github_token_draft(),
+                                            placeholder: "github_pat_… or ghp_…".to_string(),
+                                            kind: "password".to_string(),
+                                            oninput: move |event: FormEvent| {
+                                                flasher_github_token_draft.set(event.value());
+                                                flasher_github_token_note.set(String::new());
+                                            },
+                                        }
+                                    }
+                                    Button {
+                                        disabled: flasher_github_token_draft().trim().is_empty(),
+                                        onclick: move |_| {
+                                            let raw = flasher_github_token_draft();
+                                            if raw.trim().is_empty() {
+                                                return;
+                                            }
+                                            match crate::firmware::save_github_token(&raw) {
+                                                Ok(()) => {
+                                                    flasher_github_token_draft.set(String::new());
+                                                    flasher_github_token_note
+                                                        .set("GitHub token saved.".into());
+                                                    crate::toast::push(
+                                                        crate::toast::ToastKind::Success,
+                                                        "GitHub token saved.",
+                                                    );
+                                                }
+                                                Err(err) => {
+                                                    flasher_github_token_note.set(err.clone());
+                                                    crate::toast::push(
+                                                        crate::toast::ToastKind::Error,
+                                                        format!("Could not save GitHub token: {err}"),
+                                                    );
+                                                }
+                                            }
+                                        },
+                                        "Save token"
+                                    }
+                                    Button {
+                                        kind: ButtonKind::Ghost,
+                                        disabled: !crate::firmware::github_token_present(),
+                                        onclick: move |_| {
+                                            crate::firmware::clear_github_token();
+                                            flasher_github_token_draft.set(String::new());
+                                            flasher_github_token_note.set("GitHub token cleared.".into());
+                                            crate::toast::push(
+                                                crate::toast::ToastKind::Info,
+                                                "GitHub token cleared.",
+                                            );
+                                        },
+                                        "Clear"
+                                    }
+                                }
+                                if !flasher_github_token_note().is_empty() {
+                                    p { class: "mt-2 text-xs text-muted-foreground",
+                                        "{flasher_github_token_note}"
                                     }
                                 }
                             }

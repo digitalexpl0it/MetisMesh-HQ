@@ -2,13 +2,27 @@
 
 ## Unreleased
 
+## 0.1.16 — 2026-11-11
+
+Package version `0.1.16` (Cargo / About). Windows Details may show `0.1.16.0`.
+
+### Packaging
+
+- Linux **AppImage**: do **not** bundle `libwebkit2gtk` / `libjavascriptcoregtk` (Ubuntu WebKit ignores `WEBKIT_EXEC_PATH` and hardcodes Debian helper paths). Use host `webkit2gtk-4.1`; build verifies the image has no bundled WebKit ([issue #1](https://github.com/digitalexpl0it/MetisMesh-HQ/issues/1) follow-up on CachyOS)
+
+### Flasher
+
+- Clearer GitHub **rate-limit** errors on firmware sync (retry window + hint)
+- Optional **GitHub personal access token** under Settings → Flasher (`github-firmware.token`, 0600) for higher API limits
+- MeshCore release listing uses **ETag / 304** disk cache under `firmware/github-cache/` to reduce API calls
+
 ## 0.1.15 — 2026-11-10
 
 Package version `0.1.15` (Cargo / About). Windows Details may show `0.1.15.0`.
 
 ### Packaging
 
-- Linux **AppImage**: bundle WebKitGTK helper processes (`WebKitNetworkProcess` / `WebKitWebProcess` / `WebKitGPUProcess`) and set `WEBKIT_EXEC_PATH` so startup no longer depends on Debian multiarch paths (fixes Arch / CachyOS crash — [issue #1](https://github.com/digitalexpl0it/MetisMesh-HQ/issues/1))
+- Linux **AppImage**: attempted WebKit helper bundling + `WEBKIT_EXEC_PATH` (insufficient on Arch — corrected in **0.1.16** by using host WebKit instead)
 
 ### Radio / CLI
 

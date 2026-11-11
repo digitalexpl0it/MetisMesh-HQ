@@ -23,7 +23,13 @@ use crate::usb_serial;
 const CATALOG_URL: &str = "https://flasher.meshcore.io/config.json";
 const GITHUB_RELEASES: &str =
     "https://api.github.com/repos/meshcore-dev/MeshCore/releases";
-const USER_AGENT: &str = "MetisMeshHQ/0.1 (offline firmware locker; local desktop)";
+const USER_AGENT: &str = concat!(
+    "MetisMeshHQ/",
+    env!("CARGO_PKG_VERSION"),
+    " (offline firmware locker; local desktop)"
+);
+/// Optional PAT for MeshCore release listing — `data/github-firmware.token` (0600).
+const GITHUB_TOKEN_FILE: &str = "github-firmware.token";
 const FAMILIES: &[&str] = &["companion", "repeater", "room-server"];
 const KEEP_PER_FAMILY: usize = 2;
 const DEFAULT_SYNC_HOURS: u64 = 12;
@@ -120,6 +126,68 @@ fn releases_dir() -> PathBuf {
     firmware_root().join("releases")
 }
 
+fn github_cache_dir() -> PathBuf {
+    firmware_root().join("github-cache")
+}
+
+fn github_token_path() -> PathBuf {
+    crate::data_dir().join(GITHUB_TOKEN_FILE)
+}
+
+/// True when an optional GitHub PAT file exists under the HQ data folder.
+pub fn github_token_present() -> bool {
+    github_token_path().is_file()
+}
+
+/// Load optional GitHub PAT (trimmed). Never log the value.
+pub fn load_github_token() -> Option<String> {
+    fs::read_to_string(github_token_path())
+        .ok()
+        .map(|s| s.trim_end_matches(['\r', '\n']).trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Save or clear the optional GitHub firmware sync token (`0600` on Unix).
+pub fn save_github_token(token: &str) -> Result<(), String> {
+    let path = github_token_path();
+    let token = token.trim();
+    if token.is_empty() {
+        clear_github_token();
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut opts = fs::OpenOptions::new();
+        opts.create(true).write(true).truncate(true).mode(0o600);
+        let mut file = opts.open(&path).map_err(|e| e.to_string())?;
+        file.write_all(token.as_bytes())
+            .map_err(|e| e.to_string())?;
+        file.write_all(b"\n").map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(&path, format!("{token}\n")).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+pub fn clear_github_token() {
+    let _ = fs::remove_file(github_token_path());
+}
+
+fn releases_page_cache_paths(page: u32) -> (PathBuf, PathBuf) {
+    let dir = github_cache_dir();
+    (
+        dir.join(format!("releases-p{page}.json")),
+        dir.join(format!("releases-p{page}.etag")),
+    )
+}
+
 fn release_dir(tag: &str) -> PathBuf {
     releases_dir().join(sanitize_tag(tag))
 }
@@ -187,7 +255,8 @@ impl FirmwareIndex {
 }
 
 fn ensure_dirs() -> Result<(), String> {
-    fs::create_dir_all(releases_dir()).map_err(|e| e.to_string())
+    fs::create_dir_all(releases_dir()).map_err(|e| e.to_string())?;
+    fs::create_dir_all(github_cache_dir()).map_err(|e| e.to_string())
 }
 
 // ---------- Catalog (flasher config.json) ----------
@@ -915,13 +984,7 @@ fn family_of_tag(tag: &str) -> Option<&'static str> {
     None
 }
 
-fn http_get_json(url: &str) -> Result<String, String> {
-    let resp = ureq::get(url)
-        .set("User-Agent", USER_AGENT)
-        .set("Accept", "application/vnd.github+json")
-        .timeout(Duration::from_secs(120))
-        .call()
-        .map_err(|e| e.to_string())?;
+fn read_http_body_limited(resp: ureq::Response) -> Result<String, String> {
     let mut reader = resp.into_reader().take(HTTP_BODY_CAP + 1);
     let mut buf = Vec::new();
     reader
@@ -936,8 +999,144 @@ fn http_get_json(url: &str) -> Result<String, String> {
     String::from_utf8(buf).map_err(|e| format!("Body is not UTF-8: {e}"))
 }
 
+fn http_get_json(url: &str) -> Result<String, String> {
+    let resp = ureq::get(url)
+        .set("User-Agent", USER_AGENT)
+        .set("Accept", "application/json")
+        .timeout(Duration::from_secs(120))
+        .call()
+        .map_err(|e| e.to_string())?;
+    read_http_body_limited(resp)
+}
+
+/// Operator-facing copy when GitHub returns a rate-limit response.
+pub(crate) fn format_github_rate_limit_message(reset_unix: Option<i64>, now: i64) -> String {
+    let wait = match reset_unix {
+        Some(reset) if reset > now => {
+            let mins = ((reset - now) + 59) / 60;
+            format!(" Try again in about {mins} minute(s).")
+        }
+        _ => " Try again later (usually within an hour).".to_string(),
+    };
+    format!(
+        "GitHub API rate limit reached.{wait} Optional: add a personal access token under Settings → Flasher (raises the limit from 60/hour). Unauthenticated requests share one quota per public IP."
+    )
+}
+
+fn looks_like_github_rate_limit(status: u16, remaining: Option<&str>, body: &str) -> bool {
+    if status != 403 && status != 429 {
+        return false;
+    }
+    if remaining == Some("0") {
+        return true;
+    }
+    let lower = body.to_ascii_lowercase();
+    lower.contains("rate limit") || lower.contains("api rate limit")
+}
+
+enum GithubApiGet {
+    NotModified,
+    Body { json: String, etag: Option<String> },
+}
+
+fn github_api_get(
+    url: &str,
+    etag: Option<&str>,
+    token: Option<&str>,
+) -> Result<GithubApiGet, String> {
+    let mut req = ureq::get(url)
+        .set("User-Agent", USER_AGENT)
+        .set("Accept", "application/vnd.github+json")
+        .set("X-GitHub-Api-Version", "2022-11-28")
+        .timeout(Duration::from_secs(120));
+    if let Some(token) = token.map(str::trim).filter(|t| !t.is_empty()) {
+        req = req.set("Authorization", &format!("Bearer {token}"));
+    }
+    if let Some(etag) = etag.map(str::trim).filter(|e| !e.is_empty()) {
+        req = req.set("If-None-Match", etag);
+    }
+    match req.call() {
+        Ok(resp) => {
+            let status = resp.status();
+            let new_etag = resp
+                .header("etag")
+                .or_else(|| resp.header("ETag"))
+                .map(|s| s.to_string());
+            if status == 304 {
+                return Ok(GithubApiGet::NotModified);
+            }
+            let json = read_http_body_limited(resp)?;
+            Ok(GithubApiGet::Body {
+                json,
+                etag: new_etag,
+            })
+        }
+        Err(ureq::Error::Status(code, resp)) => {
+            let remaining = resp
+                .header("x-ratelimit-remaining")
+                .or_else(|| resp.header("X-RateLimit-Remaining"))
+                .map(|s| s.to_string());
+            let reset = resp
+                .header("x-ratelimit-reset")
+                .or_else(|| resp.header("X-RateLimit-Reset"))
+                .and_then(|s| s.parse::<i64>().ok());
+            let body = read_http_body_limited(resp).unwrap_or_default();
+            if looks_like_github_rate_limit(code, remaining.as_deref(), &body) {
+                return Err(format_github_rate_limit_message(reset, now_unix()));
+            }
+            let snippet: String = body.chars().take(180).collect();
+            if snippet.is_empty() {
+                Err(format!("GitHub HTTP {code}"))
+            } else {
+                Err(format!("GitHub HTTP {code}: {snippet}"))
+            }
+        }
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+fn load_cached_releases_page(page: u32) -> Option<(String, String)> {
+    let (body_path, etag_path) = releases_page_cache_paths(page);
+    let etag = fs::read_to_string(etag_path).ok()?.trim().to_string();
+    let body = fs::read_to_string(body_path).ok()?;
+    if etag.is_empty() || body.trim().is_empty() {
+        return None;
+    }
+    Some((etag, body))
+}
+
+fn save_cached_releases_page(page: u32, etag: &str, body: &str) -> Result<(), String> {
+    let etag = etag.trim();
+    if etag.is_empty() {
+        return Ok(());
+    }
+    fs::create_dir_all(github_cache_dir()).map_err(|e| e.to_string())?;
+    let (body_path, etag_path) = releases_page_cache_paths(page);
+    fs::write(&body_path, body).map_err(|e| e.to_string())?;
+    fs::write(&etag_path, format!("{etag}\n")).map_err(|e| e.to_string())
+}
+
+fn fetch_releases_page(page: u32, per_page: u32, token: Option<&str>) -> Result<String, String> {
+    let url = format!("{GITHUB_RELEASES}?per_page={per_page}&page={page}");
+    let cached = load_cached_releases_page(page);
+    let etag = cached.as_ref().map(|(e, _)| e.as_str());
+    match github_api_get(&url, etag, token)? {
+        GithubApiGet::NotModified => cached
+            .map(|(_, body)| body)
+            .ok_or_else(|| "GitHub returned 304 but no local release cache.".to_string()),
+        GithubApiGet::Body { json, etag } => {
+            if let Some(etag) = etag.as_deref() {
+                let _ = save_cached_releases_page(page, etag, &json);
+            }
+            Ok(json)
+        }
+    }
+}
+
 /// Walk GitHub release pages until we have latest + previous for each family.
-fn fetch_meshcore_releases() -> Result<BTreeMap<String, Vec<GhRelease>>, String> {
+fn fetch_meshcore_releases(
+    token: Option<&str>,
+) -> Result<BTreeMap<String, Vec<GhRelease>>, String> {
     let mut by_family: BTreeMap<String, Vec<GhRelease>> = BTreeMap::new();
     // Small pages: each MeshCore release lists hundreds of assets and is huge JSON.
     const PER_PAGE: u32 = 5;
@@ -946,8 +1145,7 @@ fn fetch_meshcore_releases() -> Result<BTreeMap<String, Vec<GhRelease>>, String>
         set_sync(|s| {
             s.detail = format!("Listing MeshCore GitHub releases (page {page})…");
         });
-        let url = format!("{GITHUB_RELEASES}?per_page={PER_PAGE}&page={page}");
-        let body = http_get_json(&url).map_err(|e| format!("GitHub: {e}"))?;
+        let body = fetch_releases_page(page, PER_PAGE, token)?;
         let page_releases: Vec<GhRelease> =
             serde_json::from_str(&body).map_err(|e| format!("GitHub parse: {e}"))?;
         if page_releases.is_empty() {
@@ -1264,7 +1462,8 @@ fn run_sync(_db: &Db) -> Result<(), String> {
         s.detail = "Listing MeshCore GitHub releases…".into();
     });
 
-    let mut by_family = fetch_meshcore_releases()?;
+    let github_token = load_github_token();
+    let mut by_family = fetch_meshcore_releases(github_token.as_deref())?;
     // Newest-first tag lists + full release records for asset URLs.
     let mut ordered: Vec<(String, String)> = Vec::new();
     let mut releases_by_tag: BTreeMap<String, GhRelease> = BTreeMap::new();
@@ -2586,6 +2785,31 @@ mod tests {
         assert_eq!(parse_github_digest(hex).as_deref(), Some(hex));
         assert_eq!(parse_github_digest("sha256:deadbeef"), None);
         assert_eq!(parse_github_digest(""), None);
+    }
+
+    #[test]
+    fn github_rate_limit_message_includes_wait_when_reset_known() {
+        let msg = format_github_rate_limit_message(Some(1_700_000_600), 1_700_000_000);
+        assert!(msg.contains("rate limit"), "{msg}");
+        assert!(msg.contains("10 minute"), "{msg}");
+        assert!(msg.contains("personal access token"), "{msg}");
+        assert!(!msg.to_ascii_lowercase().contains("ghp_"));
+    }
+
+    #[test]
+    fn github_rate_limit_detection() {
+        assert!(looks_like_github_rate_limit(403, Some("0"), ""));
+        assert!(looks_like_github_rate_limit(
+            403,
+            Some("1"),
+            "API rate limit exceeded for 1.2.3.4"
+        ));
+        assert!(looks_like_github_rate_limit(429, None, "rate limit"));
+        assert!(!looks_like_github_rate_limit(
+            403,
+            Some("12"),
+            "Resource not accessible by personal access token"
+        ));
     }
 
     #[test]

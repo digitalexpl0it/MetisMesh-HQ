@@ -47,7 +47,7 @@ use tracker_page::TrackerPage;
 use weather_page::WeatherPage;
 use welcome::{reopen_welcome, welcome_is_done, WelcomeFinishAction, WelcomeWizard};
 use widgets::{
-    append_emoji, conversation_avatar_tone, format_channel_share,
+    append_emoji, append_emoji_within, conversation_avatar_tone, format_channel_share,
     format_position_share, heard_icon_class, heard_within_week, insert_mesh_snippet,
     parse_position_share, Badge, BarMix,
     BarMixRow, BatteryChart, BatteryPill, BatterySample, Button, ButtonKind, Card, ChartSeries,
@@ -6900,6 +6900,17 @@ fn compose_channel_reply(target: Option<MessageReplyTarget>, text: &str) -> Stri
     format!("> {mention} {quote}\n{text}")
 }
 
+/// Wire UTF-8 bytes for a channel send (HQ name prefix + optional reply/quote framing).
+fn channel_wire_text(advert: &str, reply: Option<MessageReplyTarget>, draft: &str) -> String {
+    prefix_channel_sender(advert, &compose_channel_reply(reply, draft))
+}
+
+/// Max draft UTF-8 bytes so prefix + reply framing still fit in 160 on the wire.
+fn channel_draft_max_bytes(advert: &str, reply: Option<MessageReplyTarget>) -> usize {
+    let reserved = channel_wire_text(advert, reply, "").len();
+    MESH_TEXT_MAX_BYTES.saturating_sub(reserved).max(1)
+}
+
 /// Owns the draft `Signal` reads so typing does not re-render the message list.
 #[component]
 fn DmComposeDock(
@@ -7026,7 +7037,13 @@ fn ChannelComposeDock(
     let note = note;
     let sending = sending;
     let mut reply_target = reply_target;
-    let placeholder = if reply_target().is_some() {
+    let advert = state()
+        .db
+        .hq_advert_name()
+        .unwrap_or_else(|_| "hq".into());
+    let reply_now = reply_target();
+    let draft_max = channel_draft_max_bytes(&advert, reply_now.clone());
+    let placeholder = if reply_now.is_some() {
         "Write your reply…".to_string()
     } else {
         "Message this channel…".to_string()
@@ -7084,6 +7101,7 @@ fn ChannelComposeDock(
                     text: draft,
                     placeholder,
                     disabled: !linked,
+                    max_bytes: draft_max,
                     onkeydown: move |event: KeyboardEvent| {
                         if event.key() == Key::Enter {
                             event.prevent_default();
@@ -7105,7 +7123,7 @@ fn ChannelComposeDock(
                     disabled: !linked,
                     align_end: true,
                     on_pick: move |emoji: String| {
-                        draft.set(append_emoji(&draft(), &emoji));
+                        draft.set(append_emoji_within(&draft(), &emoji, draft_max));
                     },
                 }
                 Button {
@@ -7128,7 +7146,7 @@ fn ChannelComposeDock(
                 }
             }
             div { class: "mt-2 flex flex-wrap items-center justify-between gap-2",
-                MeshTextCount { text: draft() }
+                MeshTextCount { text: draft(), max_bytes: draft_max }
                 if !linked {
                     p { class: "text-xs text-muted-foreground",
                         if syncing {

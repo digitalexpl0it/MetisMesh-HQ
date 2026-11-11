@@ -187,6 +187,9 @@ pub fn ComposeField(
     placeholder: String,
     #[props(default = false)] disabled: bool,
     #[props(default = false)] multiline: bool,
+    /// Max UTF-8 bytes kept in the draft (default MeshCore 160). Channel compose
+    /// passes a smaller budget so the HQ name prefix still fits on the wire.
+    #[props(default = MESH_TEXT_MAX_BYTES)] max_bytes: usize,
     #[props(default)] class_name: Option<String>,
     #[props(default)] onkeydown: EventHandler<KeyboardEvent>,
     /// Fired after the draft Signal updates (e.g. clear a canned-reply selection).
@@ -203,6 +206,7 @@ pub fn ComposeField(
     let rows = if multiline { "4" } else { "1" };
     let spell_attr = if spellcheck { "true" } else { "false" };
     let shown = text();
+    let max_bytes = max_bytes.max(1);
     rsx! {
         textarea {
             class: "{class}",
@@ -217,7 +221,7 @@ pub fn ComposeField(
             spellcheck: "{spell_attr}",
             "data-allow-context-menu": "true",
             oninput: move |event: FormEvent| {
-                let next = clamp_mesh_text(event.value());
+                let next = clamp_mesh_text_to(event.value(), max_bytes);
                 if text.peek().as_str() != next {
                     text.set(next.clone());
                     on_change.call(next);
@@ -1277,29 +1281,39 @@ pub fn BarMix(rows: Vec<BarMixRow>) -> Element {
 /// Re-export shared catalog (keywords + sections) for the picker UI.
 use super::emoji_catalog::{emoji_query_matches, EMOJI_PICKER_ROWS};
 
-/// MeshCore plain-text budget (bytes, not Unicode scalars).
+/// MeshCore plain-text budget (UTF-8 bytes, not Unicode scalars / graphemes).
 pub const MESH_TEXT_MAX_BYTES: usize = 160;
 
-/// Truncate to at most [`MESH_TEXT_MAX_BYTES`] UTF-8 bytes on a char boundary.
-pub fn clamp_mesh_text(s: impl Into<String>) -> String {
+/// Truncate to at most `max_bytes` UTF-8 bytes on a char boundary.
+pub fn clamp_mesh_text_to(s: impl Into<String>, max_bytes: usize) -> String {
     let s = s.into();
-    if s.len() <= MESH_TEXT_MAX_BYTES {
+    if s.len() <= max_bytes {
         return s;
     }
-    let mut end = MESH_TEXT_MAX_BYTES;
+    let mut end = max_bytes.min(s.len());
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
     s[..end].to_string()
 }
 
-/// Append `emoji` when the result still fits MeshCore's 160-byte text budget.
-pub fn append_emoji(draft: &str, emoji: &str) -> String {
-    if draft.len().saturating_add(emoji.len()) > MESH_TEXT_MAX_BYTES {
+/// Truncate to at most [`MESH_TEXT_MAX_BYTES`] UTF-8 bytes on a char boundary.
+pub fn clamp_mesh_text(s: impl Into<String>) -> String {
+    clamp_mesh_text_to(s, MESH_TEXT_MAX_BYTES)
+}
+
+/// Append `emoji` when the result still fits `max_bytes` (UTF-8).
+pub fn append_emoji_within(draft: &str, emoji: &str, max_bytes: usize) -> String {
+    if draft.len().saturating_add(emoji.len()) > max_bytes {
         draft.to_string()
     } else {
         format!("{draft}{emoji}")
     }
+}
+
+/// Append `emoji` when the result still fits MeshCore's 160-byte text budget.
+pub fn append_emoji(draft: &str, emoji: &str) -> String {
+    append_emoji_within(draft, emoji, MESH_TEXT_MAX_BYTES)
 }
 
 /// Companion advert name budget (UTF-8 bytes). Keeps `CMD_SET_ADVERT_NAME` frames short.
@@ -1530,11 +1544,26 @@ pub fn ComposePlusButton(
     }
 }
 
-/// Live `n/160` mesh text counter — green under the limit, red at max.
+/// Live `n/max B` mesh text counter — UTF-8 draft bytes, green under the limit, red at max.
+/// Channel compose passes a reduced `max_bytes` so the HQ name prefix still fits on the wire.
 #[component]
-pub fn MeshTextCount(text: String) -> Element {
+pub fn MeshTextCount(
+    text: String,
+    #[props(default = MESH_TEXT_MAX_BYTES)] max_bytes: usize,
+) -> Element {
+    // Rust `str::len` is UTF-8 bytes (MeshCore's limit), not Unicode scalars.
     let n = text.len();
-    let at_max = n >= MESH_TEXT_MAX_BYTES;
+    let max_bytes = max_bytes.max(1);
+    let at_max = n >= max_bytes;
+    let title = if max_bytes < MESH_TEXT_MAX_BYTES {
+        format!(
+            "Draft UTF-8 bytes. Max {max_bytes} so the HQ name prefix still fits MeshCore’s {MESH_TEXT_MAX_BYTES}-byte wire limit (emoji/non-ASCII count as more than one)."
+        )
+    } else {
+        format!(
+            "MeshCore limit is {MESH_TEXT_MAX_BYTES} UTF-8 bytes (emoji and non-ASCII count as more than one)."
+        )
+    };
     rsx! {
         span {
             class: if at_max {
@@ -1542,8 +1571,8 @@ pub fn MeshTextCount(text: String) -> Element {
             } else {
                 "mesh-text-count"
             },
-            title: "Mesh text budget (UTF-8 bytes)",
-            "{n}/{MESH_TEXT_MAX_BYTES}"
+            title: "{title}",
+            "{n}/{max_bytes} B"
         }
     }
 }
@@ -2025,5 +2054,19 @@ mod compose_share_tests {
         assert!(out.len() <= MESH_TEXT_MAX_BYTES);
         assert_eq!(insert_mesh_snippet("", "hi"), "hi");
         assert_eq!(insert_mesh_snippet("hi", "there"), "hi there");
+    }
+
+    #[test]
+    fn clamp_counts_utf8_bytes_not_scalars() {
+        use super::{append_emoji_within, clamp_mesh_text_to};
+        // U+1F525 FIRE is 4 UTF-8 bytes.
+        let fire = "🔥";
+        assert_eq!(fire.len(), 4);
+        assert_eq!(fire.chars().count(), 1);
+        let forty = fire.repeat(40); // 160 bytes, 40 scalars
+        assert_eq!(forty.len(), 160);
+        assert_eq!(clamp_mesh_text_to(format!("{forty}{fire}"), 160).len(), 160);
+        assert_eq!(append_emoji_within(&forty, fire, 160), forty);
+        assert_eq!(append_emoji_within("hi", fire, 160), format!("hi{fire}"));
     }
 }

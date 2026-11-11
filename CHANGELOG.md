@@ -16,6 +16,7 @@
 
 ### Messages
 
+- Compose counter shows UTF-8 **bytes** (`n/max B`); channel compose starts at `0` with max reduced by the HQ name prefix (and reply framing), and clamps the draft so the wire still fits 160
 - Phone-app contact shares `<pubkey:type:name>` in channel/DM bubbles become the same Add / Copy chip as `meshcore://contact/add`
 - Channel bubble action bar (Reply / Quote / Copy / …): close the hover gap so moving from the bubble onto the pill no longer hides it (Windows WebView2)
 - Compose spellcheck (Phase N): OS/WebView underlines + right-click suggestions on channel/DM/Broadcast compose; Settings → Preferences → **Spellcheck compose** (default on); native context menu allowed only on compose fields

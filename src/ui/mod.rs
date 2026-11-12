@@ -56,6 +56,7 @@ use widgets::{
     SelectInput, set_compose_spellcheck_enabled, SlideDownPanel, Sparkline, TextInput, Throbber,
     ToastHost, ToggleSwitch, COMPOSE_SPELLCHECK_KEY, MESH_TEXT_MAX_BYTES,
 };
+pub use widgets::compose_spellcheck_enabled;
 
 /// Show a transient toast (and log it). Prefer this over inline amber labels.
 fn status_note(message: impl Into<String>) {
@@ -9403,7 +9404,7 @@ fn SettingsPage(
             }
             Card { title: "Compose".to_string(), icon: Some(IconName::Messages),
                 p { class: "mb-3 text-sm text-muted-foreground",
-                    "OS spellcheck on channel, DM, and Broadcast compose. Uses the system dictionary (offline). Right-click a flagged word for suggestions. On Linux install hunspell dictionaries (e.g. hunspell-en-us). Callsigns, #weather, and hex may false-positive."
+                    "OS spellcheck on channel, DM, and Broadcast compose. Uses the system dictionary (offline). Right-click a flagged word for suggestions. On Linux install Hunspell + a dictionary (Debian: hunspell-en-us, Arch/CachyOS: hunspell-en_us, Fedora: hunspell-en-US). Callsigns, #weather, and hex may false-positive."
                 }
                 ToggleSwitch {
                     checked: compose_spellcheck_on(),

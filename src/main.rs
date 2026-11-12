@@ -487,11 +487,14 @@ fn parse_byte_range(header: &str) -> Option<(u64, u64)> {
 
 /// WebKitGTK ignores textarea `spellcheck` until the WebContext has spell
 /// checking enabled and at least one language set. Call once the desktop
-/// window exists (`dioxus::desktop::window()`).
+/// window exists (`dioxus::desktop::window()`), and again if the user turns
+/// compose spellcheck on in Settings.
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 pub fn enable_linux_webview_spellcheck() {
     use dioxus::desktop::wry::WebViewExtUnix;
     use webkit2gtk::{WebContextExt, WebViewExt};
+
+    quiet_libenchant_plugin_noise();
 
     let desktop = dioxus::desktop::window();
     let wk = desktop.webview.webview();
@@ -499,8 +502,24 @@ pub fn enable_linux_webview_spellcheck() {
         hq_log!(warn, "WebKit spellcheck: no WebContext yet");
         return;
     };
-    ctx.set_spell_checking_enabled(true);
+
+    if !ui::compose_spellcheck_enabled() {
+        ctx.set_spell_checking_enabled(false);
+        return;
+    }
+
     let langs = spellcheck_languages_from_env();
+    if !linux_hunspell_dictionary_present(&langs) {
+        ctx.set_spell_checking_enabled(false);
+        hq_log!(
+            info,
+            "WebKit spellcheck skipped — no Hunspell dictionary for [{}]. Install e.g. hunspell-en_us (Arch) / hunspell-en-us (Debian) / hunspell-en-US (Fedora).",
+            langs.join(", ")
+        );
+        return;
+    }
+
+    ctx.set_spell_checking_enabled(true);
     let lang_refs: Vec<&str> = langs.iter().map(String::as_str).collect();
     ctx.set_spell_checking_languages(&lang_refs);
     hq_log!(
@@ -508,6 +527,54 @@ pub fn enable_linux_webview_spellcheck() {
         "WebKit spellcheck on ({})",
         langs.join(", ")
     );
+}
+
+/// Enchant probes every optional backend (aspell, hspell, …). Missing .so files
+/// spam `libenchant-WARNING` on Arch/minimal hosts even when Hunspell works.
+#[cfg(all(feature = "desktop", target_os = "linux"))]
+fn quiet_libenchant_plugin_noise() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        gtk::glib::log_set_handler(
+            Some("libenchant"),
+            gtk::glib::LogLevels::LEVEL_WARNING,
+            false,
+            false,
+            |_domain, _level, message| {
+                if message.contains("Error loading plugin") {
+                    return;
+                }
+                // Keep unexpected enchant warnings visible.
+                eprintln!("libenchant-WARNING **: {message}");
+            },
+        );
+    });
+}
+
+#[cfg(all(feature = "desktop", target_os = "linux"))]
+fn linux_hunspell_dictionary_present(langs: &[String]) -> bool {
+    const DICT_DIRS: &[&str] = &[
+        "/usr/share/hunspell",
+        "/usr/share/myspell/dicts",
+        "/usr/share/myspell",
+    ];
+    for lang in langs {
+        let candidates = [
+            lang.clone(),
+            lang.replace('_', "-"),
+            // en_US → also try bare "en" packs on some distros
+            lang.split('_').next().unwrap_or(lang).to_string(),
+        ];
+        for tag in candidates {
+            for dir in DICT_DIRS {
+                if std::path::Path::new(dir).join(format!("{tag}.dic")).is_file() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 #[cfg(all(feature = "desktop", target_os = "linux"))]

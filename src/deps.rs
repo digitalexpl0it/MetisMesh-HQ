@@ -202,18 +202,30 @@ fn soft_status_uncached() -> SoftDepsReport {
             hint: "Needed for BLE companions.".into(),
         });
 
-        let dialout_ok = linux_in_dialout();
+        let serial = linux_serial_access();
+        let group = serial.group.unwrap_or("dialout");
         items.push(SoftDepItem {
             kind: SoftDepKind::Dialout,
-            label: "USB serial (dialout group)".into(),
-            ok: dialout_ok,
-            detail: if dialout_ok {
-                "Current user is in dialout.".into()
+            label: format!("USB serial ({group} group)"),
+            ok: serial.in_session,
+            detail: if serial.in_session {
+                format!("Current user is in {group}.")
+            } else if serial.configured {
+                format!(
+                    "Added to {group}, but this session is stale — log out and back in before USB serial works."
+                )
             } else {
-                "Not in dialout — USB companions may fail with permission denied.".into()
+                format!(
+                    "Not in {group} — USB companions may fail with permission denied."
+                )
             },
-            can_install: !dialout_ok,
-            hint: "After install, log out and back in.".into(),
+            // Offer Install only until membership is written; re-login is separate.
+            can_install: !serial.configured,
+            hint: if serial.configured && !serial.in_session {
+                "Log out and back in (or reboot).".into()
+            } else {
+                "After install, log out and back in.".into()
+            },
         });
     }
 
@@ -311,7 +323,12 @@ fn flasher_install_hint(kind: SoftDepKind, can_install: bool) -> String {
                 }
                 #[cfg(target_os = "linux")]
                 {
-                    return "Install via apt (Ubuntu) or pipx.".into();
+                    return match linux_pkg_mgr() {
+                        Some(LinuxPkgMgr::Apt) => "Install via apt (or pipx).".into(),
+                        Some(LinuxPkgMgr::Pacman) => "Install via pacman (esptool).".into(),
+                        Some(LinuxPkgMgr::Dnf) => "Install via dnf (esptool).".into(),
+                        None => "Install via pipx / pip.".into(),
+                    };
                 }
                 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
                 {
@@ -325,7 +342,17 @@ fn flasher_install_hint(kind: SoftDepKind, can_install: bool) -> String {
             }
             #[cfg(target_os = "linux")]
             {
-                "Install manually: sudo apt-get install -y esptool   (or pipx install esptool)".into()
+                match linux_pkg_mgr() {
+                    Some(LinuxPkgMgr::Apt) => {
+                        "Install manually: sudo apt-get install -y esptool   (or pipx install esptool)"
+                            .into()
+                    }
+                    Some(LinuxPkgMgr::Pacman) => {
+                        "Install manually: sudo pacman -S esptool".into()
+                    }
+                    Some(LinuxPkgMgr::Dnf) => "Install manually: sudo dnf install esptool".into(),
+                    None => "Install manually: pipx install esptool".into(),
+                }
             }
             #[cfg(not(any(target_os = "windows", target_os = "linux")))]
             {
@@ -338,7 +365,22 @@ fn flasher_install_hint(kind: SoftDepKind, can_install: bool) -> String {
                 {
                     return "Install adafruit-nrfutil via PowerShell (Python + pip if needed).".into();
                 }
-                #[cfg(not(target_os = "windows"))]
+                #[cfg(target_os = "linux")]
+                {
+                    return match linux_pkg_mgr() {
+                        Some(LinuxPkgMgr::Apt) => {
+                            "Install adafruit-nrfutil via apt pipx (or pipx alone).".into()
+                        }
+                        Some(LinuxPkgMgr::Pacman) => {
+                            "Install python-pipx via pacman, then adafruit-nrfutil via pipx.".into()
+                        }
+                        Some(LinuxPkgMgr::Dnf) => {
+                            "Install pipx via dnf, then adafruit-nrfutil via pipx.".into()
+                        }
+                        None => "Install adafruit-nrfutil via pipx.".into(),
+                    };
+                }
+                #[cfg(not(any(target_os = "windows", target_os = "linux")))]
                 {
                     return "Install adafruit-nrfutil via pipx.".into();
                 }
@@ -347,7 +389,21 @@ fn flasher_install_hint(kind: SoftDepKind, can_install: bool) -> String {
             {
                 "Install manually: python -m pip install --user adafruit-nrfutil".into()
             }
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(target_os = "linux")]
+            {
+                match linux_pkg_mgr() {
+                    Some(LinuxPkgMgr::Pacman) => {
+                        "Install manually: sudo pacman -S python-pipx && pipx install adafruit-nrfutil"
+                            .into()
+                    }
+                    Some(LinuxPkgMgr::Dnf) => {
+                        "Install manually: sudo dnf install pipx && pipx install adafruit-nrfutil"
+                            .into()
+                    }
+                    _ => "Install manually: pipx install adafruit-nrfutil".into(),
+                }
+            }
+            #[cfg(not(any(target_os = "windows", target_os = "linux")))]
             {
                 "Install manually: pipx install adafruit-nrfutil".into()
             }
@@ -366,11 +422,9 @@ fn can_install_flasher_cli(kind: SoftDepKind) -> bool {
             }
             #[cfg(target_os = "linux")]
             {
-                if kind == SoftDepKind::Esptool && linux_is_apt() {
+                // apt / pacman / dnf can fetch the package or pipx; otherwise need pipx/pip already.
+                if linux_pkg_mgr().is_some() {
                     return true;
-                }
-                if linux_is_apt() {
-                    return true; // can apt-install pipx first
                 }
                 return python_cli_installer_available();
             }
@@ -448,14 +502,38 @@ fn install_esptool() -> Result<String, String> {
     }
     #[cfg(target_os = "linux")]
     {
-        if linux_is_apt() {
-            run_pkexec_apt(&["esptool"])?;
-            if tool_on_path(&["esptool.py", "esptool"]) {
-                return Ok("esptool installed via apt.".into());
+        match linux_pkg_mgr() {
+            Some(LinuxPkgMgr::Apt) => {
+                run_pkexec_apt(&["esptool"])?;
+                if tool_on_path(&["esptool.py", "esptool"]) {
+                    return Ok("esptool installed via apt.".into());
+                }
+                return Ok(
+                    "apt finished installing esptool. Click Refresh if status is still pending."
+                        .into(),
+                );
             }
-            return Ok(
-                "apt finished installing esptool. Click Refresh if status is still pending.".into(),
-            );
+            Some(LinuxPkgMgr::Pacman) => {
+                run_pkexec_pacman(&["esptool"])?;
+                if tool_on_path(&["esptool.py", "esptool"]) {
+                    return Ok("esptool installed via pacman.".into());
+                }
+                return Ok(
+                    "pacman finished installing esptool. Click Refresh if status is still pending."
+                        .into(),
+                );
+            }
+            Some(LinuxPkgMgr::Dnf) => {
+                run_pkexec_dnf(&["esptool"])?;
+                if tool_on_path(&["esptool.py", "esptool"]) {
+                    return Ok("esptool installed via dnf.".into());
+                }
+                return Ok(
+                    "dnf finished installing esptool. Click Refresh if status is still pending."
+                        .into(),
+                );
+            }
+            None => {}
         }
     }
     #[cfg(not(target_os = "windows"))]
@@ -533,15 +611,30 @@ fn ensure_pipx() -> Result<(), String> {
     }
     #[cfg(target_os = "linux")]
     {
-        if linux_is_apt() {
-            run_pkexec_apt(&["pipx"])?;
-            if tool_on_path(&["pipx"]) || std::path::Path::new("/usr/bin/pipx").is_file() {
-                return Ok(());
+        match linux_pkg_mgr() {
+            Some(LinuxPkgMgr::Apt) => {
+                run_pkexec_apt(&["pipx"])?;
             }
-            return Err("pipx install via apt finished but pipx is still missing.".into());
+            Some(LinuxPkgMgr::Pacman) => {
+                // Arch/CachyOS package name.
+                run_pkexec_pacman(&["python-pipx"])?;
+            }
+            Some(LinuxPkgMgr::Dnf) => {
+                run_pkexec_dnf(&["pipx"])?;
+            }
+            None => return Err("pipx is not available.".into()),
         }
+        if tool_on_path(&["pipx"]) || std::path::Path::new("/usr/bin/pipx").is_file() {
+            return Ok(());
+        }
+        return Err(
+            "pipx package install finished but pipx is still missing from PATH.".into(),
+        );
     }
-    Err("pipx is not available.".into())
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err("pipx is not available.".into())
+    }
 }
 
 fn tool_on_path(names: &[&str]) -> bool {
@@ -623,9 +716,111 @@ fn linux_critical_packages() -> &'static [&'static str] {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinuxPkgMgr {
+    Apt,
+    Pacman,
+    Dnf,
+}
+
+#[cfg(target_os = "linux")]
 fn linux_is_apt() -> bool {
-    std::path::Path::new("/usr/bin/apt-get").is_file()
+    matches!(linux_pkg_mgr(), Some(LinuxPkgMgr::Apt))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_pkg_mgr() -> Option<LinuxPkgMgr> {
+    // Prefer the native manager for the running distro. apt first so
+    // Debian/Ubuntu derivatives that also ship dnf-compat tools stay on apt.
+    if std::path::Path::new("/usr/bin/apt-get").is_file()
         || std::path::Path::new("/bin/apt-get").is_file()
+    {
+        return Some(LinuxPkgMgr::Apt);
+    }
+    if std::path::Path::new("/usr/bin/pacman").is_file() {
+        return Some(LinuxPkgMgr::Pacman);
+    }
+    if std::path::Path::new("/usr/bin/dnf").is_file()
+        || std::path::Path::new("/usr/bin/dnf5").is_file()
+    {
+        return Some(LinuxPkgMgr::Dnf);
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn linux_pkexec_bin() -> &'static str {
+    if std::path::Path::new("/usr/bin/pkexec").is_file() {
+        "/usr/bin/pkexec"
+    } else {
+        "pkexec"
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_pkexec_pacman(packages: &[&str]) -> Result<(), String> {
+    if packages.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec![
+        "pacman".to_string(),
+        "-S".into(),
+        "--needed".into(),
+        "--noconfirm".into(),
+    ];
+    args.extend(packages.iter().map(|s| (*s).to_string()));
+    let output = command(linux_pkexec_bin())
+        .args(&args)
+        .output()
+        .map_err(|e| {
+            format!(
+                "Could not run pkexec pacman ({e}). Install manually: sudo pacman -S {}",
+                packages.join(" ")
+            )
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Err(format!(
+        "pacman failed.\n{}\n{}",
+        stdout.trim(),
+        stderr.trim()
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn run_pkexec_dnf(packages: &[&str]) -> Result<(), String> {
+    if packages.is_empty() {
+        return Ok(());
+    }
+    let dnf = if std::path::Path::new("/usr/bin/dnf5").is_file() {
+        "dnf5"
+    } else {
+        "dnf"
+    };
+    let mut args = vec![dnf.to_string(), "install".into(), "-y".into()];
+    args.extend(packages.iter().map(|s| (*s).to_string()));
+    let output = command(linux_pkexec_bin())
+        .args(&args)
+        .output()
+        .map_err(|e| {
+            format!(
+                "Could not run pkexec {dnf} ({e}). Install manually: sudo {dnf} install {}",
+                packages.join(" ")
+            )
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Err(format!(
+        "{dnf} failed.\n{}\n{}",
+        stdout.trim(),
+        stderr.trim()
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -684,18 +879,13 @@ fn run_pkexec_apt(packages: &[&str]) -> Result<(), String> {
     if packages.is_empty() {
         return Ok(());
     }
-    let pkexec = if std::path::Path::new("/usr/bin/pkexec").is_file() {
-        "/usr/bin/pkexec"
-    } else {
-        "pkexec"
-    };
     let mut args = vec![
         "apt-get".to_string(),
         "install".into(),
         "-y".into(),
     ];
     args.extend(packages.iter().map(|s| (*s).to_string()));
-    let output = command(pkexec)
+    let output = command(linux_pkexec_bin())
         .args(&args)
         .output()
         .map_err(|e| {
@@ -725,51 +915,132 @@ fn linux_bluez_ok() -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_in_dialout() -> bool {
-    // Primary: id -nG
-    if let Ok(output) = command("id").args(["-nG"]).output() {
-        if output.status.success() {
-            let groups = String::from_utf8_lossy(&output.stdout);
-            if groups.split_whitespace().any(|g| g == "dialout") {
-                return true;
-            }
-        }
-    }
-    // Fallback: some images use `uucp` instead of dialout for serial.
-    if let Ok(output) = command("id").args(["-nG"]).output() {
-        if output.status.success() {
-            let groups = String::from_utf8_lossy(&output.stdout);
-            if groups.split_whitespace().any(|g| g == "uucp") {
-                return true;
-            }
-        }
-    }
-    false
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LinuxSerialAccess {
+    /// Debian/Ubuntu: dialout. Arch/CachyOS/Fedora: usually uucp.
+    group: Option<&'static str>,
+    /// True when `/etc/group` (getent) lists the user — survives usermod without re-login.
+    configured: bool,
+    /// True when the current process already has the group (needed for open() on /dev/tty*).
+    in_session: bool,
 }
 
 #[cfg(target_os = "linux")]
-fn linux_add_dialout() -> Result<String, String> {
+fn linux_group_exists(group: &str) -> bool {
+    command("getent")
+        .args(["group", group])
+        .output()
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false)
+}
+
+/// Prefer dialout when present; Arch-family serial devices use uucp.
+#[cfg(target_os = "linux")]
+fn linux_serial_group() -> Option<&'static str> {
+    if linux_group_exists("dialout") {
+        Some("dialout")
+    } else if linux_group_exists("uucp") {
+        Some("uucp")
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_current_username() -> Result<String, String> {
     let user = std::env::var("USER")
         .or_else(|_| std::env::var("LOGNAME"))
         .map_err(|_| "Could not determine current username.".to_string())?;
     if user.trim().is_empty() || user.contains('/') || user.contains(' ') {
         return Err("Refusing to modify groups for an invalid username.".into());
     }
-    let pkexec = if std::path::Path::new("/usr/bin/pkexec").is_file() {
-        "/usr/bin/pkexec"
-    } else {
-        "pkexec"
+    Ok(user)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_user_in_group_session(group: &str) -> bool {
+    command("id")
+        .args(["-nG"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .any(|g| g == group)
+        })
+        .unwrap_or(false)
+}
+
+/// Parse `getent group` output (`name:x:gid:user1,user2`).
+#[cfg(target_os = "linux")]
+fn linux_getent_group_has_user(line: &str, user: &str) -> bool {
+    let Some(members) = line.trim().rsplit_once(':').map(|(_, m)| m) else {
+        return false;
     };
-    let output = command(pkexec)
-        .args(["usermod", "-aG", "dialout", &user])
+    members.split(',').any(|m| m.trim() == user)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_user_in_group_configured(user: &str, group: &str) -> bool {
+    let Ok(output) = command("getent").args(["group", group]).output() else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    linux_getent_group_has_user(&String::from_utf8_lossy(&output.stdout), user)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_serial_access() -> LinuxSerialAccess {
+    let group = linux_serial_group();
+    let user = linux_current_username().ok();
+    let Some(group) = group else {
+        return LinuxSerialAccess {
+            group: None,
+            configured: false,
+            in_session: false,
+        };
+    };
+    let in_session = linux_user_in_group_session(group);
+    let configured = user
+        .as_deref()
+        .map(|u| linux_user_in_group_configured(u, group))
+        .unwrap_or(false)
+        || in_session;
+    LinuxSerialAccess {
+        group: Some(group),
+        configured,
+        in_session,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_add_dialout() -> Result<String, String> {
+    let user = linux_current_username()?;
+    let group = linux_serial_group().ok_or_else(|| {
+        "No serial access group found (expected dialout or uucp). Create one or fix udev rules for /dev/ttyUSB* / /dev/ttyACM*."
+            .to_string()
+    })?;
+    if linux_user_in_group_configured(&user, group) {
+        return Ok(format!(
+            "{user} is already in {group}. Log out and back in (or reboot) so this session picks up the group."
+        ));
+    }
+    let output = command(linux_pkexec_bin())
+        .args(["usermod", "-aG", group, &user])
         .output()
         .map_err(|e| format!("Could not run pkexec usermod: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("usermod failed: {}", stderr.trim()));
+        return Err(format!(
+            "usermod failed: {}\nManual fix: sudo usermod -aG {group} {user}",
+            stderr.trim()
+        ));
     }
     Ok(format!(
-        "Added {user} to dialout. Log out and back in (or reboot) before using USB serial."
+        "Added {user} to {group}. Log out and back in (or reboot) before using USB serial."
     ))
 }
 
@@ -981,6 +1252,15 @@ mod tests {
     #[test]
     fn critical_status_does_not_panic() {
         let _ = critical_status();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn getent_group_member_parse() {
+        assert!(linux_getent_group_has_user("uucp:x:14:alice,bob", "alice"));
+        assert!(linux_getent_group_has_user("dialout:x:20:bob", "bob"));
+        assert!(!linux_getent_group_has_user("uucp:x:14:alice,bob", "carol"));
+        assert!(!linux_getent_group_has_user("uucp:x:14:", "alice"));
     }
 
     #[cfg(target_os = "linux")]

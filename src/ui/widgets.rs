@@ -170,6 +170,8 @@ pub fn set_compose_spellcheck_enabled(on: bool) {
     COMPOSE_SPELLCHECK.store(on, Ordering::Relaxed);
     COMPOSE_SPELLCHECK_LOADED.store(true, Ordering::Relaxed);
     crate::services::set_setting_bool(&super::state().db, COMPOSE_SPELLCHECK_KEY, on);
+    #[cfg(all(feature = "desktop", target_os = "linux"))]
+    crate::enable_linux_webview_spellcheck();
 }
 
 /// Channel / DM / Broadcast compose editor with optional OS spellcheck and a

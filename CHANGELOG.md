@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.1.17 — 2026-11-11
+
+Package version `0.1.17` (Cargo / About). Windows Details may show `0.1.17.0`.
+
+### Setup / Linux
+
+- USB serial wizard: use `uucp` when `dialout` is missing (Arch/CachyOS); stop re-offering Install after membership is written (log out still required for the live session)
+- Flasher wizard Install: support **pacman** / **dnf** (esptool package; pipx then adafruit-nrfutil); hints no longer assume apt on Arch/Fedora
+- Quiet Enchant “Error loading plugin” spam (missing aspell/hspell/…); skip WebKit spellcheck enable when no Hunspell `.dic` is installed
+
 ## 0.1.16 — 2026-11-11
 
 Package version `0.1.16` (Cargo / About). Windows Details may show `0.1.16.0`.

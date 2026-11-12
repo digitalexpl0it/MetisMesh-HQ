@@ -2426,7 +2426,7 @@ fn is_usb_permission_error(lower: &str) -> bool {
 
 fn usb_permission_hint() -> &'static str {
     if cfg!(target_os = "linux") {
-        "Add your user to the dialout group (`sudo usermod -aG dialout $USER`), then log out and back in."
+        "Add your user to the serial group (`sudo usermod -aG dialout $USER` on Debian/Ubuntu, or `uucp` on Arch/CachyOS), then log out and back in."
     } else if cfg!(target_os = "macos") {
         "Quit other serial apps, confirm System Settings allows this app to use USB accessories, then unplug/replug the radio."
     } else if cfg!(windows) {

@@ -213,6 +213,8 @@ pub struct RadioStatus {
     /// Bumped when a channel send finishes; `send_note` is empty on success.
     pub send_seq: u64,
     pub send_note: String,
+    /// Bumped when a new RX message is inserted (Messages UI can refresh immediately).
+    pub rx_seq: u64,
     /// Database id of the radio this status describes (`None` when no radio is live).
     pub radio_id: Option<i64>,
     /// `ble`, `usb`, `tcp`, or empty when no radio is live.
@@ -266,6 +268,7 @@ impl Default for RadioStatus {
             cli_line: String::new(),
             send_seq: 0,
             send_note: String::new(),
+            rx_seq: 0,
             radio_id: None,
             transport: String::new(),
             role: String::new(),
@@ -3578,6 +3581,28 @@ fn push_send_note(status: &Mutex<RadioStatus>, note: impl Into<String>) {
     guard.send_note = note.into();
 }
 
+fn bump_rx_seq(status: &Mutex<RadioStatus>) {
+    let mut guard = status.lock().unwrap_or_else(|err| err.into_inner());
+    guard.rx_seq = guard.rx_seq.wrapping_add(1);
+}
+
+/// Soft operator hint while live RX drain is deferred (does not change `state`).
+fn set_receiving_busy_hint(status: &Mutex<RadioStatus>, busy: bool) {
+    let mut guard = status.lock().unwrap_or_else(|err| err.into_inner());
+    if busy {
+        if guard.state == "connected" {
+            guard.detail = "Receiving… radio busy, retrying.".into();
+        }
+    } else if guard.detail.starts_with("Receiving…") {
+        // Restore normal connected blurb without inventing a new phase.
+        let name = guard.connected_name.clone();
+        drop(guard);
+        if !name.is_empty() {
+            write_status(status, "connected", connected_detail(status, &name));
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MsgDrainResult {
     /// Companion reported no more queued messages.
@@ -3600,6 +3625,7 @@ fn need_msg_drain_after(result: MsgDrainResult) -> bool {
 async fn get_msg_listening_first(
     commands: &meshcore_rs::commands::CommandHandler,
     dispatcher: &meshcore_rs::events::EventDispatcher,
+    timeout: Duration,
 ) -> Result<Option<MeshCoreEvent>, String> {
     const CMD_SYNC_NEXT_MESSAGE: u8 = 0x0A;
     let event = request_listening_first(
@@ -3612,7 +3638,7 @@ async fn get_msg_listening_first(
             EventType::NoMoreMessages,
             EventType::Error,
         ],
-        Duration::from_millis(900),
+        timeout,
     )
     .await?;
     match event.event_type {
@@ -3641,9 +3667,14 @@ async fn drain_pending_messages(
     radio: i64,
     from_waiting: bool,
 ) -> MsgDrainResult {
-    let Ok(commands) =
-        tokio::time::timeout(BRIEF_LOCK_WAIT, meshcore.commands().lock()).await
-    else {
+    // MessagesWaiting / deferred live drain uses the operator lock budget so
+    // background brief work cannot starve RX. Passive 2s polls stay brief.
+    let lock_wait = if from_waiting {
+        SEND_LOCK_WAIT
+    } else {
+        BRIEF_LOCK_WAIT
+    };
+    let Ok(commands) = tokio::time::timeout(lock_wait, meshcore.commands().lock()).await else {
         if from_waiting {
             hq_log!(
                 info,
@@ -3664,7 +3695,13 @@ async fn drain_pending_messages(
             );
             return MsgDrainResult::MorePending;
         }
-        match get_msg_listening_first(&commands, meshcore.dispatcher()).await {
+        match get_msg_listening_first(
+            &commands,
+            meshcore.dispatcher(),
+            Duration::from_millis(900),
+        )
+        .await
+        {
             Ok(Some(_event)) => {
                 fetched = fetched.saturating_add(1);
             }
@@ -4452,8 +4489,16 @@ async fn run_session(
                 );
                 break;
             }
-            match tokio::time::timeout(Duration::from_secs(4), commands.get_msg()).await {
-                Ok(Ok(Some(event))) => {
+            // Listen-before-write (same as live drain) — USB CDC can reply before
+            // meshcore-rs get_msg attaches its waiter.
+            match get_msg_listening_first(
+                &commands,
+                meshcore.dispatcher(),
+                Duration::from_secs(4),
+            )
+            .await
+            {
+                Ok(Some(event)) => {
                     drained = drained.saturating_add(1);
                     write_sync(
                         status,
@@ -4462,14 +4507,19 @@ async fn run_session(
                         Some((drained, (drained + 8).max(1))),
                     );
                     // History/drain only — do not re-run METIS-INFO bot commands.
-                    if let Err(err) = handle_event(db, &meshcore, event, radio, false).await {
+                    if let Err(err) =
+                        handle_event(db, &meshcore, event, radio, false, Some(status)).await
+                    {
                         hq_log!(warn, "message: {err}");
                     }
                 }
-                Ok(Ok(None)) => break,
-                Ok(Err(err)) => return SessionEnd::Lost(err.to_string()),
-                Err(_) => {
-                    // No reply in time — treat as empty / move on to live mode.
+                Ok(None) => break,
+                Err(err) => {
+                    if is_link_error(&err) {
+                        return SessionEnd::Lost(err);
+                    }
+                    // No reply / soft error — treat as empty and move on to live mode.
+                    hq_log!(debug, "connect msg drain: {err}");
                     break;
                 }
             }
@@ -4550,7 +4600,7 @@ async fn run_session(
     }
     // Do NOT use meshcore-rs start_auto_message_fetching(): it spawns tasks that
     // hold the command mutex across get_msg and starve channel sends / CLI.
-    // MessagesWaiting is drained in the session loop instead.
+    // Live RX uses MessagesWaiting + tick drain with lock yield between batches (O5).
 
     let mut replies: HashMap<String, Instant> = HashMap::new();
     let mut pushed_generation = 0i64;
@@ -5112,9 +5162,13 @@ async fn run_session(
                         // Coalescing push — must drain (or keep retrying) until
                         // NoMoreMessages, or further arrivals may not re-signal.
                         hq_log!(info, "radio {radio}: MessagesWaiting");
-                        need_msg_drain = need_msg_drain_after(
-                            drain_pending_messages(&meshcore, radio, true).await,
-                        );
+                        let result = drain_pending_messages(&meshcore, radio, true).await;
+                        need_msg_drain = need_msg_drain_after(result);
+                        match result {
+                            MsgDrainResult::Busy => set_receiving_busy_hint(status, true),
+                            MsgDrainResult::Cleared => set_receiving_busy_hint(status, false),
+                            MsgDrainResult::MorePending => {}
+                        }
                     }
                     Some(event) => {
                         if event.event_type == EventType::Advertisement
@@ -5148,7 +5202,9 @@ async fn run_session(
                         }
                         // Bot replies only on the primary; every radio still ingests history.
                         let live_bot = ctx.is_primary();
-                        if let Err(err) = handle_event(db, &meshcore, event, radio, live_bot).await {
+                        if let Err(err) =
+                            handle_event(db, &meshcore, event, radio, live_bot, Some(status)).await
+                        {
                             hq_log!(warn, "event: {err}");
                         }
                     }
@@ -5156,7 +5212,12 @@ async fn run_session(
             }
             _ = tick.tick() => {
                 let _ = db.fail_stale_tx_messages(90);
-                // Opportunistic / deferred companion message queue drain (#2).
+                // Tick order (do not reorder): (1) message drain, (2) LogData
+                // subscribe, (3) outbound/broadcast, (4) channel push, (5) battery,
+                // (6) infra/contacts. Drain must win the mutex over background.
+                //
+                // Cap+yield: each drain_pending_messages takes/releases the lock;
+                // MorePending retries next tick. Do NOT use start_auto_message_fetching().
                 let poll_due = last_msg_poll.elapsed() >= MSG_POLL_EVERY;
                 if need_msg_drain || poll_due {
                     let from_waiting = need_msg_drain;
@@ -5164,14 +5225,20 @@ async fn run_session(
                         MsgDrainResult::Cleared => {
                             need_msg_drain = false;
                             last_msg_poll = Instant::now();
+                            set_receiving_busy_hint(status, false);
                         }
                         MsgDrainResult::MorePending => {
                             need_msg_drain = true;
                             last_msg_poll = Instant::now();
+                            // Still draining across ticks — soft status, not an alarm.
+                            set_receiving_busy_hint(status, true);
                         }
                         MsgDrainResult::Busy => {
                             // Keep need_msg_drain so the next tick retries; for a
                             // pure poll, back off until MSG_POLL_EVERY again.
+                            if from_waiting {
+                                set_receiving_busy_hint(status, true);
+                            }
                             if !need_msg_drain {
                                 last_msg_poll = Instant::now();
                             }
@@ -5288,7 +5355,9 @@ async fn run_session(
                         }
                     }
                 }
-                if last_battery.elapsed() >= Duration::from_secs(15) {
+                // O4: when RX drain still needs the mutex, skip one background
+                // brief-lock job this tick so drain retries win.
+                if !need_msg_drain && last_battery.elapsed() >= Duration::from_secs(15) {
                     if let Some(commands) = lock_commands_brief(&meshcore).await {
                         match commands.get_bat().await {
                             Ok(battery) => {
@@ -5332,8 +5401,13 @@ async fn run_session(
                 // held the select arm and made SendChannel look dead.
                 // Incremental get_contacts can still need ~15–25s on a busy radio;
                 // an 8s budget timed out every attempt and left need_contact_retry
-                // stuck true (retry spam every 2 minutes).
-                if need_contact_retry && Instant::now() >= contact_retry_at {
+                // stuck true (retry spam every 2 minutes). O5: channel setup is
+                // spawned; contact retry stays on the tick arm but is capped at
+                // 25s and skipped while need_msg_drain (O4).
+                if !need_msg_drain
+                    && need_contact_retry
+                    && Instant::now() >= contact_retry_at
+                {
                     contact_retry_at = Instant::now() + Duration::from_secs(120);
                     if let Some(commands) = lock_commands_brief(&meshcore).await {
                         write_sync(
@@ -5846,16 +5920,23 @@ async fn push_named_channel(
 }
 
 /// `live_bot` false during connect queue drain — ingest history but do not re-run bots.
+/// When `status` is set, bump `rx_seq` on a newly inserted channel/DM so the UI can refresh.
 async fn handle_event(
     db: &Arc<Db>,
     meshcore: &MeshCore,
     event: MeshCoreEvent,
     radio_id: i64,
     live_bot: bool,
+    status: Option<&Mutex<RadioStatus>>,
 ) -> Result<(), String> {
     match event.payload {
         EventPayload::ContactMessage(message) => {
-            on_direct(db, meshcore, message, radio_id).await?;
+            let inserted = on_direct(db, meshcore, message, radio_id).await?;
+            if inserted {
+                if let Some(status) = status {
+                    bump_rx_seq(status);
+                }
+            }
         }
         EventPayload::ChannelMessage(message) => {
             let hops = hop_count_from_path_len(message.path_len).map(i64::from);
@@ -5921,6 +6002,11 @@ async fn handle_event(
                     "received", Some(radio_id), "local",
                 )
                 .map_err(|err| err.to_string())?;
+            if inserted.is_some() {
+                if let Some(status) = status {
+                    bump_rx_seq(status);
+                }
+            }
             if let (Some(message_id), Some(pubkey)) = (inserted, sender_pubkey.as_deref()) {
                 let _ = db.touch_node_radio(pubkey, radio_id);
                 // Zero-hop channel RX = direct RF; mark a unicast-capable route.
@@ -6008,12 +6094,13 @@ async fn handle_event(
     Ok(())
 }
 
+/// Returns true when a new message row was inserted (not a dedupe ignore).
 async fn on_direct(
     db: &Arc<Db>,
     meshcore: &MeshCore,
     message: ContactMessage,
     radio_id: i64,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let prefix = message.sender_prefix_hex();
     let matches = db.nodes_by_prefix(&prefix).map_err(|err| err.to_string())?;
     let unique = matches.len() == 1;
@@ -6037,7 +6124,7 @@ async fn on_direct(
     if let Some(ref key) = pubkey {
         if db.is_blocked(key).unwrap_or(false) {
             hq_log!(debug, "dropping direct RX from blocked {key}");
-            return Ok(());
+            return Ok(false);
         }
     }
     let hops = hop_count_from_path_len(message.path_len).map(i64::from);
@@ -6068,7 +6155,7 @@ async fn on_direct(
         )
         .map_err(|err| err.to_string())?;
     let Some(message_id) = inserted else {
-        return Ok(());
+        return Ok(false);
     };
     if let Some(ref pubkey) = pubkey {
         if !is_cli_data {
@@ -6090,7 +6177,7 @@ async fn on_direct(
             }
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 /// METIS-INFO channel bot. Replies go back on the same channel slot.
@@ -6585,7 +6672,9 @@ async fn fetch_advert_path(
         Duration::from_secs(1)
     };
 
-    let mut early_rx = meshcore.dispatcher().receiver();
+    // Subscribe before write so a late PathUpdate / Error is not missed while
+    // we wait on the first reply (same listen-first helper as get_msg / channel TX).
+    let mut late_rx = meshcore.dispatcher().receiver();
     let expected = [
         EventType::Unknown,
         EventType::Error,
@@ -6596,21 +6685,14 @@ async fn fetch_advert_path(
         let Some(commands) = lock_commands_brief(meshcore).await else {
             return path_fetch_fallbacks(db, pubkey_hex, message_id, persist_source);
         };
-        tokio::select! {
-            result = commands.send_multi(&frame, &expected, send_wait) => {
-                result.map_err(|err| err.to_string())
-            }
-            event = async {
-                loop {
-                    match early_rx.recv().await {
-                        Ok(event) if expected.contains(&event.event_type) => return Ok(event),
-                        Ok(_) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(_) => return Err("Companion event stream closed.".to_string()),
-                    }
-                }
-            } => event,
-        }
+        request_listening_first(
+            &commands,
+            meshcore.dispatcher(),
+            &frame,
+            &expected,
+            send_wait,
+        )
+        .await
     };
 
     if let Ok(ref event) = send_outcome {
@@ -6641,7 +6723,7 @@ async fn fetch_advert_path(
     let deadline = Instant::now() + late_wait;
     while Instant::now() < deadline {
         let left = deadline.saturating_duration_since(Instant::now());
-        match tokio::time::timeout(left, early_rx.recv()).await {
+        match tokio::time::timeout(left, late_rx.recv()).await {
             Ok(Ok(event)) => {
                 if event.event_type == EventType::Error {
                     hq_log!(
@@ -7413,6 +7495,35 @@ mod tests {
     fn need_msg_drain_after_busy_or_more_keeps_retry() {
         assert!(need_msg_drain_after(MsgDrainResult::Busy));
         assert!(need_msg_drain_after(MsgDrainResult::MorePending));
+    }
+
+    #[test]
+    fn bump_rx_seq_increments_for_ui_invalidate() {
+        let status = Mutex::new(RadioStatus::default());
+        bump_rx_seq(&status);
+        bump_rx_seq(&status);
+        let guard = status.lock().unwrap();
+        assert_eq!(guard.rx_seq, 2);
+    }
+
+    #[test]
+    fn receiving_busy_hint_sets_and_clears_connected_detail() {
+        let status = Mutex::new(RadioStatus {
+            state: "connected".into(),
+            connected_name: "HQ-1".into(),
+            detail: "Connected to HQ-1.".into(),
+            ..RadioStatus::default()
+        });
+        set_receiving_busy_hint(&status, true);
+        {
+            let guard = status.lock().unwrap();
+            assert!(guard.detail.starts_with("Receiving…"), "{}", guard.detail);
+            assert_eq!(guard.state, "connected");
+        }
+        set_receiving_busy_hint(&status, false);
+        let guard = status.lock().unwrap();
+        assert!(!guard.detail.starts_with("Receiving…"), "{}", guard.detail);
+        assert!(guard.detail.contains("HQ-1"), "{}", guard.detail);
     }
 
     fn sample(name: &str, rssi: Option<i16>, companion: bool) -> BleRadio {

@@ -4541,6 +4541,7 @@ fn MessagesPage() -> Element {
     let mut refresh_started = use_signal(|| false);
     let mut rail_epoch = use_signal(|| 0u64);
     let mut last_send_seq = use_signal(|| 0u64);
+    let mut last_rx_seq = use_signal(|| 0u64);
     let mut read_session = use_signal(|| None::<ChannelReadSession>);
     let mut new_dm_open = use_signal(|| false);
     let mut new_dm_peer = use_signal(String::new);
@@ -4588,6 +4589,11 @@ fn MessagesPage() -> Element {
         } else {
             note.set(radio.send_note.clone());
         }
+    }
+    // Instant Messages refresh when RX insert bumps rx_seq (1.5s poll remains fallback).
+    if radio.rx_seq != last_rx_seq() {
+        last_rx_seq.set(radio.rx_seq);
+        refresh.set(refresh() + 1);
     }
     let channels = state().db.list_channels().unwrap_or_default();
     let dm_threads = state().db.list_dm_threads().unwrap_or_default();

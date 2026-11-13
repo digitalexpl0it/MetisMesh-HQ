@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.1.19 — 2026-11-12
+
+Package version `0.1.19` (Cargo / About). Windows Details may show `0.1.19.0`.
+
+### Radio
+
+- Connect-time and path-fetch frames use the same listen-before-write helper as live `get_msg` (USB CDC race)
+- Session tick: drain first; skip battery / contact retry while `need_msg_drain` so background brief-locks cannot starve RX
+- Live drain after `MessagesWaiting` takes the operator lock budget; lock is released between 24-message batches (still no `start_auto_message_fetching`)
+- Soft status “Receiving… radio busy, retrying.” while deferred drain / multi-tick receive is in progress
+
+### Messages
+
+- Instant list refresh when RX insert bumps `rx_seq` (1.5s poll kept as fallback)
+
 ## 0.1.18 — 2026-11-12
 
 Package version `0.1.18` (Cargo / About). Windows Details may show `0.1.18.0`.

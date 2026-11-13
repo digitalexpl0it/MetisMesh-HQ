@@ -172,9 +172,9 @@ Feature phases A–N are largely done. This phase makes the companion session **
 
 - [x] **O1** Live RX drain: `MessagesWaiting` → drain with lock-busy retry; 2s opportunistic `get_msg` poll; listen-before-write (v0.1.18; closes #2 when field-confirmed)
 - [x] **O2** Structured RX logs: `MessagesWaiting`, drain Cleared/Busy/MorePending, fetch count (so field reports are not silent)
-- [ ] **O3** Audit other `send_multi` / fire-and-forget paths still missing listen-before-write (same USB race as `get_msg`)
-- [ ] **O4** Session lock budget: classify **operator** (send/CLI) vs **background** (battery/contacts/infra); background must not starve RX drain or TX
-- [ ] **O5** Cap + yield: drain/contact/channel jobs release the command lock between batches (do **not** re-enable raw `start_auto_message_fetching`)
+- [x] **O3** Audit other `send_multi` / fire-and-forget paths still missing listen-before-write (same USB race as `get_msg`)
+- [x] **O4** Session lock budget: classify **operator** (send/CLI) vs **background** (battery/contacts/infra); background must not starve RX drain or TX
+- [x] **O5** Cap + yield: drain/contact/channel jobs release the command lock between batches (do **not** re-enable raw `start_auto_message_fetching`)
 - [ ] **O6** Connect vs live parity: connect drain and live drain share the same `handle_event` / dedupe path
 - [ ] **O7** Field matrix: USB + BLE + TCP × channel + DM × idle vs mid-send; confirm &lt;~2s live RX without restart
 
@@ -183,7 +183,7 @@ Do **not**: re-bundle Ubuntu WebKit; re-enable library auto-fetch that holds the
 ## Phase P — Companion session health
 
 - [ ] **P1** Clear UI when companion protocol &lt; 14 (CLI needs v14+) vs messaging still OK
-- [ ] **P2** Soft “radio busy / retrying…” for deferred drain (alongside existing companion-busy / free-the-link copy)
+- [x] **P2** Soft “radio busy / retrying…” for deferred drain (alongside existing companion-busy / free-the-link copy)
 - [ ] **P3** Reconnect: preserve unread queue semantics; contact watermark careful across radios
 - [ ] **P4** Multi-radio: primary-only bot; secondary ingest never blocks primary TX/RX
 
@@ -198,7 +198,7 @@ Do **not**: re-bundle Ubuntu WebKit; re-enable library auto-fetch that holds the
 
 ## Phase R — UI feel (match radio speed)
 
-- [ ] **R1** Messages: keep poll, but invalidate / bump refresh on new insert so live RX feels instant
+- [x] **R1** Messages: keep poll, but invalidate / bump refresh on new insert so live RX feels instant
 - [ ] **R2** Audit Roster/Map ticks for avoidable full re-renders (compose dock pattern already landed)
 - [ ] **R3** Status strip: Connected + last RX age / “draining queue…” operator confidence
 - [ ] **R4** Finish **H2** smoke: Linux AppImage, Windows zip, no-hardware degrade cleanly

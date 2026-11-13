@@ -43,6 +43,10 @@ const TOPICS: &[HelpTopic] = &[
         label: "Messages & Inbox",
     },
     HelpTopic {
+        id: "help-live-rx",
+        label: "Live RX check",
+    },
+    HelpTopic {
         id: "help-map",
         label: "Map, Tracker, Infra",
     },
@@ -289,9 +293,14 @@ pub fn HelpPage() -> Element {
                         }
                         p { "Settings → Connect. One pool supports Bluetooth, USB serial, and TCP (Wi-Fi / Ethernet companions, default port 5000)." }
                         ul { class: "help-bullets",
-                            li { "Bluetooth: phone app must disconnect from that radio first; enter the six-digit companion PIN when asked. If HQ stops with Companion busy, free the radio on the phone (or other client), then Connect again — HQ will not reconnect forever while the link is held." }
-                            li { "USB: pick the port; sticky identity survives OS renumbering when possible." }
+                            li { "Bluetooth: phone app must disconnect from that radio first; enter the six-digit companion PIN when asked. If HQ stops with Companion busy, free the radio on the phone (or other client), then Connect again — HQ will not reconnect forever while the link is held. Linux needs BlueZ (wizard Install works with apt, pacman, or dnf)." }
+                            li { "USB: pick the port; sticky identity survives OS renumbering when possible. Linux: membership in dialout or uucp (log out after wizard Install)." }
                             li { "TCP: host + port; no PIN." }
+                            li {
+                                "Linux AppImage: host "
+                                code { "webkit2gtk-4.1" }
+                                " required (see Settings → About). Deb packages pull WebKit via Depends."
+                            }
                             li {
                                 strong { "Companion tools" }
                                 " — Settings → Device → Identity: "
@@ -403,6 +412,80 @@ pub fn HelpPage() -> Element {
                             }
                         }
                         p { "Ordinary DMs live under Messages → DMs (or Contacts with a known key), not Inbox." }
+                    }
+
+                    section { id: "help-live-rx", class: "help-section",
+                        h3 { class: "help-section-title",
+                            Icon { name: IconName::Radio, size: 16 }
+                            "Live RX check — field matrix"
+                        }
+                        p {
+                            "Confirm incoming mesh text appears in HQ within about two seconds "
+                            strong { "without restarting" }
+                            ". Canonical copy for GitHub / print: "
+                            code { "docs/RADIO_LIVE_RX.md" }
+                            "."
+                        }
+                        h4 { class: "help-subhead", "Pass criteria" }
+                        ul { class: "help-bullets",
+                            li { "Companion shows Connected / Companion ready." }
+                            li { "Channel and DM traffic from another device lands in Messages within ~2s while HQ stays open." }
+                            li { "Compose and Device CLI stay usable while messages arrive (send while receiving)." }
+                        }
+                        h4 { class: "help-subhead", "Matrix" }
+                        table { class: "help-table",
+                            thead {
+                                tr {
+                                    th { "Transport" }
+                                    th { "Idle channel" }
+                                    th { "Idle DM" }
+                                    th { "Send while RX" }
+                                }
+                            }
+                            tbody {
+                                tr {
+                                    td { "USB" }
+                                    td { "☐" }
+                                    td { "☐" }
+                                    td { "☐" }
+                                }
+                                tr {
+                                    td { "Bluetooth" }
+                                    td { "☐" }
+                                    td { "☐" }
+                                    td { "☐" }
+                                }
+                                tr {
+                                    td { "TCP" }
+                                    td { "☐" }
+                                    td { "☐" }
+                                    td { "☐" }
+                                }
+                            }
+                        }
+                        h4 { class: "help-subhead", "Soak (quick)" }
+                        ol { class: "help-steps",
+                            li { "Leave HQ connected on one transport above." }
+                            li { "From a phone / T-Deck: send ~10 short channel messages, then 2 DMs to this HQ." }
+                            li { "While those arrive, send one channel message from HQ Compose and one short CLI (or Device) command." }
+                            li { "All RX should show in Messages without restart; HQ send/CLI should complete." }
+                        }
+                        h4 { class: "help-subhead", "Optional logs" }
+                        p {
+                            "Run with "
+                            code { "--dev" }
+                            " and look for "
+                            code { "sync ready" }
+                            ", "
+                            code { "MessagesWaiting" }
+                            ", "
+                            code { "msg drain cleared" }
+                            " / "
+                            code { "drain deferred" }
+                            ", and "
+                            code { "radio lock: … wait Nms" }
+                            " (operator lock stalls). Soft status may show “Receiving… radio busy, retrying.” — Compose stays open."
+                        }
                     }
 
                     section { id: "help-map", class: "help-section",
@@ -547,7 +630,7 @@ pub fn HelpPage() -> Element {
                         ul { class: "help-bullets",
                             li {
                                 strong { "CLI" }
-                                " — run MeshCore CLI on this companion or a remote repeater / room / sensor (role-aware command list)."
+                                " — run MeshCore CLI on this companion or a remote repeater / room / sensor (role-aware command list). Local companion CLI needs protocol v14+ (opcode 66); older companions still handle Messages and enrollment — update firmware under Settings → Flasher. Remote repeater/room CLI is separate."
                             }
                             li {
                                 strong { "RX log" }

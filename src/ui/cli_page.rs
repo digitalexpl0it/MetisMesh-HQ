@@ -5,7 +5,9 @@ use dioxus::prelude::*;
 use super::icons::{Icon, IconName};
 use super::state;
 use super::widgets::{Button, ButtonKind, Dialog, PageHeading, SelectInput, TextInput};
-use crate::radio::RadioStatus;
+use crate::radio::{
+    local_cli_protocol_blocked, RadioStatus, CLI_PROTOCOL_MIN,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CliPageTab {
@@ -310,15 +312,16 @@ pub fn CliPage(radio: RadioStatus) -> Element {
         append_transcript(transcript, &format!("> {text}"));
         append_transcript(transcript, "… waiting for reply");
         let snap = state().radio.snapshot();
-        if snap.protocol_ver > 0 && snap.protocol_ver < 14 && contact.is_empty() {
-            append_transcript(
-                transcript,
-                &format!(
-                    "error: companion protocol v{} — local CLI needs v14+.",
-                    snap.protocol_ver
-                ),
-            );
-            return;
+        if contact.is_empty() {
+            if let Some(ver) = local_cli_protocol_blocked(snap.protocol_ver) {
+                append_transcript(
+                    transcript,
+                    &format!(
+                        "error: companion protocol v{ver} — local CLI needs v{CLI_PROTOCOL_MIN}+."
+                    ),
+                );
+                return;
+            }
         }
         let expected_seq = snap.cli_seq;
         state().radio.run_cli(contact, text);
@@ -370,6 +373,13 @@ pub fn CliPage(radio: RadioStatus) -> Element {
                 if !linked {
                     p { class: "text-sm text-muted-foreground",
                         "Connect a companion radio to use the CLI."
+                    }
+                }
+                if linked && target() == "local" {
+                    if let Some(ver) = local_cli_protocol_blocked(radio.protocol_ver) {
+                        p { class: "rounded-md border border-border bg-card px-3 py-2 text-sm text-muted-foreground",
+                            "This companion is protocol v{ver}. Messaging and enrollment still work. Local CLI needs v{CLI_PROTOCOL_MIN}+ — update companion firmware (Settings → Flasher). Remote repeater/room CLI still works."
+                        }
                     }
                 }
                 div { class: "flex flex-wrap items-end gap-2",

@@ -215,6 +215,8 @@ pub struct RadioStatus {
     pub send_note: String,
     /// Bumped when a new RX message is inserted (Messages UI can refresh immediately).
     pub rx_seq: u64,
+    /// Unix time of the latest RX insert (status strip “Last RX … ago”).
+    pub last_rx_at: Option<i64>,
     /// Database id of the radio this status describes (`None` when no radio is live).
     pub radio_id: Option<i64>,
     /// `ble`, `usb`, `tcp`, or empty when no radio is live.
@@ -269,6 +271,7 @@ impl Default for RadioStatus {
             send_seq: 0,
             send_note: String::new(),
             rx_seq: 0,
+            last_rx_at: None,
             radio_id: None,
             transport: String::new(),
             role: String::new(),
@@ -1712,6 +1715,22 @@ fn clear_session_telemetry(status: &Mutex<RadioStatus>) {
     guard.flood_scope = None;
     guard.custom_vars.clear();
     guard.connected_since = None;
+    guard.rx_seq = 0;
+    guard.last_rx_at = None;
+}
+
+/// Relative age for the footer status strip (R3).
+pub fn format_rx_age(now: i64, last_rx_at: i64) -> String {
+    let secs = now.saturating_sub(last_rx_at).max(0);
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
+    }
 }
 
 /// Firmware uses `key:value` (comma-separated on get). meshcore-rs uses `=` — send `:` ourselves.
@@ -3549,20 +3568,63 @@ async fn run_noise_probe(db: Arc<Db>, meshcore: Arc<MeshCore>, status: Arc<Mutex
     );
 }
 
+/// Whether a lock-wait line should show at info (field `--dev` / default log file).
+fn radio_lock_wait_field_visible(kind: &str, ms: u128, acquired: bool) -> bool {
+    if !acquired {
+        return true;
+    }
+    // Operator sends: surface ≥50ms. Background/brief: surface ≥200ms.
+    if kind.starts_with("operator") || kind.starts_with("drain-operator") {
+        ms >= 50
+    } else {
+        ms >= 200
+    }
+}
+
+/// Log command-mutex wait time for `--dev` / log-file diagnosis (S1).
+fn log_radio_lock_wait(kind: &str, waited: Duration, acquired: bool) {
+    let ms = waited.as_millis();
+    if !acquired {
+        hq_log!(warn, "radio lock: {kind} wait timed out after {ms}ms");
+        return;
+    }
+    if radio_lock_wait_field_visible(kind, ms, true) {
+        hq_log!(info, "radio lock: {kind} wait {ms}ms");
+    } else {
+        hq_log!(debug, "radio lock: {kind} wait {ms}ms");
+    }
+}
+
 async fn lock_commands_brief(
     meshcore: &MeshCore,
 ) -> Option<tokio::sync::MutexGuard<'_, meshcore_rs::commands::CommandHandler>> {
-    tokio::time::timeout(BRIEF_LOCK_WAIT, meshcore.commands().lock())
-        .await
-        .ok()
+    let started = Instant::now();
+    match tokio::time::timeout(BRIEF_LOCK_WAIT, meshcore.commands().lock()).await {
+        Ok(guard) => {
+            log_radio_lock_wait("brief", started.elapsed(), true);
+            Some(guard)
+        }
+        Err(_) => {
+            log_radio_lock_wait("brief", started.elapsed(), false);
+            None
+        }
+    }
 }
 
 async fn lock_commands_for_operator(
     meshcore: &MeshCore,
 ) -> Result<tokio::sync::MutexGuard<'_, meshcore_rs::commands::CommandHandler>, String> {
-    tokio::time::timeout(SEND_LOCK_WAIT, meshcore.commands().lock())
-        .await
-        .map_err(|_| "Radio is busy (sync in progress). Try again in a moment.".to_string())
+    let started = Instant::now();
+    match tokio::time::timeout(SEND_LOCK_WAIT, meshcore.commands().lock()).await {
+        Ok(guard) => {
+            log_radio_lock_wait("operator", started.elapsed(), true);
+            Ok(guard)
+        }
+        Err(_) => {
+            log_radio_lock_wait("operator", started.elapsed(), false);
+            Err("Radio is busy (sync in progress). Try again in a moment.".to_string())
+        }
+    }
 }
 
 async fn send_companion_reboot(meshcore: &MeshCore) -> Result<(), String> {
@@ -3584,6 +3646,7 @@ fn push_send_note(status: &Mutex<RadioStatus>, note: impl Into<String>) {
 fn bump_rx_seq(status: &Mutex<RadioStatus>) {
     let mut guard = status.lock().unwrap_or_else(|err| err.into_inner());
     guard.rx_seq = guard.rx_seq.wrapping_add(1);
+    guard.last_rx_at = Some(unix_now());
 }
 
 /// Soft operator hint while live RX drain is deferred (does not change `state`).
@@ -3616,6 +3679,20 @@ enum MsgDrainResult {
 /// Whether the session should keep retrying the companion message queue.
 fn need_msg_drain_after(result: MsgDrainResult) -> bool {
     !matches!(result, MsgDrainResult::Cleared)
+}
+
+/// Outcome of the pre-subscribe connect queue drain (O6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ConnectMsgDrain {
+    drained: u32,
+    /// True when the companion reported empty (or soft-empty). False when we
+    /// paused on budget/deadline — live loop must keep draining.
+    complete: bool,
+}
+
+/// Seed `need_msg_drain` after connect: unfinished handshake drain continues live.
+fn need_msg_drain_after_connect(outcome: ConnectMsgDrain) -> bool {
+    !outcome.complete
 }
 
 /// `CMD_SYNC_NEXT_MESSAGE` (0x0A) with listen-before-write. meshcore-rs
@@ -3652,9 +3729,13 @@ async fn get_msg_listening_first(
     }
 }
 
-/// Pull queued frames off the companion. Each message is also broadcast to our
-/// ChannelMsgRecv / ContactMsgRecv subscriptions, which handle DB insert — so
-/// this only drives `CMD_SYNC_NEXT_MESSAGE` and must not insert again.
+/// Pull queued frames off the companion (live / post-subscribe only).
+///
+/// Invariant (O6): ChannelMsgRecv / ContactMsgRecv subscriptions are already
+/// active, so each `get_msg` reply is inserted via the session event loop's
+/// `handle_event`. This helper must **not** call `handle_event` again (that
+/// would double-fire bots). Connect drain is the opposite: it runs
+/// *before* subscribe and therefore calls `handle_event` itself.
 ///
 /// Live RX depends on this: companion text is queued until `get_msg`, and
 /// `PUSH_CODE_MSG_WAITING` (0x83) is coalescing — a missed drain leaves the
@@ -3674,7 +3755,14 @@ async fn drain_pending_messages(
     } else {
         BRIEF_LOCK_WAIT
     };
+    let lock_kind = if from_waiting {
+        "drain-operator"
+    } else {
+        "drain-brief"
+    };
+    let lock_started = Instant::now();
     let Ok(commands) = tokio::time::timeout(lock_wait, meshcore.commands().lock()).await else {
+        log_radio_lock_wait(lock_kind, lock_started.elapsed(), false);
         if from_waiting {
             hq_log!(
                 info,
@@ -3685,6 +3773,7 @@ async fn drain_pending_messages(
         }
         return MsgDrainResult::Busy;
     };
+    log_radio_lock_wait(lock_kind, lock_started.elapsed(), true);
     let mut fetched = 0u32;
     const BUDGET: u32 = 24;
     loop {
@@ -3868,6 +3957,19 @@ fn bot_command_claim_id(slot: u8, sender_timestamp: u32, body: &str) -> String {
     )
 }
 
+/// Minimum companion protocol for local Device CLI (`CMD_RUN_CLI_COMMAND` / opcode 66).
+pub const CLI_PROTOCOL_MIN: u8 = 14;
+
+/// When local companion CLI cannot run: returns the radio's protocol version.
+/// `0` means unknown (no SelfInfo yet) — do not treat as blocked.
+pub fn local_cli_protocol_blocked(protocol_ver: u8) -> Option<u8> {
+    if protocol_ver > 0 && protocol_ver < CLI_PROTOCOL_MIN {
+        Some(protocol_ver)
+    } else {
+        None
+    }
+}
+
 /// Companion `CMD_RUN_CLI_COMMAND` (66). Reply is code 29 → EventType::Unknown + Bytes.
 /// Wire body is `xx|command` (protocol v14+), matching mesh-client / firmware.
 async fn apply_local_cli(
@@ -3875,9 +3977,9 @@ async fn apply_local_cli(
     text: &str,
     protocol_ver: u8,
 ) -> Result<String, String> {
-    if protocol_ver > 0 && protocol_ver < 14 {
+    if let Some(ver) = local_cli_protocol_blocked(protocol_ver) {
         return Err(format!(
-            "Companion protocol v{protocol_ver} — local CLI needs v14+. Update the companion firmware."
+            "Companion protocol v{ver} — local CLI needs v{CLI_PROTOCOL_MIN}+. Update the companion firmware."
         ));
     }
     let command = text.trim_start();
@@ -4307,6 +4409,9 @@ async fn run_session(
     let channel_setup_done = Arc::new(AtomicBool::new(false));
     let channel_setup_inflight = Arc::new(AtomicBool::new(false));
     let max_channels;
+    // O6: connect drain outcome seeds live `need_msg_drain` after subscribe.
+    // Assigned before this block ends (early SessionEnd returns never reach the use).
+    let connect_msg_drain;
     {
         let dispatcher = meshcore.dispatcher();
         let commands = meshcore.commands().lock().await;
@@ -4468,6 +4573,11 @@ async fn run_session(
         // Cap the initial queue drain. On a busy Public channel, new RF traffic
         // can refill the companion queue forever — holding this lock for hours
         // blocks Ready / CLI / settings while the UI says "Draining…".
+        //
+        // O6: this runs *before* Channel/Contact subscriptions, so each frame
+        // must go through `handle_event` here (live_bot=false). Live
+        // `drain_pending_messages` must not call `handle_event` again.
+        // Longer get_msg timeout than live (4s vs 900ms) — handshake is quiet.
         write_sync(
             status,
             SyncPhase::Messages,
@@ -4476,6 +4586,7 @@ async fn run_session(
         );
         let drain_deadline = Instant::now() + Duration::from_secs(60);
         let mut drained = 0u32;
+        let connect_drain_complete;
         const DRAIN_MAX: u32 = 400;
         loop {
             if drained >= DRAIN_MAX || Instant::now() >= drain_deadline {
@@ -4487,10 +4598,11 @@ async fn run_session(
                     ),
                     Some((drained, drained.max(1))),
                 );
+                connect_drain_complete = false;
                 break;
             }
-            // Listen-before-write (same as live drain) — USB CDC can reply before
-            // meshcore-rs get_msg attaches its waiter.
+            // Listen-before-write (same helper as live drain) — USB CDC can
+            // reply before meshcore-rs attaches its waiter.
             match get_msg_listening_first(
                 &commands,
                 meshcore.dispatcher(),
@@ -4513,18 +4625,38 @@ async fn run_session(
                         hq_log!(warn, "message: {err}");
                     }
                 }
-                Ok(None) => break,
+                Ok(None) => {
+                    connect_drain_complete = true;
+                    break;
+                }
                 Err(err) => {
                     if is_link_error(&err) {
                         return SessionEnd::Lost(err);
                     }
                     // No reply / soft error — treat as empty and move on to live mode.
                     hq_log!(debug, "connect msg drain: {err}");
+                    connect_drain_complete = true;
                     break;
                 }
             }
         }
+        connect_msg_drain = ConnectMsgDrain {
+            drained,
+            complete: connect_drain_complete,
+        };
+        if !connect_msg_drain.complete {
+            hq_log!(
+                info,
+                "radio {radio}: connect drain incomplete ({} msg(s)); seeding live need_msg_drain",
+                connect_msg_drain.drained
+            );
+        }
         write_sync(status, SyncPhase::Ready, "Companion ready", None);
+        hq_log!(
+            info,
+            "radio {radio}: sync ready (connect drain complete={})",
+            connect_msg_drain.complete
+        );
         {
             let mut guard = status.lock().unwrap_or_else(|err| err.into_inner());
             if guard.connected_since.is_none() {
@@ -4635,7 +4767,8 @@ async fn run_session(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Live message queue: drain on MessagesWaiting, retry if lock-busy, and poll
     // periodically (MeshCore docs: do not rely on 0x83 alone — it coalesces).
-    let mut need_msg_drain = false;
+    // O6: unfinished connect drain continues here (same get_msg + event-loop insert).
+    let mut need_msg_drain = need_msg_drain_after_connect(connect_msg_drain);
     let mut last_msg_poll = Instant::now();
     const MSG_POLL_EVERY: Duration = Duration::from_secs(2);
     loop {
@@ -7498,12 +7631,57 @@ mod tests {
     }
 
     #[test]
+    fn need_msg_drain_after_connect_seeds_when_incomplete() {
+        assert!(!need_msg_drain_after_connect(ConnectMsgDrain {
+            drained: 12,
+            complete: true,
+        }));
+        assert!(need_msg_drain_after_connect(ConnectMsgDrain {
+            drained: 400,
+            complete: false,
+        }));
+        assert!(need_msg_drain_after_connect(ConnectMsgDrain {
+            drained: 0,
+            complete: false,
+        }));
+    }
+
+    #[test]
+    fn local_cli_protocol_blocked_only_below_min() {
+        assert_eq!(local_cli_protocol_blocked(0), None);
+        assert_eq!(local_cli_protocol_blocked(CLI_PROTOCOL_MIN), None);
+        assert_eq!(local_cli_protocol_blocked(15), None);
+        assert_eq!(local_cli_protocol_blocked(13), Some(13));
+        assert_eq!(local_cli_protocol_blocked(1), Some(1));
+    }
+
+    #[test]
+    fn radio_lock_wait_field_visibility() {
+        assert!(radio_lock_wait_field_visible("operator", 50, true));
+        assert!(!radio_lock_wait_field_visible("operator", 49, true));
+        assert!(radio_lock_wait_field_visible("drain-operator", 80, true));
+        assert!(!radio_lock_wait_field_visible("brief", 199, true));
+        assert!(radio_lock_wait_field_visible("brief", 200, true));
+        assert!(radio_lock_wait_field_visible("operator", 1, false));
+    }
+
+    #[test]
     fn bump_rx_seq_increments_for_ui_invalidate() {
         let status = Mutex::new(RadioStatus::default());
         bump_rx_seq(&status);
         bump_rx_seq(&status);
         let guard = status.lock().unwrap();
         assert_eq!(guard.rx_seq, 2);
+        assert!(guard.last_rx_at.is_some());
+    }
+
+    #[test]
+    fn format_rx_age_buckets() {
+        assert_eq!(format_rx_age(100, 100), "0s ago");
+        assert_eq!(format_rx_age(130, 100), "30s ago");
+        assert_eq!(format_rx_age(100 + 120, 100), "2m ago");
+        assert_eq!(format_rx_age(100 + 7200, 100), "2h ago");
+        assert_eq!(format_rx_age(100 + 172800, 100), "2d ago");
     }
 
     #[test]

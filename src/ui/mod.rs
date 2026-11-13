@@ -453,7 +453,9 @@ pub fn App() -> Element {
     let mut pin_target = use_signal(String::new);
     let mut pin_error = use_signal(String::new);
     let mut pin_form_key = use_signal(|| 0u64);
-    let mut tick = use_signal(|| 0u64);
+    // Nav badges + radio props for pages that still take `radio` (not Map/Roster).
+    // Header / StatusStrip poll on their own 1s loops (R2). Not a 1Hz shell tick.
+    let mut shell_tick = use_signal(|| 0u64);
     let mut toast_tick = use_signal(|| 0u32);
     let mut show_welcome = use_signal(|| !welcome_is_done());
     let mut open_about_after_welcome = use_signal(|| false);
@@ -485,8 +487,8 @@ pub fn App() -> Element {
         }
         spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                tick.set(tick() + 1);
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                shell_tick.set(shell_tick() + 1);
             }
         });
         spawn(async move {
@@ -497,7 +499,7 @@ pub fn App() -> Element {
             }
         });
     }
-    let _ = tick();
+    let _ = shell_tick();
     let toast_frame = toast_tick();
     if take_want_map_page() {
         page.set(Page::Map);
@@ -780,7 +782,7 @@ pub fn App() -> Element {
                                 }
                             }
                         }
-                        HeaderRadioControls { radio: radio.clone() }
+                        HeaderRadioControls {}
                     }
                     div {
                         class: if page() == Page::Map {
@@ -792,7 +794,7 @@ pub fn App() -> Element {
                         },
                         role: "main",
                         match page() {
-                            Page::Dashboard => rsx! { DashboardPage { radio: radio.clone(), on_navigate: move |next| page.set(next) } },
+                            Page::Dashboard => rsx! { DashboardPage { on_navigate: move |next| page.set(next) } },
                             Page::Map => rsx! { MapPage {} },
                             Page::Weather => rsx! { WeatherPage {} },
                             Page::Tracker => rsx! { TrackerPage {} },
@@ -853,66 +855,7 @@ pub fn App() -> Element {
                 }
             }
             ToastHost { tick: toast_frame }
-            footer { class: "flex items-center gap-4 border-t border-border px-4 py-2 text-xs text-muted-foreground",
-                span { class: "inline-flex shrink-0 items-center gap-2",
-                    Icon { name: status_icon(&radio.state), size: 14 }
-                    "{status_label(&radio.state)}"
-                }
-                div { class: "flex min-w-0 flex-1 flex-col gap-1",
-                    if radio.sync_phase.is_active() {
-                        {
-                            let pct = radio
-                                .sync_progress
-                                .map(|(done, total)| {
-                                    if total == 0 {
-                                        0
-                                    } else {
-                                        ((done as f64 / total as f64) * 100.0).round() as i64
-                                    }
-                                });
-                            rsx! {
-                                div { class: "h-1.5 w-full overflow-hidden rounded-full bg-muted",
-                                    if let Some(pct) = pct {
-                                        div {
-                                            class: "h-full rounded-full bg-signal transition-[width] duration-200",
-                                            style: "width: {pct}%",
-                                        }
-                                    } else {
-                                        div {
-                                            class: "h-full w-2/5 animate-pulse rounded-full bg-signal",
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    span { class: "flex min-w-0 items-center gap-2 truncate",
-                        if radio.sync_phase.is_active() && !radio.sync_label.is_empty() {
-                            span { class: "truncate", "{radio.sync_label}" }
-                        } else {
-                            span { class: "truncate", "{radio.detail}" }
-                        }
-                        if radio.sync_phase.is_active() {
-                            if let Some((done, total)) = radio.sync_progress {
-                                span {
-                                    class: "shrink-0 tabular-nums text-foreground",
-                                    "{done}/{total}"
-                                }
-                            }
-                        }
-                    }
-                }
-                if radio.sync_phase.is_discover() {
-                    Button {
-                        kind: ButtonKind::Ghost,
-                        onclick: move |_| state().radio.cancel_mesh_scan(),
-                        "Stop"
-                    }
-                }
-                if let Some(pct) = radio.battery_pct {
-                    span { class: "shrink-0 text-foreground", "{pct}%" }
-                }
-            }
+            StatusStrip {}
         }
     }
 }
@@ -966,6 +909,96 @@ fn format_age_secs(at: i64) -> String {
         format!("{}h ago", age / 3600)
     } else {
         format!("{}d ago", age / 86_400)
+    }
+}
+
+/// Footer strip: Connected + sync / Receiving / Last RX age (R3). Own 1s poll.
+#[component]
+fn StatusStrip() -> Element {
+    let mut poll = use_signal(|| 0u64);
+    let mut poll_started = use_signal(|| false);
+    if !poll_started() {
+        poll_started.set(true);
+        spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                poll.set(poll() + 1);
+            }
+        });
+    }
+    let _ = poll();
+    let radio = state().radio.snapshot();
+    let now = crate::db::unix_now();
+    let middle = if radio.sync_phase.is_active() && !radio.sync_label.is_empty() {
+        radio.sync_label.clone()
+    } else if radio.detail.starts_with("Receiving…") {
+        radio.detail.clone()
+    } else if radio.state == "connected" {
+        if let Some(at) = radio.last_rx_at {
+            format!("Last RX {}", crate::radio::format_rx_age(now, at))
+        } else {
+            radio.detail.clone()
+        }
+    } else {
+        radio.detail.clone()
+    };
+    rsx! {
+        footer { class: "flex items-center gap-4 border-t border-border px-4 py-2 text-xs text-muted-foreground",
+            span { class: "inline-flex shrink-0 items-center gap-2",
+                Icon { name: status_icon(&radio.state), size: 14 }
+                "{status_label(&radio.state)}"
+            }
+            div { class: "flex min-w-0 flex-1 flex-col gap-1",
+                if radio.sync_phase.is_active() {
+                    {
+                        let pct = radio
+                            .sync_progress
+                            .map(|(done, total)| {
+                                if total == 0 {
+                                    0
+                                } else {
+                                    ((done as f64 / total as f64) * 100.0).round() as i64
+                                }
+                            });
+                        rsx! {
+                            div { class: "h-1.5 w-full overflow-hidden rounded-full bg-muted",
+                                if let Some(pct) = pct {
+                                    div {
+                                        class: "h-full rounded-full bg-signal transition-[width] duration-200",
+                                        style: "width: {pct}%",
+                                    }
+                                } else {
+                                    div {
+                                        class: "h-full w-2/5 animate-pulse rounded-full bg-signal",
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                span { class: "flex min-w-0 items-center gap-2 truncate",
+                    span { class: "truncate", "{middle}" }
+                    if radio.sync_phase.is_active() {
+                        if let Some((done, total)) = radio.sync_progress {
+                            span {
+                                class: "shrink-0 tabular-nums text-foreground",
+                                "{done}/{total}"
+                            }
+                        }
+                    }
+                }
+            }
+            if radio.sync_phase.is_discover() {
+                Button {
+                    kind: ButtonKind::Ghost,
+                    onclick: move |_| state().radio.cancel_mesh_scan(),
+                    "Stop"
+                }
+            }
+            if let Some(pct) = radio.battery_pct {
+                span { class: "shrink-0 text-foreground", "{pct}%" }
+            }
+        }
     }
 }
 
@@ -1143,8 +1176,22 @@ fn companion_option_label(row: &crate::db::RadioRow, devices: &[BleRadio]) -> St
 /// Always-visible companion control in the page header.
 /// Disconnected: optional saved-radio picker + Connect.
 /// Connected: status pill + Disconnect.
+/// Polls radio status locally (1s) so the App shell need not tick at 1Hz (R2).
 #[component]
-fn HeaderRadioControls(radio: RadioStatus) -> Element {
+fn HeaderRadioControls() -> Element {
+    let mut poll = use_signal(|| 0u64);
+    let mut poll_started = use_signal(|| false);
+    if !poll_started() {
+        poll_started.set(true);
+        spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                poll.set(poll() + 1);
+            }
+        });
+    }
+    let _ = poll();
+    let radio = state().radio.snapshot();
     let saved_radios = state().db.list_saved_radios().unwrap_or_default();
     let preferred = state()
         .db
@@ -1313,8 +1360,22 @@ fn HeaderRadioControls(radio: RadioStatus) -> Element {
 }
 
 #[component]
-fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element {
+fn DashboardPage(on_navigate: EventHandler<Page>) -> Element {
     let mut overview_tab = use_signal(|| "hq".to_string());
+    // Light live refresh without App 1Hz tick (R2).
+    let mut live_tick = use_signal(|| 0u64);
+    let mut live_started = use_signal(|| false);
+    if !live_started() {
+        live_started.set(true);
+        spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                live_tick.set(live_tick() + 1);
+            }
+        });
+    }
+    let _ = live_tick();
+    let radio = state().radio.snapshot();
     let hq_name = state()
         .db
         .setting("hq_name")
@@ -1965,6 +2026,23 @@ fn DashboardPage(radio: RadioStatus, on_navigate: EventHandler<Page>) -> Element
                         if !firmware.is_empty() {
                             span { class: "spec-chip", "{firmware}" }
                         }
+                        if radio.protocol_ver > 0 {
+                            {
+                                let ver = radio.protocol_ver;
+                                let cli_min = crate::radio::CLI_PROTOCOL_MIN;
+                                if crate::radio::local_cli_protocol_blocked(ver).is_some() {
+                                    rsx! {
+                                        span { class: "spec-chip text-amber-200/90",
+                                            "protocol v{ver} · CLI needs v{cli_min}+"
+                                        }
+                                    }
+                                } else {
+                                    rsx! {
+                                        span { class: "spec-chip", "protocol v{ver}" }
+                                    }
+                                }
+                            }
+                        }
                         if !model.is_empty() {
                             span { class: "spec-chip", "{model}" }
                         }
@@ -2437,6 +2515,19 @@ enum RosterTab {
 
 #[allow(non_snake_case)]
 fn RosterPage() -> Element {
+    // Own refresh — do not rely on App shell tick (R2).
+    let mut refresh = use_signal(|| 0u64);
+    let mut refresh_started = use_signal(|| false);
+    if !refresh_started() {
+        refresh_started.set(true);
+        spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+                refresh.set(refresh() + 1);
+            }
+        });
+    }
+    let _ = refresh();
     let nodes = state().db.list_nodes().unwrap_or_default();
     let pinned_contacts = state().db.list_pinned_contacts().unwrap_or_default();
     let private_channels: Vec<_> = state()
@@ -14829,6 +14920,33 @@ fn SettingsPage(
                             }
                             p { class: "mb-3 text-xs text-muted-foreground",
                                 "Credits: Dioxus, MapLibre, MeshCore / meshcore-rs."
+                            }
+                            {
+                                #[cfg(target_os = "linux")]
+                                {
+                                    rsx! {
+                                        p { class: "mb-3 rounded-md border border-border bg-card/60 px-3 py-2 text-xs text-muted-foreground",
+                                            strong { class: "text-foreground", "Linux / AppImage runtime" }
+                                            " — AppImage needs host "
+                                            code { "webkit2gtk-4.1" }
+                                            " (Arch: "
+                                            code { "pacman -S webkit2gtk-4.1" }
+                                            "; Fedora: "
+                                            code { "dnf install webkit2gtk4.1" }
+                                            "). USB serial: "
+                                            code { "dialout" }
+                                            " or "
+                                            code { "uucp" }
+                                            " group (log out after wizard Install). BLE needs BlueZ. Use "
+                                            strong { "Run setup again" }
+                                            " for Install buttons."
+                                        }
+                                    }
+                                }
+                                #[cfg(not(target_os = "linux"))]
+                                {
+                                    rsx! {}
+                                }
                             }
                             div { class: "flex flex-wrap gap-2",
                                 Button {

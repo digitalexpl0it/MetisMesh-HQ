@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+## 0.1.20 — 2026-11-12
+
+Package version `0.1.20` (Cargo / About). Windows Details may show `0.1.20.0`.
+
+### Radio
+
+- Connect queue drain that pauses on budget/deadline seeds live `need_msg_drain` so remaining companion messages keep draining after Ready (O6)
+- Clear UI when companion protocol is below v14: Device CLI soft notice + Overview chip; messaging/enrollment still OK (P1)
+- Field log markers (S1): `sync ready`, existing MessagesWaiting/drain lines, plus `radio lock: … wait Nms` for operator/brief mutex stalls
+- Status strip: Last RX age / Receiving… confidence; `last_rx_at` on RX insert (R3)
+
+### UI
+
+- Roster own 2.5s refresh; App shell badges/radio at 2s; Header + StatusStrip self-poll at 1s; Map stays on 5s overlay tick (R2)
+
+### Setup / Linux
+
+- Wizard BlueZ Install via apt, pacman, or dnf (not apt-only); distro-correct soft-dep hints (Q1–Q2)
+- Settings → About: Linux / AppImage runtime note (host `webkit2gtk-4.1`, `dialout`/`uucp`, BlueZ) (Q3)
+
+### Help
+
+- **Live RX check** field matrix (USB/BLE/TCP × channel/DM × idle vs send-while-RX) plus quick soak steps; mirrored in `docs/RADIO_LIVE_RX.md`
+- CLI note: local companion CLI needs protocol v14+; flash newer firmware from Settings → Flasher
+- Connect companion: BlueZ / dialout-uucp / AppImage WebKit pointers
+
 ## 0.1.19 — 2026-11-12
 
 Package version `0.1.19` (Cargo / About). Windows Details may show `0.1.19.0`.

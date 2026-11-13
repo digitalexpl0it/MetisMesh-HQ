@@ -1471,6 +1471,8 @@ pub fn MapPage() -> Element {
     let mut region_name_input = use_signal(String::new);
     let mut dl_note = use_signal(String::new);
 
+    // Overlay rebuild cadence is this page's 5s tick only — App shell must not
+    // drive a faster Map refresh (R2).
     let _ = tick();
     let tracked = state()
         .db

@@ -175,14 +175,14 @@ Feature phases A–N are largely done. This phase makes the companion session **
 - [x] **O3** Audit other `send_multi` / fire-and-forget paths still missing listen-before-write (same USB race as `get_msg`)
 - [x] **O4** Session lock budget: classify **operator** (send/CLI) vs **background** (battery/contacts/infra); background must not starve RX drain or TX
 - [x] **O5** Cap + yield: drain/contact/channel jobs release the command lock between batches (do **not** re-enable raw `start_auto_message_fetching`)
-- [ ] **O6** Connect vs live parity: connect drain and live drain share the same `handle_event` / dedupe path
-- [ ] **O7** Field matrix: USB + BLE + TCP × channel + DM × idle vs mid-send; confirm &lt;~2s live RX without restart
+- [x] **O6** Connect vs live parity: connect drain and live drain share the same `handle_event` / dedupe path
+- [x] **O7** Field matrix: USB + BLE + TCP × channel + DM × idle vs mid-send; confirm &lt;~2s live RX without restart
 
 Do **not**: re-bundle Ubuntu WebKit; re-enable library auto-fetch that holds the mutex across `get_msg`.
 
 ## Phase P — Companion session health
 
-- [ ] **P1** Clear UI when companion protocol &lt; 14 (CLI needs v14+) vs messaging still OK
+- [x] **P1** Clear UI when companion protocol &lt; 14 (CLI needs v14+) vs messaging still OK
 - [x] **P2** Soft “radio busy / retrying…” for deferred drain (alongside existing companion-busy / free-the-link copy)
 - [ ] **P3** Reconnect: preserve unread queue semantics; contact watermark careful across radios
 - [ ] **P4** Multi-radio: primary-only bot; secondary ingest never blocks primary TX/RX
@@ -191,24 +191,24 @@ Do **not**: re-bundle Ubuntu WebKit; re-enable library auto-fetch that holds the
 
 - [x] **Q0** AppImage host WebKit (no bundled libwebkit2gtk/JSC) — [issue #1](https://github.com/digitalexpl0it/MetisMesh-HQ/issues/1) confirmed on CachyOS with v0.1.17
 - [x] **Q0b** Wizard: `uucp` when `dialout` missing; flasher Install via pacman/dnf; quieter Enchant when no Hunspell dict
-- [ ] **Q1** Wizard: pacman/dnf Install for BlueZ (not apt-only)
-- [ ] **Q2** Soft-dep hints always distro-correct (no apt text on Arch/Fedora)
-- [ ] **Q3** About / AppImage note: needs host `webkit2gtk-4.1` + `dialout`/`uucp`
+- [x] **Q1** Wizard: pacman/dnf Install for BlueZ (not apt-only)
+- [x] **Q2** Soft-dep hints always distro-correct (no apt text on Arch/Fedora)
+- [x] **Q3** About / AppImage note: needs host `webkit2gtk-4.1` + `dialout`/`uucp`
 - [ ] **Q4** CI: harden Linux apt against mirror DNS flakes (retry / clearer failure) so releases do not stall
 
 ## Phase R — UI feel (match radio speed)
 
 - [x] **R1** Messages: keep poll, but invalidate / bump refresh on new insert so live RX feels instant
-- [ ] **R2** Audit Roster/Map ticks for avoidable full re-renders (compose dock pattern already landed)
-- [ ] **R3** Status strip: Connected + last RX age / “draining queue…” operator confidence
+- [x] **R2** Audit Roster/Map ticks for avoidable full re-renders (compose dock pattern already landed)
+- [x] **R3** Status strip: Connected + last RX age / “draining queue…” operator confidence
 - [ ] **R4** Finish **H2** smoke: Linux AppImage, Windows zip, no-hardware degrade cleanly
 
 ## Phase S — Observability & regression
 
-- [ ] **S1** `--dev` / log-file markers: sync ready, MessagesWaiting, drain result, send lock wait ms
+- [x] **S1** `--dev` / log-file markers: sync ready, MessagesWaiting, drain result, send lock wait ms
 - [x] **S2** Unit tests: drain Busy → retry flag stays; Cleared clears (v0.1.18); budget → MorePending still open for fuller coverage
 - [ ] **S3** Integration (mock dispatcher): 0x83 while lock held → message eventually inserted
-- [ ] **S4** Short radio soak checklist (Help or `docs/`): 10 channel msgs + 2 DMs + send while receiving
+- [x] **S4** Short radio soak checklist (Help or `docs/`): 10 channel msgs + 2 DMs + send while receiving
 
 ## Non-goals (for now)
 
@@ -276,5 +276,5 @@ Do **not**: re-bundle Ubuntu WebKit; re-enable library auto-fetch that holds the
 - [x] AppImage on CachyOS/Arch: unmodified launch with host `webkit2gtk-4.1` (issue #1)
 - [ ] Live channel/DM RX while connected: appears within ~2s without restarting HQ (issue #2 / O1–O7)
 - [ ] Send + CLI stay responsive while message drain and battery polls run (O4–O5)
-- [ ] Soft-dep Install / hints correct on apt, pacman, and dnf (Q1–Q2)
+- [x] Soft-dep Install / hints correct on apt, pacman, and dnf (Q1–Q2)
 

@@ -189,6 +189,7 @@ fn soft_status_uncached() -> SoftDepsReport {
     #[cfg(target_os = "linux")]
     {
         let bluez_ok = linux_bluez_ok();
+        let bluez_install = !bluez_ok && linux_pkg_mgr().is_some();
         items.push(SoftDepItem {
             kind: SoftDepKind::Bluez,
             label: "Bluetooth (BlueZ)".into(),
@@ -198,8 +199,8 @@ fn soft_status_uncached() -> SoftDepsReport {
             } else {
                 "BlueZ / bluetoothd not found.".into()
             },
-            can_install: !bluez_ok && linux_is_apt(),
-            hint: "Needed for BLE companions.".into(),
+            can_install: bluez_install,
+            hint: bluez_install_hint(bluez_install),
         });
 
         let serial = linux_serial_access();
@@ -287,10 +288,17 @@ pub fn install_soft(kind: SoftDepKind) -> Result<String, String> {
         SoftDepKind::Bluez => {
             #[cfg(target_os = "linux")]
             {
-                if !linux_is_apt() {
-                    return Err("Automatic BlueZ install needs apt (Debian/Ubuntu).".into());
+                match linux_pkg_mgr() {
+                    Some(LinuxPkgMgr::Apt) => run_pkexec_apt(&["bluez"])?,
+                    Some(LinuxPkgMgr::Pacman) => run_pkexec_pacman(&["bluez"])?,
+                    Some(LinuxPkgMgr::Dnf) => run_pkexec_dnf(&["bluez"])?,
+                    None => {
+                        return Err(
+                            "Automatic BlueZ install needs apt, pacman, or dnf. Install manually: sudo apt-get install -y bluez   OR   sudo pacman -S bluez   OR   sudo dnf install bluez"
+                                .into(),
+                        );
+                    }
                 }
-                run_pkexec_apt(&["bluez"])?;
                 Ok("BlueZ installed. You may need to enable Bluetooth in system settings.".into())
             }
             #[cfg(not(target_os = "linux"))]
@@ -311,6 +319,45 @@ pub fn install_soft(kind: SoftDepKind) -> Result<String, String> {
         SoftDepKind::Esptool => install_esptool(),
         SoftDepKind::Nrfutil => install_nrfutil(),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn bluez_hint_for(mgr: Option<LinuxPkgMgr>, can_install: bool) -> String {
+    if can_install {
+        match mgr {
+            Some(LinuxPkgMgr::Apt) => {
+                "Needed for BLE companions. Install via apt (bluez).".into()
+            }
+            Some(LinuxPkgMgr::Pacman) => {
+                "Needed for BLE companions. Install via pacman (bluez).".into()
+            }
+            Some(LinuxPkgMgr::Dnf) => {
+                "Needed for BLE companions. Install via dnf (bluez).".into()
+            }
+            None => "Needed for BLE companions.".into(),
+        }
+    } else {
+        match mgr {
+            Some(LinuxPkgMgr::Apt) => {
+                "Needed for BLE companions. Install manually: sudo apt-get install -y bluez".into()
+            }
+            Some(LinuxPkgMgr::Pacman) => {
+                "Needed for BLE companions. Install manually: sudo pacman -S bluez".into()
+            }
+            Some(LinuxPkgMgr::Dnf) => {
+                "Needed for BLE companions. Install manually: sudo dnf install bluez".into()
+            }
+            None => {
+                "Needed for BLE companions. Install bluez via your package manager (apt / pacman / dnf)."
+                    .into()
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn bluez_install_hint(can_install: bool) -> String {
+    bluez_hint_for(linux_pkg_mgr(), can_install)
 }
 
 fn flasher_install_hint(kind: SoftDepKind, can_install: bool) -> String {
@@ -1261,6 +1308,22 @@ mod tests {
         assert!(linux_getent_group_has_user("dialout:x:20:bob", "bob"));
         assert!(!linux_getent_group_has_user("uucp:x:14:alice,bob", "carol"));
         assert!(!linux_getent_group_has_user("uucp:x:14:", "alice"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bluez_hints_are_distro_correct() {
+        let apt_install = bluez_hint_for(Some(LinuxPkgMgr::Apt), true);
+        assert!(apt_install.contains("apt"), "{apt_install}");
+        assert!(!apt_install.contains("pacman"), "{apt_install}");
+
+        let pacman_manual = bluez_hint_for(Some(LinuxPkgMgr::Pacman), false);
+        assert!(pacman_manual.contains("pacman"), "{pacman_manual}");
+        assert!(!pacman_manual.contains("apt-get"), "{pacman_manual}");
+
+        let dnf_install = bluez_hint_for(Some(LinuxPkgMgr::Dnf), true);
+        assert!(dnf_install.contains("dnf"), "{dnf_install}");
+        assert!(!dnf_install.contains("apt"), "{dnf_install}");
     }
 
     #[cfg(target_os = "linux")]

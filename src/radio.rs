@@ -3578,24 +3578,108 @@ fn push_send_note(status: &Mutex<RadioStatus>, note: impl Into<String>) {
     guard.send_note = note.into();
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MsgDrainResult {
+    /// Companion reported no more queued messages.
+    Cleared,
+    /// Command lock busy — retry soon (do not clear MessagesWaiting).
+    Busy,
+    /// Fetched some frames but hit budget / error before empty.
+    MorePending,
+}
+
+/// Whether the session should keep retrying the companion message queue.
+fn need_msg_drain_after(result: MsgDrainResult) -> bool {
+    !matches!(result, MsgDrainResult::Cleared)
+}
+
+/// `CMD_SYNC_NEXT_MESSAGE` (0x0A) with listen-before-write. meshcore-rs
+/// `get_msg` uses `send_multi` (subscribe after write); on fast USB CDC the
+/// reply can land before the waiter attaches and the call times out while
+/// holding the lock.
+async fn get_msg_listening_first(
+    commands: &meshcore_rs::commands::CommandHandler,
+    dispatcher: &meshcore_rs::events::EventDispatcher,
+) -> Result<Option<MeshCoreEvent>, String> {
+    const CMD_SYNC_NEXT_MESSAGE: u8 = 0x0A;
+    let event = request_listening_first(
+        commands,
+        dispatcher,
+        &[CMD_SYNC_NEXT_MESSAGE],
+        &[
+            EventType::ContactMsgRecv,
+            EventType::ChannelMsgRecv,
+            EventType::NoMoreMessages,
+            EventType::Error,
+        ],
+        Duration::from_millis(900),
+    )
+    .await?;
+    match event.event_type {
+        EventType::ContactMsgRecv | EventType::ChannelMsgRecv => Ok(Some(event)),
+        EventType::NoMoreMessages => Ok(None),
+        EventType::Error => match event.payload {
+            EventPayload::String(msg) => Err(msg),
+            _ => Err("get_msg error".into()),
+        },
+        other => Err(format!("unexpected get_msg reply: {other:?}")),
+    }
+}
+
 /// Pull queued frames off the companion. Each message is also broadcast to our
 /// ChannelMsgRecv / ContactMsgRecv subscriptions, which handle DB insert — so
 /// this only drives `CMD_SYNC_NEXT_MESSAGE` and must not insert again.
-async fn drain_pending_messages(meshcore: &MeshCore) {
+///
+/// Live RX depends on this: companion text is queued until `get_msg`, and
+/// `PUSH_CODE_MSG_WAITING` (0x83) is coalescing — a missed drain leaves the
+/// queue stuck until reconnect (GitHub #2).
+///
+/// `from_waiting`: true when draining in response to `MessagesWaiting` (field
+/// logs Busy at info so `--dev` / log file catch deferred drains).
+async fn drain_pending_messages(
+    meshcore: &MeshCore,
+    radio: i64,
+    from_waiting: bool,
+) -> MsgDrainResult {
     let Ok(commands) =
         tokio::time::timeout(BRIEF_LOCK_WAIT, meshcore.commands().lock()).await
     else {
-        return;
+        if from_waiting {
+            hq_log!(
+                info,
+                "radio {radio}: MessagesWaiting drain deferred (radio busy) — will retry"
+            );
+        } else {
+            hq_log!(debug, "radio {radio}: msg drain deferred: radio busy");
+        }
+        return MsgDrainResult::Busy;
     };
-    for _ in 0..8 {
-        match tokio::time::timeout(Duration::from_millis(900), commands.get_msg()).await {
-            Ok(Ok(Some(_event))) => {}
-            Ok(Ok(None)) => break,
-            Ok(Err(err)) => {
-                hq_log!(warn, "get_msg: {err}");
-                break;
+    let mut fetched = 0u32;
+    const BUDGET: u32 = 24;
+    loop {
+        if fetched >= BUDGET {
+            hq_log!(
+                info,
+                "radio {radio}: msg drain paused after {fetched} (more may remain)"
+            );
+            return MsgDrainResult::MorePending;
+        }
+        match get_msg_listening_first(&commands, meshcore.dispatcher()).await {
+            Ok(Some(_event)) => {
+                fetched = fetched.saturating_add(1);
             }
-            Err(_) => break,
+            Ok(None) => {
+                if fetched > 0 {
+                    hq_log!(info, "radio {radio}: msg drain cleared ({fetched})");
+                } else {
+                    hq_log!(debug, "radio {radio}: msg drain empty");
+                }
+                return MsgDrainResult::Cleared;
+            }
+            Err(err) => {
+                hq_log!(warn, "radio {radio}: get_msg: {err}");
+                return MsgDrainResult::MorePending;
+            }
         }
     }
 }
@@ -4499,6 +4583,11 @@ async fn run_session(
     // polls whenever mesh events keep arriving (auto-fetch / advertisements).
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Live message queue: drain on MessagesWaiting, retry if lock-busy, and poll
+    // periodically (MeshCore docs: do not rely on 0x83 alone — it coalesces).
+    let mut need_msg_drain = false;
+    let mut last_msg_poll = Instant::now();
+    const MSG_POLL_EVERY: Duration = Duration::from_secs(2);
     loop {
         // Prefer UI/radio commands over mesh event floods so CLI/settings stay responsive.
         tokio::select! {
@@ -5020,12 +5109,12 @@ async fn run_session(
                         return SessionEnd::Lost(format!("{link} link closed."));
                     }
                     Some(event) if event.event_type == EventType::MessagesWaiting => {
-                        // Spawn so a slow get_msg drain cannot block SendChannel
-                        // in the select loop (that was leaving sends with no UI feedback).
-                        let meshcore = meshcore.clone();
-                        tokio::spawn(async move {
-                            drain_pending_messages(&meshcore).await;
-                        });
+                        // Coalescing push — must drain (or keep retrying) until
+                        // NoMoreMessages, or further arrivals may not re-signal.
+                        hq_log!(info, "radio {radio}: MessagesWaiting");
+                        need_msg_drain = need_msg_drain_after(
+                            drain_pending_messages(&meshcore, radio, true).await,
+                        );
                     }
                     Some(event) => {
                         if event.event_type == EventType::Advertisement
@@ -5067,6 +5156,28 @@ async fn run_session(
             }
             _ = tick.tick() => {
                 let _ = db.fail_stale_tx_messages(90);
+                // Opportunistic / deferred companion message queue drain (#2).
+                let poll_due = last_msg_poll.elapsed() >= MSG_POLL_EVERY;
+                if need_msg_drain || poll_due {
+                    let from_waiting = need_msg_drain;
+                    match drain_pending_messages(&meshcore, radio, from_waiting).await {
+                        MsgDrainResult::Cleared => {
+                            need_msg_drain = false;
+                            last_msg_poll = Instant::now();
+                        }
+                        MsgDrainResult::MorePending => {
+                            need_msg_drain = true;
+                            last_msg_poll = Instant::now();
+                        }
+                        MsgDrainResult::Busy => {
+                            // Keep need_msg_drain so the next tick retries; for a
+                            // pure poll, back off until MSG_POLL_EVERY again.
+                            if !need_msg_drain {
+                                last_msg_poll = Instant::now();
+                            }
+                        }
+                    }
+                }
                 // Mid-session LogData: subscribe while map upload or CLI RX log wants it;
                 // unsubscribe when neither needs the flood of every overheard frame.
                 let need_logdata = crate::services::map_upload::upload_enabled(db)
@@ -7292,6 +7403,17 @@ async fn discover_radios(scan_for: Duration) -> Result<Vec<BleRadio>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn need_msg_drain_after_cleared_stops_retry() {
+        assert!(!need_msg_drain_after(MsgDrainResult::Cleared));
+    }
+
+    #[test]
+    fn need_msg_drain_after_busy_or_more_keeps_retry() {
+        assert!(need_msg_drain_after(MsgDrainResult::Busy));
+        assert!(need_msg_drain_after(MsgDrainResult::MorePending));
+    }
 
     fn sample(name: &str, rssi: Option<i16>, companion: bool) -> BleRadio {
         BleRadio {

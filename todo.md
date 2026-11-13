@@ -1,6 +1,6 @@
-# Metis Mesh HQ — map presence, Tracker, services
+# Metis Mesh HQ — roadmap
 
-Game plan from potato-mesh (sonar UX), meshcore-bot (weather/quake), and Tracker whitelist.
+Game plan from potato-mesh (sonar UX), meshcore-bot (weather/quake), Tracker whitelist, then **reliability** (phases O–S).
 Build in order; check boxes as we finish.
 
 ## Principles
@@ -166,6 +166,50 @@ OS/WebView spellcheck for channel + DM compose — no cloud dictionary, no bundl
 
 Do **not**: send compose text to a network spell service; spellcheck PIN/token/password fields.
 
+## Phase O — Live radio reliability
+
+Feature phases A–N are largely done. This phase makes the companion session **fast, fair, and correct** under USB/BLE/TCP — not a one-bug chase. Field backlog: [issue #2](https://github.com/digitalexpl0it/MetisMesh-HQ/issues/2) (incoming messages only after restart).
+
+- [x] **O1** Live RX drain: `MessagesWaiting` → drain with lock-busy retry; 2s opportunistic `get_msg` poll; listen-before-write (v0.1.18; closes #2 when field-confirmed)
+- [x] **O2** Structured RX logs: `MessagesWaiting`, drain Cleared/Busy/MorePending, fetch count (so field reports are not silent)
+- [ ] **O3** Audit other `send_multi` / fire-and-forget paths still missing listen-before-write (same USB race as `get_msg`)
+- [ ] **O4** Session lock budget: classify **operator** (send/CLI) vs **background** (battery/contacts/infra); background must not starve RX drain or TX
+- [ ] **O5** Cap + yield: drain/contact/channel jobs release the command lock between batches (do **not** re-enable raw `start_auto_message_fetching`)
+- [ ] **O6** Connect vs live parity: connect drain and live drain share the same `handle_event` / dedupe path
+- [ ] **O7** Field matrix: USB + BLE + TCP × channel + DM × idle vs mid-send; confirm &lt;~2s live RX without restart
+
+Do **not**: re-bundle Ubuntu WebKit; re-enable library auto-fetch that holds the mutex across `get_msg`.
+
+## Phase P — Companion session health
+
+- [ ] **P1** Clear UI when companion protocol &lt; 14 (CLI needs v14+) vs messaging still OK
+- [ ] **P2** Soft “radio busy / retrying…” for deferred drain (alongside existing companion-busy / free-the-link copy)
+- [ ] **P3** Reconnect: preserve unread queue semantics; contact watermark careful across radios
+- [ ] **P4** Multi-radio: primary-only bot; secondary ingest never blocks primary TX/RX
+
+## Phase Q — Packaging / first-run (distro matrix)
+
+- [x] **Q0** AppImage host WebKit (no bundled libwebkit2gtk/JSC) — [issue #1](https://github.com/digitalexpl0it/MetisMesh-HQ/issues/1) confirmed on CachyOS with v0.1.17
+- [x] **Q0b** Wizard: `uucp` when `dialout` missing; flasher Install via pacman/dnf; quieter Enchant when no Hunspell dict
+- [ ] **Q1** Wizard: pacman/dnf Install for BlueZ (not apt-only)
+- [ ] **Q2** Soft-dep hints always distro-correct (no apt text on Arch/Fedora)
+- [ ] **Q3** About / AppImage note: needs host `webkit2gtk-4.1` + `dialout`/`uucp`
+- [ ] **Q4** CI: harden Linux apt against mirror DNS flakes (retry / clearer failure) so releases do not stall
+
+## Phase R — UI feel (match radio speed)
+
+- [ ] **R1** Messages: keep poll, but invalidate / bump refresh on new insert so live RX feels instant
+- [ ] **R2** Audit Roster/Map ticks for avoidable full re-renders (compose dock pattern already landed)
+- [ ] **R3** Status strip: Connected + last RX age / “draining queue…” operator confidence
+- [ ] **R4** Finish **H2** smoke: Linux AppImage, Windows zip, no-hardware degrade cleanly
+
+## Phase S — Observability & regression
+
+- [ ] **S1** `--dev` / log-file markers: sync ready, MessagesWaiting, drain result, send lock wait ms
+- [x] **S2** Unit tests: drain Busy → retry flag stays; Cleared clears (v0.1.18); budget → MorePending still open for fuller coverage
+- [ ] **S3** Integration (mock dispatcher): 0x83 while lock held → message eventually inserted
+- [ ] **S4** Short radio soak checklist (Help or `docs/`): 10 channel msgs + 2 DMs + send while receiving
+
 ## Non-goals (for now)
 
 - Potato federation / multi-ingestor dashboard
@@ -196,6 +240,13 @@ Do **not**: send compose text to a network spell service; spellcheck PIN/token/p
 14. L1 → L7 done (Repeater Overview time range, gauge, favorites, outlier cleanup, hover labels, channel badges; L3/L5 probe honesty + settings)
 15. M1 → M3 (toggle + bearer + read JSON), then M4–M6 (deny list, audit, HA REST docs); M7 MQTT discovery; M8–M9 only if needed
 16. N1 → N2 (compose spellcheck + context-menu suggestions); N3 toggle; N4 Hunspell only if OS path fails
+17. **O1 → O2** (tag release with live RX fix + logs) → field retest #2  
+18. O3 → O5 (listen-before-write audit + lock fairness)  
+19. R1 (UI invalidate on insert) alongside O  
+20. P1 → P2 (protocol / busy clarity)  
+21. Q1 → Q3 (distro wizard polish); Q4 as CI bites  
+22. O6 → O7 · S1 → S4 (parity, matrix, tests, soak)  
+23. R2 → R4 · P3 → P4 as capacity allows  
 
 ## Success checks
 
@@ -222,4 +273,8 @@ Do **not**: send compose text to a network spell service; spellcheck PIN/token/p
 - [x] Bot/service post on METIS-INFO badges the info channel when not open; operator Compose does not badge
 - [x] Overview Enrolled/Pending/GPS/Traffic sparklines tip with hour + unit (not `#N`)
 - [x] Local API off by default; with token, HA (or curl) can read `/health` + infra latest without seeing channel secrets
+- [x] AppImage on CachyOS/Arch: unmodified launch with host `webkit2gtk-4.1` (issue #1)
+- [ ] Live channel/DM RX while connected: appears within ~2s without restarting HQ (issue #2 / O1–O7)
+- [ ] Send + CLI stay responsive while message drain and battery polls run (O4–O5)
+- [ ] Soft-dep Install / hints correct on apt, pacman, and dnf (Q1–Q2)
 

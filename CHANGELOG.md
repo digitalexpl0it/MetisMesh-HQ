@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.1.18 — 2026-11-12
+
+Package version `0.1.18` (Cargo / About). Windows Details may show `0.1.18.0`.
+
+### Radio
+
+- Live incoming messages: drain the companion queue on `MessagesWaiting` with lock-busy retry, plus a 2s opportunistic `get_msg` poll (listen-before-write). Fixes messages stuck until HQ restart ([issue #2](https://github.com/digitalexpl0it/MetisMesh-HQ/issues/2))
+- Field-visible RX logs (`MessagesWaiting`, drain cleared/paused/deferred) for `--dev` / log file diagnosis
+
 ## 0.1.17 — 2026-11-11
 
 Package version `0.1.17` (Cargo / About). Windows Details may show `0.1.17.0`.

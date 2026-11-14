@@ -89,11 +89,11 @@ Critical UI libraries are probed before the window opens. On Debian/Ubuntu the a
 Releases are created only from version tags (not every `main` push):
 
 ```bash
-git tag v0.1.23
-git push origin v0.1.23
+git tag v0.1.24
+git push origin v0.1.24
 ```
 
-That attaches the Windows `.zip`, Ubuntu `.deb`, Linux `.tar.gz`, and Linux `.AppImage`. If the tag already exists on an older commit, move it after the release commit (`git tag -f v0.1.23` then `git push --force origin v0.1.23`) or use the next patch version.
+That attaches the Windows `.zip`, Ubuntu `.deb`, Linux `.tar.gz`, and Linux `.AppImage`. If the tag already exists on an older commit, move it after the release commit (`git tag -f v0.1.24` then `git push --force origin v0.1.24`) or use the next patch version.
 
 ## Requirements (build from source)
 
@@ -162,8 +162,8 @@ Desktop window icon uses the mesh-head mark from the brand logo (`assets/app_ico
 
 ## Notes worth knowing
 
-- Mesh text is plain text, max 160 bytes. Never treat it like a shell or HTML.
-- Only enrolled nodes get bot replies or channel secrets.
+- Mesh text is plain text, max 160 bytes. Never treat it like a shell or HTML — including webhook and Local API consumers.
+- Only enrolled nodes get bot replies or channel secrets. Webhook connections can further restrict by enrollment and allowed sender pubkeys.
 - GPS from a node is self-reported. An enrolled site pin is separate.
 - This is a community tool. It is not FEMA, NWS, or law enforcement.
 

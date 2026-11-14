@@ -3657,7 +3657,7 @@ dependencies = [
 
 [[package]]
 name = "metis-mesh-hq"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "argon2",
  "base64",
@@ -3681,6 +3681,7 @@ dependencies = [
  "rusqlite",
  "rustls",
  "rustls-pemfile",
+ "semver",
  "serde",
  "serde_json",
  "serialport",

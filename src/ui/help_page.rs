@@ -194,7 +194,7 @@ pub fn HelpPage() -> Element {
         .net_channel_name()
         .unwrap_or_else(|_| NET_CHANNEL_NAME.into());
     rsx! {
-        div { class: "flex flex-col gap-4",
+        div { class: "mx-auto flex w-full max-w-5xl flex-col gap-4",
             PageHeading { icon: IconName::Help, title: "Help".to_string(),
                 "How to run this headquarters and how radio users join your channels. Share the radio-user section with volunteers. Channel names below match Settings → Private channels."
             }
@@ -299,7 +299,7 @@ pub fn HelpPage() -> Element {
                             li {
                                 "Linux AppImage: host "
                                 code { "webkit2gtk-4.1" }
-                                " required (see Settings → About). Deb packages pull WebKit via Depends."
+                                " required (see About). Deb packages pull WebKit via Depends."
                             }
                             li {
                                 strong { "Companion tools" }
@@ -396,9 +396,9 @@ pub fn HelpPage() -> Element {
                                 strong { "Messages" }
                                 " — Channels / DMs / Contacts rail. Channel traffic tracks who posted this session under each channel name (collapsed by default; cleared when HQ restarts). Direct threads need a public key from a contact card (`meshcore://contact/add` or phone-app `<pubkey:type:name>`) or a synced companion contact — channel display names alone are not enough. "
                                 strong { "Advert path" }
-                                " reads the companion advert-path cache (builds a route). "
+                                " / "
                                 strong { "Ping" }
-                                " is status over the air and only appears when HQ already has a unicast route (direct or hop bytes). Channel chat alone is not enough."
+                                " live on DM bubbles, contact menus, and Map (not channel chat). Advert path only reads this companion’s local advert-path cache — it does not pull a route over the air. Ping needs a unicast route (direct or hop bytes) first."
                             }
                             li {
                                 strong { "Inbox" }
@@ -731,7 +731,7 @@ pub fn HelpPage() -> Element {
 
                         h4 { class: "help-subhead", "Before the outage (do this while online)" }
                         ol { class: "help-steps",
-                            li { "Install Metis Mesh HQ and finish the setup wizard (Bluetooth / USB dialout / optional flashers)." }
+                            li { "Install Metis Mesh HQ and finish the setup wizard (Bluetooth / USB dialout / private channel names / optional flashers)." }
                             li { "Connect the MeshCore companion radio (BLE, USB, or TCP)." }
                             li {
                                 strong { "Settings → Flasher → Manage firmware" }
@@ -848,7 +848,7 @@ pub fn HelpPage() -> Element {
 
                         h4 { class: "help-subhead", "Where things live" }
                         p {
-                            "Settings → About shows version and the data folder path ("
+                            "About shows version and the data folder path ("
                             code { "~/.MetisMeshHQ" }
                             " on Linux). The live database is "
                             code { "metis.db" }
@@ -858,8 +858,11 @@ pub fn HelpPage() -> Element {
                             code { "metis.db-shm" }
                             " — use Settings → Backup for a consistent copy, or include all three if you copy the folder cold."
                         }
+                        p {
+                            "App updates: HQ checks GitHub Releases on startup and every 6 hours (Settings → Preferences → App updates; default on). A banner offers Install / Quit and update only after you confirm — never silent. Offline checks stay quiet."
+                        }
                         p { class: "help-muted",
-                            "This Help topic is the operator copy shipped in the app. Settings → About keeps a short reminder checklist."
+                            "This Help topic is the operator copy shipped in the app."
                         }
                         div { class: "help-actions",
                             Button {

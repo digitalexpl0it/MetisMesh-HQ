@@ -40,8 +40,10 @@ pub enum IconName {
     Weather,
     /// Terminal window with prompt — Device CLI.
     Terminal,
-    /// Circle with i — Help.
+    /// Circle with ? — Help.
     Help,
+    /// Circle with i — About.
+    Info,
     /// Plus — compose attach / share menu.
     Plus,
     /// Open folder — reveal files in the system file manager.
@@ -223,8 +225,14 @@ fn icon_paths(name: IconName) -> &'static [&'static str] {
             "m8 9 3 3-3 3",
             "M13 15h4",
         ],
-        // Help — circle with i.
+        // Help — circle with ?.
         IconName::Help => &[
+            "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z",
+            "M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3",
+            "M12 17h.01",
+        ],
+        // About — circle with i.
+        IconName::Info => &[
             "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z",
             "M12 16v-4",
             "M12 8h.01",

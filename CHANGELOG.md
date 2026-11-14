@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+## 0.1.22 — 2026-11-13
+
+Package version `0.1.22` (Cargo / About). Windows Details may show `0.1.22.0`.
+
+### Messages
+
+- Channel bubbles no longer offer Advert path / Ping (those need a companion advert-path cache and belong on DM / contact rail / Map); DM shows Advert path only until a unicast route exists, then Ping
+- Conversation avatars use only the first emoji found in the display name (not two)
+
+### Nav
+
+- Left nav: Settings, then Help, then About at the bottom; About is its own page (no longer a Settings tab)
+- Help and About use a readable max width (not full-bleed)
+- About no longer duplicates the offline runbook checklist (Help → Offline runbook only)
+- About Linux / AppImage runtime note uses labeled rows instead of one dense paragraph
+
+### Updates
+
+- GitHub release check on startup (~45s) and every 6 hours; Settings → Preferences → App updates toggle (default on) + Check now; offline failures stay quiet
+- Sticky banner + toast when a newer release is found (Dismiss hides that version); Open release always available
+- Operator-confirmed install by package: AppImage / Windows zip / Linux tar.gz quit-and-replace; Ubuntu `.deb` via `pkexec apt-get install`
+
+### Welcome
+
+- Setup wizard asks for private channel names before Done; stock `METIS-INFO` / `METIS-NET` get a shared random 4-digit suffix (editable; renamable later in Settings)
+
 ## 0.1.21 — 2026-11-13
 
 Package version `0.1.21` (Cargo / About). Windows Details may show `0.1.21.0`.

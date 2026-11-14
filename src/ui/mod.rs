@@ -93,8 +93,9 @@ enum Page {
     Messages,
     Broadcast,
     Cli,
-    Help,
     Settings,
+    Help,
+    About,
 }
 
 /// Sidebar jump index: page title + keywords (no live roster/message bodies).
@@ -281,33 +282,6 @@ const NAV_SEARCH_INDEX: &[NavSearchEntry] = &[
         ],
     },
     NavSearchEntry {
-        page: Page::Help,
-        title: "Help",
-        icon: IconName::Help,
-        topics: &[
-            "help",
-            "how to",
-            "signup",
-            "enroll",
-            "enrollment",
-            "approve",
-            "deny",
-            "revoke",
-            "channel",
-            "secret",
-            "METIS-INFO",
-            "METIS-NET",
-            "weather",
-            "flasher",
-            "firmware",
-            "backup",
-            "WAL",
-            "offline",
-            "runbook",
-            "radio users",
-        ],
-    },
-    NavSearchEntry {
         page: Page::Settings,
         title: "Settings",
         icon: IconName::Settings,
@@ -317,12 +291,6 @@ const NAV_SEARCH_INDEX: &[NavSearchEntry] = &[
             "Device",
             "Flasher",
             "Diagnostics",
-            "About",
-            "version",
-            "license",
-            "GitHub",
-            "setup wizard",
-            "welcome",
             // HQ subtabs
             "Connect",
             "Preferences",
@@ -356,6 +324,10 @@ const NAV_SEARCH_INDEX: &[NavSearchEntry] = &[
             "time",
             "brand",
             "logo",
+            "app updates",
+            "check for updates",
+            "GitHub release",
+            "Quit and update",
             // Services
             "weather",
             "MQTT",
@@ -385,6 +357,53 @@ const NAV_SEARCH_INDEX: &[NavSearchEntry] = &[
             "serial",
             "logs",
             "diagnostics log",
+        ],
+    },
+    NavSearchEntry {
+        page: Page::Help,
+        title: "Help",
+        icon: IconName::Help,
+        topics: &[
+            "help",
+            "how to",
+            "signup",
+            "enroll",
+            "enrollment",
+            "approve",
+            "deny",
+            "revoke",
+            "channel",
+            "secret",
+            "METIS-INFO",
+            "METIS-NET",
+            "weather",
+            "flasher",
+            "firmware",
+            "backup",
+            "WAL",
+            "offline",
+            "runbook",
+            "radio users",
+        ],
+    },
+    NavSearchEntry {
+        page: Page::About,
+        title: "About",
+        icon: IconName::Info,
+        topics: &[
+            "about",
+            "version",
+            "license",
+            "MIT",
+            "GitHub",
+            "setup wizard",
+            "welcome",
+            "data folder",
+            "AppImage",
+            "webkit2gtk",
+            "runbook",
+            "update",
+            "version check",
         ],
     },
 ];
@@ -458,7 +477,6 @@ pub fn App() -> Element {
     let mut shell_tick = use_signal(|| 0u64);
     let mut toast_tick = use_signal(|| 0u32);
     let mut show_welcome = use_signal(|| !welcome_is_done());
-    let mut open_about_after_welcome = use_signal(|| false);
     // Bumped when the operator picks Messages in the nav so an open thread
     // returns to the Channels / Direct root instead of staying drilled in.
     let mut messages_root_epoch = use_signal(|| 0u64);
@@ -743,6 +761,13 @@ pub fn App() -> Element {
                                     }
                                     div { class: "mt-auto" }
                                     NavButton {
+                                        icon: IconName::Settings,
+                                        label: "Settings".to_string(),
+                                        expanded,
+                                        active: page() == Page::Settings,
+                                        onclick: move |_| page.set(Page::Settings),
+                                    }
+                                    NavButton {
                                         icon: IconName::Help,
                                         label: "Help".to_string(),
                                         expanded,
@@ -750,11 +775,11 @@ pub fn App() -> Element {
                                         onclick: move |_| page.set(Page::Help),
                                     }
                                     NavButton {
-                                        icon: IconName::Settings,
-                                        label: "Settings".to_string(),
+                                        icon: IconName::Info,
+                                        label: "About".to_string(),
                                         expanded,
-                                        active: page() == Page::Settings,
-                                        onclick: move |_| page.set(Page::Settings),
+                                        active: page() == Page::About,
+                                        onclick: move |_| page.set(Page::About),
                                     }
                                 }
                             }
@@ -784,6 +809,7 @@ pub fn App() -> Element {
                         }
                         HeaderRadioControls {}
                     }
+                    UpdateBanner {}
                     div {
                         class: if page() == Page::Map {
                             "hq-main hq-main-map"
@@ -805,13 +831,9 @@ pub fn App() -> Element {
                             Page::Messages => rsx! { MessagesPage { key: "{messages_root_epoch()}" } },
                             Page::Broadcast => rsx! { BroadcastPage { radio: radio.clone() } },
                             Page::Cli => rsx! { CliPage { radio: radio.clone() } },
-                            Page::Help => rsx! { HelpPage {} },
                             Page::Settings => rsx! {
                                 SettingsPage {
                                     radio: radio.clone(),
-                                    prefer_about: open_about_after_welcome(),
-                                    on_about_consumed: move |_| open_about_after_welcome.set(false),
-                                    on_open_help: move |_| page.set(Page::Help),
                                     on_request_pin: move |target: String| {
                                         let target = target.trim().to_string();
                                         if target.is_empty() {
@@ -826,6 +848,12 @@ pub fn App() -> Element {
                                     },
                                 }
                             },
+                            Page::Help => rsx! { HelpPage {} },
+                            Page::About => rsx! {
+                                AboutPage {
+                                    on_open_help: move |_| page.set(Page::Help),
+                                }
+                            },
                         }
                     }
                 }
@@ -836,8 +864,7 @@ pub fn App() -> Element {
                     on_finished: move |action| {
                         show_welcome.set(false);
                         if action == WelcomeFinishAction::OpenAbout {
-                            open_about_after_welcome.set(true);
-                            page.set(Page::Settings);
+                            page.set(Page::About);
                         }
                     },
                     on_request_pin: move |target: String| {
@@ -5124,38 +5151,46 @@ fn MessagesPage() -> Element {
                                                     sender_pubkey: Some(dm_pubkey.clone()),
                                                 }
                                                 div { class: "message-actions",
-                                                    button {
-                                                        class: "message-action-btn",
-                                                        title: "Companion advert-path cache (builds a route for Ping)",
-                                                        onclick: {
-                                                            let pk = dm_pubkey.clone();
-                                                            let nm = title.clone();
-                                                            move |_| {
-                                                                messages_rail::begin_advert_path_fetch(
-                                                                    pk.clone(),
-                                                                    nm.clone(),
-                                                                );
-                                                            }
-                                                        },
-                                                        Icon { name: IconName::Locate, size: 12 }
-                                                        "Advert path"
-                                                    }
-                                                    if messages_rail::node_has_unicast_route(&dm_pubkey) {
-                                                        button {
-                                                            class: "message-action-btn message-action-btn-ping",
-                                                            title: "Mesh status ping (uses airtime; needs a unicast route)",
-                                                            onclick: {
-                                                                let pk = dm_pubkey.clone();
-                                                                let nm = title.clone();
-                                                                move |_| {
-                                                                    messages_rail::begin_node_ping(
-                                                                        pk.clone(),
-                                                                        nm.clone(),
-                                                                    );
+                                                    {
+                                                        let can_ping =
+                                                            messages_rail::node_has_unicast_route(&dm_pubkey);
+                                                        rsx! {
+                                                            if !can_ping {
+                                                                button {
+                                                                    class: "message-action-btn message-action-btn-path",
+                                                                    title: "Read companion advert-path cache (local — builds a unicast route for Ping). Needs that node’s advert already heard by this companion.",
+                                                                    onclick: {
+                                                                        let pk = dm_pubkey.clone();
+                                                                        let nm = title.clone();
+                                                                        move |_| {
+                                                                            messages_rail::begin_advert_path_fetch(
+                                                                                pk.clone(),
+                                                                                nm.clone(),
+                                                                            );
+                                                                        }
+                                                                    },
+                                                                    Icon { name: IconName::Locate, size: 12 }
+                                                                    "Advert path"
                                                                 }
-                                                            },
-                                                            Icon { name: IconName::Radio, size: 12 }
-                                                            "Ping"
+                                                            }
+                                                            if can_ping {
+                                                                button {
+                                                                    class: "message-action-btn message-action-btn-ping",
+                                                                    title: "Mesh status ping (uses airtime; needs a unicast route)",
+                                                                    onclick: {
+                                                                        let pk = dm_pubkey.clone();
+                                                                        let nm = title.clone();
+                                                                        move |_| {
+                                                                            messages_rail::begin_node_ping(
+                                                                                pk.clone(),
+                                                                                nm.clone(),
+                                                                            );
+                                                                        }
+                                                                    },
+                                                                    Icon { name: IconName::Radio, size: 12 }
+                                                                    "Ping"
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                     if !outgoing {
@@ -5931,49 +5966,11 @@ fn MessagesPage() -> Element {
                                                         Icon { name: IconName::Copy, size: 12 }
                                                         "Copy"
                                                     }
-                                                    if let Some(pk) = known_pk.clone().filter(|k| !k.is_empty()) {
-                                                        {
-                                                            let path_name = device_name.clone();
-                                                            let can_ping =
-                                                                messages_rail::node_has_unicast_route(&pk);
-                                                            rsx! {
-                                                                button {
-                                                                    class: "message-action-btn",
-                                                                    title: "Companion advert-path cache (builds a route for Ping)",
-                                                                    onclick: {
-                                                                        let pk = pk.clone();
-                                                                        let path_name = path_name.clone();
-                                                                        move |_| {
-                                                                            messages_rail::begin_advert_path_fetch(
-                                                                                pk.clone(),
-                                                                                path_name.clone(),
-                                                                            );
-                                                                        }
-                                                                    },
-                                                                    Icon { name: IconName::Locate, size: 12 }
-                                                                    "Advert path"
-                                                                }
-                                                                if can_ping {
-                                                                    button {
-                                                                        class: "message-action-btn message-action-btn-ping",
-                                                                        title: "Mesh status ping (uses airtime; needs a unicast route)",
-                                                                        onclick: {
-                                                                            let pk = pk.clone();
-                                                                            let path_name = path_name.clone();
-                                                                            move |_| {
-                                                                                messages_rail::begin_node_ping(
-                                                                                    pk.clone(),
-                                                                                    path_name.clone(),
-                                                                                );
-                                                                            }
-                                                                        },
-                                                                        Icon { name: IconName::Radio, size: 12 }
-                                                                        "Ping"
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
+                                                    // Advert path / Ping stay on DM bubbles, contact
+                                                    // rail menus, and Map — not channel chat. Channel
+                                                    // posts often have a name-matched key but no
+                                                    // companion advert-path cache, so the action
+                                                    // looked broken for most speakers.
                                                     if !outgoing {
                                                         {
                                                             let resolve_name = device_name.clone();
@@ -8205,7 +8202,6 @@ enum SettingsTab {
     Device,
     Flasher,
     Diagnostics,
-    About,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -8572,11 +8568,253 @@ fn flip_boolish_var(value: &str) -> String {
 }
 
 #[component]
+fn UpdateBanner() -> Element {
+    let mut tick = use_signal(|| 0u64);
+    let mut started = use_signal(|| false);
+    if !started() {
+        started.set(true);
+        spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tick.set(tick() + 1);
+            }
+        });
+    }
+    let _ = tick();
+    let show = crate::app_update::banner_visible(&state().db);
+    if !show {
+        return rsx! {};
+    }
+    let st = crate::app_update::status();
+    let ver = st
+        .available_version
+        .clone()
+        .unwrap_or_else(|| "?".into());
+    let flavor = crate::app_update::detect_install_flavor();
+    let action = if st.install_running && !st.phase.is_empty() {
+        st.phase.clone()
+    } else {
+        flavor.primary_action_label().to_string()
+    };
+    rsx! {
+        div {
+            class: "update-banner",
+            role: "status",
+            div { class: "update-banner-text",
+                Icon { name: IconName::Info, size: 14 }
+                span {
+                    "Metis Mesh HQ "
+                    strong { "{ver}" }
+                    " available"
+                    if st.install_running {
+                        " — {st.phase}"
+                    }
+                }
+            }
+            div { class: "update-banner-actions",
+                Button {
+                    kind: ButtonKind::Primary,
+                    disabled: st.install_running,
+                    onclick: move |_| {
+                        crate::app_update::start_install(state().db.clone());
+                    },
+                    "{action}"
+                }
+                Button {
+                    kind: ButtonKind::Ghost,
+                    onclick: move |_| crate::app_update::open_release_page(),
+                    "Open release"
+                }
+                Button {
+                    kind: ButtonKind::Ghost,
+                    onclick: move |_| {
+                        crate::app_update::dismiss(&state().db);
+                    },
+                    "Dismiss"
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn AboutPage(on_open_help: EventHandler<()>) -> Element {
+    let version = env!("CARGO_PKG_VERSION");
+    let data_path = crate::data_dir().display().to_string();
+    let data_path_copy = data_path.clone();
+    let repo = "https://github.com/digitalexpl0it/MetisMesh-HQ";
+    let update_st = crate::app_update::status();
+    let update_available = crate::app_update::banner_visible(&state().db);
+    let flavor = crate::app_update::detect_install_flavor();
+    let update_action = if update_st.install_running && !update_st.phase.is_empty() {
+        update_st.phase.clone()
+    } else {
+        flavor.primary_action_label().to_string()
+    };
+    rsx! {
+        div { class: "mx-auto flex w-full max-w-3xl flex-col gap-4",
+        PageHeading { icon: IconName::Info, title: "About".to_string(),
+            "Version, license, data folder, and setup wizard."
+        }
+        Card { title: "Metis Mesh HQ".to_string(), icon: Some(IconName::Info),
+            p { class: "mb-2 text-sm text-muted-foreground",
+                "Local offline emergency headquarters for MeshCore communities. No cloud account — this computer owns the radio link, roster, and bot."
+            }
+            div { class: "mb-3 flex flex-wrap gap-2",
+                Button {
+                    kind: ButtonKind::Ghost,
+                    onclick: move |_| on_open_help.call(()),
+                    Icon { name: IconName::Help, size: 14 }
+                    "Open Help"
+                }
+                if update_available {
+                    Button {
+                        kind: ButtonKind::Primary,
+                        disabled: update_st.install_running,
+                        onclick: move |_| {
+                            crate::app_update::start_install(state().db.clone());
+                        },
+                        "{update_action}"
+                    }
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        onclick: move |_| crate::app_update::open_release_page(),
+                        "Open release"
+                    }
+                }
+            }
+            div { class: "about-meta",
+                div { class: "about-row",
+                    span { class: "about-key", "App" }
+                    span { class: "about-val", "Metis Mesh HQ" }
+                    span {}
+                }
+                div { class: "about-row",
+                    span { class: "about-key", "Version" }
+                    span { class: "about-val", "{version}" }
+                    span {}
+                }
+                if update_available {
+                    div { class: "about-row",
+                        span { class: "about-key", "Update" }
+                        span { class: "about-val",
+                            {
+                                update_st
+                                    .available_version
+                                    .clone()
+                                    .unwrap_or_default()
+                            }
+                            " available ("
+                            "{flavor.label()}"
+                            ")"
+                        }
+                        span {}
+                    }
+                }
+                div { class: "about-row",
+                    span { class: "about-key", "Author" }
+                    span { class: "about-val", "DigitalExpl0it" }
+                    span {}
+                }
+                div { class: "about-row",
+                    span { class: "about-key", "License" }
+                    span { class: "about-val", "MIT" }
+                    span {}
+                }
+                div { class: "about-row",
+                    span { class: "about-key", "Source" }
+                    span { class: "about-val", "{repo}" }
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        onclick: move |_| copy_text_to_clipboard(repo),
+                        Icon { name: IconName::Copy, size: 12 }
+                        "Copy"
+                    }
+                }
+                div { class: "about-row",
+                    span { class: "about-key", "Data folder" }
+                    span { class: "about-val", "{data_path}" }
+                    Button {
+                        kind: ButtonKind::Ghost,
+                        onclick: move |_| copy_text_to_clipboard(&data_path_copy),
+                        Icon { name: IconName::Copy, size: 12 }
+                        "Copy"
+                    }
+                }
+            }
+            p { class: "mb-3 text-xs text-muted-foreground",
+                "Credits: Dioxus, MapLibre, MeshCore / meshcore-rs."
+            }
+            {
+                #[cfg(target_os = "linux")]
+                {
+                    rsx! {
+                        div { class: "about-runtime",
+                            p { class: "about-runtime-title", "Linux / AppImage runtime" }
+                            ul { class: "about-runtime-list",
+                                li {
+                                    span { class: "about-runtime-label", "WebView" }
+                                    span { class: "about-runtime-body",
+                                        "AppImage needs host "
+                                        code { "webkit2gtk-4.1" }
+                                    }
+                                }
+                                li {
+                                    span { class: "about-runtime-label", "Arch" }
+                                    code { "pacman -S webkit2gtk-4.1" }
+                                }
+                                li {
+                                    span { class: "about-runtime-label", "Fedora" }
+                                    code { "dnf install webkit2gtk4.1" }
+                                }
+                                li {
+                                    span { class: "about-runtime-label", "USB serial" }
+                                    span { class: "about-runtime-body",
+                                        code { "dialout" }
+                                        " or "
+                                        code { "uucp" }
+                                        " group — log out after wizard Install"
+                                    }
+                                }
+                                li {
+                                    span { class: "about-runtime-label", "BLE" }
+                                    span { class: "about-runtime-body", "BlueZ required" }
+                                }
+                                li {
+                                    span { class: "about-runtime-label", "Setup" }
+                                    span { class: "about-runtime-body",
+                                        "Use "
+                                        strong { "Run setup again" }
+                                        " for Install buttons"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    rsx! {}
+                }
+            }
+            div { class: "flex flex-wrap gap-2",
+                Button {
+                    kind: ButtonKind::Ghost,
+                    onclick: move |_| {
+                        reopen_welcome();
+                        status_note("Setup wizard will open again.");
+                    },
+                    "Run setup again"
+                }
+            }
+        }
+        }
+    }
+}
+
+#[component]
 fn SettingsPage(
     radio: RadioStatus,
-    prefer_about: bool,
-    on_about_consumed: EventHandler<()>,
-    on_open_help: EventHandler<()>,
     on_request_pin: EventHandler<String>,
 ) -> Element {
     let saved_name = state().db.setting("radio_name").ok().flatten().unwrap_or_default();
@@ -8724,12 +8962,6 @@ fn SettingsPage(
     let mut preset_open = use_signal(|| false);
     let mut preset_query = use_signal(String::new);
     let mut settings_tab = use_signal(|| SettingsTab::Hq);
-    let mut about_applied = use_signal(|| false);
-    if prefer_about && !about_applied() {
-        settings_tab.set(SettingsTab::About);
-        about_applied.set(true);
-        on_about_consumed.call(());
-    }
     let mut hq_tab = use_signal(|| HqTab::Connect);
     let mut services_tab = use_signal(|| ServicesTab::Site);
     let mut flasher_subtab = use_signal(|| FlasherSubTab::Library);
@@ -8783,6 +9015,9 @@ fn SettingsPage(
     });
     let mut compose_spellcheck_on = use_signal(|| {
         crate::services::setting_bool(&state().db, COMPOSE_SPELLCHECK_KEY, true)
+    });
+    let mut update_checks_on = use_signal(|| {
+        crate::services::setting_bool(&state().db, crate::app_update::SETTING_ENABLED, true)
     });
     let mut svc_weather = use_signal(|| {
         crate::services::setting_bool(&state().db, "svc_weather_enabled", true)
@@ -9349,12 +9584,6 @@ fn SettingsPage(
                     Icon { name: IconName::Messages, size: 14 }
                     "Diagnostics"
                 }
-                button {
-                    class: if settings_tab() == SettingsTab::About { "settings-tab settings-tab-active" } else { "settings-tab" },
-                    onclick: move |_| settings_tab.set(SettingsTab::About),
-                    Icon { name: IconName::Radio, size: 14 }
-                    "About"
-                }
             }
             if settings_tab() == SettingsTab::Hq {
             div { class: "settings-subtabs",
@@ -9807,6 +10036,78 @@ fn SettingsPage(
                     onchange: move |next: bool| {
                         compose_spellcheck_on.set(next);
                         set_compose_spellcheck_enabled(next);
+                    }
+                }
+            }
+            {
+                let _ = log_tick();
+                let update_st = crate::app_update::status();
+                let flavor = crate::app_update::detect_install_flavor();
+                let last_checked = if update_st.last_checked_at > 0 {
+                    crate::timefmt::format_stamp(&state().db, update_st.last_checked_at)
+                } else {
+                    "Never".into()
+                };
+                let action_label = if update_st.install_running && !update_st.phase.is_empty() {
+                    update_st.phase.clone()
+                } else {
+                    flavor.primary_action_label().to_string()
+                };
+                rsx! {
+                    Card { title: "App updates".to_string(), icon: Some(IconName::Info),
+                        p { class: "mb-3 text-sm text-muted-foreground",
+                            "Looks for GitHub releases on startup and every 6 hours. Offline checks stay quiet. Install always needs your confirm. Detected package: "
+                            strong { "{flavor.label()}" }
+                            "."
+                        }
+                        ToggleSwitch {
+                            checked: update_checks_on(),
+                            label: "Check for app updates".to_string(),
+                            hint: Some(if update_checks_on() {
+                                "On — poll GitHub for newer Metis Mesh HQ builds.".to_string()
+                            } else {
+                                "Off — no automatic version checks.".to_string()
+                            }),
+                            onchange: move |next: bool| {
+                                update_checks_on.set(next);
+                                crate::services::set_setting_bool(
+                                    &state().db,
+                                    crate::app_update::SETTING_ENABLED,
+                                    next,
+                                );
+                            }
+                        }
+                        p { class: "mt-3 mb-2 text-xs text-muted-foreground",
+                            "Last checked: {last_checked}"
+                            if !update_st.last_check_note.is_empty() {
+                                " · {update_st.last_check_note}"
+                            }
+                        }
+                        div { class: "flex flex-wrap gap-2",
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                disabled: update_st.check_running,
+                                onclick: move |_| {
+                                    crate::app_update::check_now(state().db.clone());
+                                },
+                                if update_st.check_running { "Checking…" } else { "Check now" }
+                            }
+                            if crate::app_update::banner_visible(&state().db) {
+                                Button {
+                                    kind: ButtonKind::Primary,
+                                    disabled: update_st.install_running,
+                                    onclick: move |_| {
+                                        crate::app_update::start_install(state().db.clone());
+                                    },
+                                    "{action_label}"
+                                }
+                                Button {
+                                    kind: ButtonKind::Ghost,
+                                    onclick: move |_| crate::app_update::open_release_page(),
+                                    "Open release"
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -15146,134 +15447,6 @@ fn SettingsPage(
                     p { class: "mt-2 text-xs text-muted-foreground",
                         "{log_rows.len()} shown · filter {crate::app_log::LogFilter::from_value(&log_filter()).label()}"
                         if log_autoscroll() { " · auto-scroll on" } else { " · auto-scroll off" }
-                    }
-                }
-            }
-
-            if settings_tab() == SettingsTab::About {
-                Card { title: "About".to_string(), icon: Some(IconName::Settings),
-                    p { class: "mb-2 text-sm text-muted-foreground",
-                        "Local offline emergency headquarters for MeshCore communities. No cloud account — this computer owns the radio link, roster, and bot."
-                    }
-                    div { class: "mb-3",
-                        Button {
-                            kind: ButtonKind::Ghost,
-                            onclick: move |_| on_open_help.call(()),
-                            Icon { name: IconName::Help, size: 14 }
-                            "Open Help"
-                        }
-                    }
-                    {
-                        let version = env!("CARGO_PKG_VERSION");
-                        let data_path = crate::data_dir().display().to_string();
-                        let data_path_copy = data_path.clone();
-                        let repo = "https://github.com/digitalexpl0it/MetisMesh-HQ";
-                        rsx! {
-                            div { class: "about-meta",
-                                div { class: "about-row",
-                                    span { class: "about-key", "App" }
-                                    span { class: "about-val", "Metis Mesh HQ" }
-                                    span {}
-                                }
-                                div { class: "about-row",
-                                    span { class: "about-key", "Version" }
-                                    span { class: "about-val", "{version}" }
-                                    span {}
-                                }
-                                div { class: "about-row",
-                                    span { class: "about-key", "Author" }
-                                    span { class: "about-val", "DigitalExpl0it" }
-                                    span {}
-                                }
-                                div { class: "about-row",
-                                    span { class: "about-key", "License" }
-                                    span { class: "about-val", "MIT" }
-                                    span {}
-                                }
-                                div { class: "about-row",
-                                    span { class: "about-key", "Source" }
-                                    span { class: "about-val", "{repo}" }
-                                    Button {
-                                        kind: ButtonKind::Ghost,
-                                        onclick: move |_| copy_text_to_clipboard(repo),
-                                        Icon { name: IconName::Copy, size: 12 }
-                                        "Copy"
-                                    }
-                                }
-                                div { class: "about-row",
-                                    span { class: "about-key", "Data folder" }
-                                    span { class: "about-val", "{data_path}" }
-                                    Button {
-                                        kind: ButtonKind::Ghost,
-                                        onclick: move |_| copy_text_to_clipboard(&data_path_copy),
-                                        Icon { name: IconName::Copy, size: 12 }
-                                        "Copy"
-                                    }
-                                }
-                            }
-                            p { class: "mb-3 text-xs text-muted-foreground",
-                                "Credits: Dioxus, MapLibre, MeshCore / meshcore-rs."
-                            }
-                            {
-                                #[cfg(target_os = "linux")]
-                                {
-                                    rsx! {
-                                        p { class: "mb-3 rounded-md border border-border bg-card/60 px-3 py-2 text-xs text-muted-foreground",
-                                            strong { class: "text-foreground", "Linux / AppImage runtime" }
-                                            " — AppImage needs host "
-                                            code { "webkit2gtk-4.1" }
-                                            " (Arch: "
-                                            code { "pacman -S webkit2gtk-4.1" }
-                                            "; Fedora: "
-                                            code { "dnf install webkit2gtk4.1" }
-                                            "). USB serial: "
-                                            code { "dialout" }
-                                            " or "
-                                            code { "uucp" }
-                                            " group (log out after wizard Install). BLE needs BlueZ. Use "
-                                            strong { "Run setup again" }
-                                            " for Install buttons."
-                                        }
-                                    }
-                                }
-                                #[cfg(not(target_os = "linux"))]
-                                {
-                                    rsx! {}
-                                }
-                            }
-                            div { class: "flex flex-wrap gap-2",
-                                Button {
-                                    kind: ButtonKind::Ghost,
-                                    onclick: move |_| {
-                                        reopen_welcome();
-                                        status_note("Setup wizard will open again.");
-                                    },
-                                    "Run setup again"
-                                }
-                            }
-                        }
-                    }
-                }
-                Card { title: "Offline runbook (first hour)".to_string(), icon: Some(IconName::Help),
-                    p { class: "mb-2 text-sm text-muted-foreground",
-                        "For volunteers when the Internet is down. The full runbook (before the outage, first hour, UPS tips, do/don’t) lives in the app under Help → Offline runbook — no separate markdown viewer needed."
-                    }
-                    ol { class: "mb-3 list-decimal space-y-1 pl-5 text-sm text-foreground",
-                        li { "Power the laptop (AC or UPS) and the companion radio. Disable sleep." }
-                        li { "Open Metis Mesh HQ — no cloud login." }
-                        li { "Settings → Connect: confirm the companion is connected (Refresh USB if the port moved)." }
-                        li { "Open Map, then Messages — post a short channel check-in so the room knows HQ is live." }
-                        li { "Roster: approve only people you trust. Secrets never appear in the message list." }
-                        li { "Flash only from Settings → Flasher after Sync shows Ready for outage (or Import pack from a USB .zip)." }
-                    }
-                    p { class: "mb-3 text-sm text-muted-foreground",
-                        "Battery / UPS: size for laptop + USB radio (often 2–4 hours). Keep vents clear. Mesh traffic does not need Internet once firmware is already synced. Do not present HQ traffic as FEMA, NWS, or law enforcement."
-                    }
-                    Button {
-                        kind: ButtonKind::Ghost,
-                        onclick: move |_| on_open_help.call(()),
-                        Icon { name: IconName::Help, size: 14 }
-                        "Open offline runbook in Help"
                     }
                 }
             }

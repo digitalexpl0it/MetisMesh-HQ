@@ -6,6 +6,7 @@
 
 #[macro_use]
 mod app_log;
+mod app_update;
 mod backup;
 mod ble_pair;
 mod brand;
@@ -81,6 +82,7 @@ fn main() {
     let radio = spawn_radio(db.clone(), secrets.clone());
     services::spawn_poller(db.clone(), secrets.clone(), radio.clone());
     firmware::spawn_sync_loop(db.clone());
+    app_update::spawn_update_loop(db.clone());
     install(AppState { db, secrets, radio });
     hq_log!(info, "Metis Mesh HQ started · data {}", data.display());
     if let Err(err) = deps::ensure_critical() {

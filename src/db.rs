@@ -1235,6 +1235,9 @@ impl Db {
         if self.setting("date_format")?.is_none() {
             self.set_setting("date_format", "md_short")?;
         }
+        if self.setting("update_check_enabled")?.is_none() {
+            self.set_setting("update_check_enabled", "1")?;
+        }
         if self.setting("svc_weather_enabled")?.is_none() {
             self.set_setting("svc_weather_enabled", "1")?;
         }

@@ -1650,29 +1650,23 @@ fn grapheme_is_emoji(g: &str) -> bool {
     has_pict
 }
 
-/// Up to two emoji graphemes from a MeshCore-style display name (custom avatar).
+/// First emoji grapheme from a MeshCore-style display name (custom avatar).
 ///
 /// MeshCore apps treat emoji in the node name as the avatar instead of a
-/// generated letter. We take the first two emoji grapheme clusters in order
-/// (ZWJ sequences count as one).
+/// generated letter. Only the first emoji grapheme is used (ZWJ sequences
+/// count as one) so dual-emoji names stay readable in the circle.
 pub fn name_avatar_emojis(name: &str) -> String {
     use unicode_segmentation::UnicodeSegmentation;
-    let mut out = String::new();
-    let mut count = 0usize;
     for g in name.graphemes(true) {
         if grapheme_is_emoji(g) {
-            out.push_str(g);
-            count += 1;
-            if count >= 2 {
-                break;
-            }
+            return g.to_string();
         }
     }
-    out
+    String::new()
 }
 
-/// Generated circle avatar: emoji(s) from `label` when present (MeshCore custom
-/// avatar), otherwise first letter + color from stable `seed` hash.
+/// Generated circle avatar: first emoji from `label` when present (MeshCore
+/// custom avatar), otherwise first letter + color from stable `seed` hash.
 #[component]
 pub fn ConversationAvatar(
     label: String,
@@ -1684,7 +1678,6 @@ pub fn ConversationAvatar(
     #[props(default = false)]
     large: bool,
 ) -> Element {
-    use unicode_segmentation::UnicodeSegmentation;
     let emojis = name_avatar_emojis(&label);
     let letter = conversation_avatar_letter(&label);
     let tone = conversation_avatar_tone(&seed);
@@ -1696,12 +1689,7 @@ pub fn ConversationAvatar(
         "messages-avatar"
     };
     if !emojis.is_empty() {
-        let dual = emojis.graphemes(true).count() >= 2;
-        let emoji_class = if dual {
-            format!("{size} messages-avatar-emoji messages-avatar-emoji-dual")
-        } else {
-            format!("{size} messages-avatar-emoji")
-        };
+        let emoji_class = format!("{size} messages-avatar-emoji");
         return rsx! {
             span {
                 class: "{emoji_class}",
@@ -1950,12 +1938,12 @@ mod avatar_emoji_tests {
     #[test]
     fn leading_emoji_becomes_avatar() {
         assert_eq!(name_avatar_emojis("🔥Rose01"), "🔥");
-        assert_eq!(name_avatar_emojis("🦊🐱 Fox Den"), "🦊🐱");
+        assert_eq!(name_avatar_emojis("🦊🐱 Fox Den"), "🦊");
     }
 
     #[test]
-    fn caps_at_two_emojis() {
-        assert_eq!(name_avatar_emojis("😀😃😄 name"), "😀😃");
+    fn uses_only_first_emoji() {
+        assert_eq!(name_avatar_emojis("😀😃😄 name"), "😀");
     }
 
     #[test]

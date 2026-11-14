@@ -22,7 +22,8 @@ Churches, neighborhoods, and volunteer groups run this on a regular computer sit
 - **Firmware locker** — mirror community firmware while online; flash over USB on the HQ machine when the internet is gone (Ready-for-outage, checksums, export/import pack). Optional **LAN flash locker** (Settings → Flasher): HTTPS + room PIN so other laptops download synced builds and flash via Web Serial (ESP SLIP / nRF DFU zip), plus OTAFIX UF2 downloads, Enter DFU, Custom local files, and Repeater/Room setup CLI
 - **Backup** — passphrase-encrypted HQ archive (SQLite + channel secrets); restore with confirm
 - **Local-first storage** — SQLite under the per-user data folder; channel secrets in the OS keyring when possible (otherwise a locked-down file)
-- **Help** — in-app operator guide, shareable radio-user signup steps, and the full offline runbook (Settings → About links here; `docs/OFFLINE_RUNBOOK.md` mirrors Help for GitHub)
+- **Help** — in-app operator guide, shareable radio-user signup steps, and the full offline runbook (nav under Settings; `docs/OFFLINE_RUNBOOK.md` mirrors Help for GitHub)
+- **About** — version, license, GitHub, and data-folder path (nav at the bottom, under Help)
 
 Communities stay separate until both headquarters agree to link. That bridge is not in this MVP yet — the data model leaves room for it.
 
@@ -51,7 +52,9 @@ Supported release targets are **Windows** (`x86_64`) and **Linux** (`x86_64`). m
 
    The live store is `metis.db` (WAL mode) plus optional `metis.db-wal` and `metis.db-shm` beside it. Prefer **Settings → Backup** for copies. If you copy the data folder by hand, include all three files — or stop HQ first so SQLite can checkpoint into `metis.db`.
 
-4. First launch opens a **setup wizard**: checks Bluetooth / USB serial access, can install missing pieces (may prompt for admin / `pkexec`), and optionally connects a companion (BLE / USB / TCP). You can skip and finish later under Settings → Connect. Settings → About has version, license, GitHub, and data-folder path; **Run setup again** reopens the wizard.
+4. First launch opens a **setup wizard**: checks Bluetooth / USB serial access, can install missing pieces (may prompt for admin / `pkexec`), and optionally connects a companion (BLE / USB / TCP). You can skip and finish later under Settings → Connect. **About** (nav bottom) has version, license, GitHub, and data-folder path; **Run setup again** reopens the wizard.
+
+5. **App updates** (optional): HQ checks GitHub Releases on startup and every 6 hours. A banner appears when a newer build exists; install always needs your confirm (AppImage / Windows zip / Linux tarball quit-and-replace; Ubuntu `.deb` via `pkexec`). Turn checks off under Settings → Preferences → App updates.
 
 ### Runtime libraries
 
@@ -86,11 +89,11 @@ Critical UI libraries are probed before the window opens. On Debian/Ubuntu the a
 Releases are created only from version tags (not every `main` push):
 
 ```bash
-git tag v0.1.21
-git push origin v0.1.21
+git tag v0.1.22
+git push origin v0.1.22
 ```
 
-That attaches the Windows `.zip`, Ubuntu `.deb`, Linux `.tar.gz`, and Linux `.AppImage`. If the tag already exists on an older commit, move it after the release commit (`git tag -f v0.1.21` then `git push --force origin v0.1.21`) or use the next patch version.
+That attaches the Windows `.zip`, Ubuntu `.deb`, Linux `.tar.gz`, and Linux `.AppImage`. If the tag already exists on an older commit, move it after the release commit (`git tag -f v0.1.22` then `git push --force origin v0.1.22`) or use the next patch version.
 
 ## Requirements (build from source)
 

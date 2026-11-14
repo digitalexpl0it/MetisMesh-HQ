@@ -93,7 +93,7 @@ Mirror MeshCore community firmware while online; flash over USB when the interne
 HQ must run offline as a normal desktop app on operator laptops — no Docker, no cloud runtime. One program per OS.
 
 - [x] **H1** Standalone executables for **Linux**, **Windows**, and **macOS** (`dx` / Cargo desktop release builds); ship with bundled MapLibre assets; document install + first-run `data/` location
-- [x] **H1b** First-run welcome wizard (critical/soft deps install + optional companion connect) and Settings → About (version, author, MIT, GitHub, data path)
+- [x] **H1b** First-run welcome wizard (critical/soft deps install + optional companion connect) and About page (version, author, MIT, GitHub, data path)
 - [ ] **H2** Smoke each target: window opens, SQLite creates under `data/`, BLE/USB paths degrade cleanly when hardware is absent
 - [x] **H3** SQLite durability: confirm **WAL** journal mode on open (already set in `Db::open`); keep WAL + checkpoint behavior healthy under multi-radio ingest so the DB does not choke or lock up; note `-wal`/`-shm` beside the main file in backup docs
 
@@ -109,12 +109,12 @@ Heard nodes stay on Roster/Map. **Claimed** nodes are HQ-owned mesh infrastructu
 
 ## Phase J — Nav / list UX
 
-- [x] **J1** Sidebar order by use: Overview → Messages → Inbox → Roster → Map → Infrastructure → Tracker → CLI; Help then Settings at bottom
+- [x] **J1** Sidebar order by use: Overview → Messages → Inbox → Roster → Map → Infrastructure → Tracker → CLI; Settings, then Help, then About at bottom
 - [x] **J2** Expanded-only fuzzy jump: pages + in-page tabs/keywords (not live roster/message bodies)
 - [x] **J3** Zebra rows on Roster, Infrastructure (claimed + claim-from-roster), Tracker (tracked + add-from-roster) via `.row-zebra` in `form.css` (frozen Tailwind lacks `bg-muted/40`)
 - [x] **J4** GPS locate icon: green within 7 days of `last_heard`, red when older / never
 - [x] **J5** Shell: opaque top banner + `min-h-0` / `overflow-hidden` so page content does not paint under the bar
-- [x] **J6** In-app Help page (nav above Settings): operator desk guide + shareable radio-user signup / channel steps; About → Open Help
+- [x] **J6** In-app Help page (nav under Settings): operator desk guide + shareable radio-user signup / channel steps; About page → Open Help
 
 ## Phase K — Messages / Overview UX (2026-11)
 
@@ -195,6 +195,7 @@ Do **not**: re-bundle Ubuntu WebKit; re-enable library auto-fetch that holds the
 - [x] **Q2** Soft-dep hints always distro-correct (no apt text on Arch/Fedora)
 - [x] **Q3** About / AppImage note: needs host `webkit2gtk-4.1` + `dialout`/`uucp`
 - [ ] **Q4** CI: harden Linux apt against mirror DNS flakes (retry / clearer failure) so releases do not stall
+- [x] **Q5** In-app GitHub update check (startup + 6h) with Preferences opt-out; confirm-gated install (AppImage / deb / Windows zip / tar.gz)
 
 ## Phase R — UI feel (match radio speed)
 

@@ -1,9 +1,12 @@
 //! First-run welcome wizard: soft deps + optional companion connect.
 
 use dioxus::prelude::*;
+use rand::Rng;
 
+use crate::db::SystemChannel;
 use crate::deps;
 use crate::radio::RadioStatus;
+use crate::secrets::{CHANNEL_NAME, NET_CHANNEL_NAME};
 
 use super::icons::{Icon, IconName};
 use super::state;
@@ -21,6 +24,8 @@ enum WelcomeStep {
     Companion,
     /// Only reached after a successful companion link.
     NameCompanion,
+    /// Pick private channel names (defaults get a random 4-digit suffix).
+    Channels,
     Done,
 }
 
@@ -46,7 +51,7 @@ pub fn set_welcome_done(done: bool) {
     let _ = state().db.set_setting(WELCOME_DONE_KEY, value);
 }
 
-/// Force the wizard to show again (Settings → About).
+/// Force the wizard to show again (About → Run setup again).
 pub fn reopen_welcome() {
     set_welcome_done(false);
 }
@@ -147,11 +152,76 @@ fn welcome_strip_steps(include_name: bool) -> Vec<WelcomeStripStep> {
         });
     }
     steps.push(WelcomeStripStep {
+        step: WelcomeStep::Channels,
+        icon: IconName::Key,
+        label: "Channels",
+    });
+    steps.push(WelcomeStripStep {
         step: WelcomeStep::Done,
         icon: IconName::Check,
         label: "Done",
     });
     steps
+}
+
+/// If a name is still the stock default, append `-XXXX` (same suffix for both when needed).
+pub(crate) fn with_unique_suffix_if_default(
+    info: &str,
+    net: &str,
+    suffix: u16,
+) -> (String, String) {
+    let suffix = format!("{suffix:04}");
+    let info = info.trim();
+    let net = net.trim();
+    let info_out = if info.eq_ignore_ascii_case(CHANNEL_NAME) {
+        format!("{CHANNEL_NAME}-{suffix}")
+    } else if info.is_empty() {
+        format!("{CHANNEL_NAME}-{suffix}")
+    } else {
+        info.to_string()
+    };
+    let net_out = if net.eq_ignore_ascii_case(NET_CHANNEL_NAME) {
+        format!("{NET_CHANNEL_NAME}-{suffix}")
+    } else if net.is_empty() {
+        format!("{NET_CHANNEL_NAME}-{suffix}")
+    } else {
+        net.to_string()
+    };
+    (info_out, net_out)
+}
+
+fn welcome_channel_drafts() -> (String, String) {
+    let info = state()
+        .db
+        .info_channel_name()
+        .unwrap_or_else(|_| CHANNEL_NAME.into());
+    let net = state()
+        .db
+        .net_channel_name()
+        .unwrap_or_else(|_| NET_CHANNEL_NAME.into());
+    let suffix = rand::thread_rng().gen_range(0..10_000u16);
+    with_unique_suffix_if_default(&info, &net, suffix)
+}
+
+fn save_welcome_channels(info: &str, net: &str) -> Result<(), String> {
+    let radio_connected = state().radio.snapshot().state == "connected";
+    let (info_name, info_slot) = state()
+        .db
+        .rename_system_channel(SystemChannel::Info, info, &state().secrets)
+        .map_err(|e| e.to_string())?;
+    if radio_connected {
+        state()
+            .radio
+            .push_channel(info_slot as u8, info_name.clone());
+    }
+    let (net_name, net_slot) = state()
+        .db
+        .rename_system_channel(SystemChannel::Net, net, &state().secrets)
+        .map_err(|e| e.to_string())?;
+    if radio_connected {
+        state().radio.push_channel(net_slot as u8, net_name);
+    }
+    Ok(())
 }
 
 #[component]
@@ -198,6 +268,10 @@ pub fn WelcomeWizard(
     let mut tcp_port = use_signal(|| crate::tcp_radio::DEFAULT_TCP_PORT.to_string());
     let mut name_draft = use_signal(String::new);
     let mut name_note = use_signal(String::new);
+    let (initial_info, initial_net) = welcome_channel_drafts();
+    let mut channel_info_draft = use_signal(|| initial_info);
+    let mut channel_net_draft = use_signal(|| initial_net);
+    let mut channel_note = use_signal(String::new);
     let _ = soft_tick();
     let report = deps::soft_status();
     let ble_scanning = radio.state == "scanning" || radio.state == "pairing";
@@ -281,7 +355,7 @@ pub fn WelcomeWizard(
                             "Local emergency headquarters for MeshCore. No cloud account — this computer talks to your companion radio and keeps the roster, map, and bot running when the internet is down."
                         }
                         p { class: "welcome-copy welcome-copy-muted",
-                            "Next we will check system pieces (Bluetooth, USB serial) and optionally connect a companion."
+                            "Next we will check system pieces (Bluetooth, USB serial), set your private channel names, and optionally connect a companion."
                         }
                         div { class: "welcome-actions",
                             Button {
@@ -685,7 +759,10 @@ pub fn WelcomeWizard(
                             Button {
                                 kind: ButtonKind::Ghost,
                                 disabled: companion_linking,
-                                onclick: move |_| step.set(WelcomeStep::Done),
+                                onclick: move |_| {
+                                    channel_note.set(String::new());
+                                    step.set(WelcomeStep::Channels);
+                                },
                                 if companion_linking { "Wait…" } else { "Skip" }
                             }
                             Button {
@@ -697,7 +774,8 @@ pub fn WelcomeWizard(
                                         name_note.set(String::new());
                                         step.set(WelcomeStep::NameCompanion);
                                     } else {
-                                        step.set(WelcomeStep::Done);
+                                        channel_note.set(String::new());
+                                        step.set(WelcomeStep::Channels);
                                     }
                                 },
                                 if companion_linked {
@@ -764,7 +842,10 @@ pub fn WelcomeWizard(
                             }
                             Button {
                                 kind: ButtonKind::Ghost,
-                                onclick: move |_| step.set(WelcomeStep::Done),
+                                onclick: move |_| {
+                                    channel_note.set(String::new());
+                                    step.set(WelcomeStep::Channels);
+                                },
                                 "Keep current name"
                             }
                             Button {
@@ -774,9 +855,91 @@ pub fn WelcomeWizard(
                                         Ok(name) => {
                                             name_note.set(String::new());
                                             state().radio.apply_name(name);
-                                            step.set(WelcomeStep::Done);
+                                            channel_note.set(String::new());
+                                            step.set(WelcomeStep::Channels);
                                         }
                                         Err(msg) => name_note.set(msg),
+                                    }
+                                },
+                                "Save and continue"
+                            }
+                        }
+                    },
+                    WelcomeStep::Channels => rsx! {
+                        h1 { class: "welcome-title", "Private channels" }
+                        p { class: "welcome-copy",
+                            "Stock names "
+                            code { "{CHANNEL_NAME}" }
+                            " / "
+                            code { "{NET_CHANNEL_NAME}" }
+                            " are already common on the mesh. Defaults below get a random 4-digit suffix — edit freely. You can rename again later under Settings → Preferences."
+                        }
+                        div { class: "welcome-channel-grid",
+                            div {
+                                label { class: "welcome-channel-label", "Bot home (INFO)" }
+                                TextInput {
+                                    value: channel_info_draft(),
+                                    placeholder: CHANNEL_NAME,
+                                    oninput: move |event: FormEvent| {
+                                        channel_note.set(String::new());
+                                        channel_info_draft.set(event.value());
+                                    },
+                                }
+                            }
+                            div {
+                                label { class: "welcome-channel-label", "Peer net (NET)" }
+                                TextInput {
+                                    value: channel_net_draft(),
+                                    placeholder: NET_CHANNEL_NAME,
+                                    oninput: move |event: FormEvent| {
+                                        channel_note.set(String::new());
+                                        channel_net_draft.set(event.value());
+                                    },
+                                }
+                            }
+                        }
+                        if !channel_note().is_empty() {
+                            p { class: "welcome-note welcome-note-warn", "{channel_note()}" }
+                        }
+                        div { class: "welcome-actions",
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| {
+                                    if companion_linked {
+                                        step.set(WelcomeStep::NameCompanion);
+                                    } else {
+                                        step.set(WelcomeStep::Companion);
+                                    }
+                                },
+                                "Back"
+                            }
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| {
+                                    let suffix = rand::thread_rng().gen_range(0..10_000u16);
+                                    let (info, net) = with_unique_suffix_if_default(
+                                        CHANNEL_NAME,
+                                        NET_CHANNEL_NAME,
+                                        suffix,
+                                    );
+                                    channel_info_draft.set(info);
+                                    channel_net_draft.set(net);
+                                    channel_note.set(String::new());
+                                },
+                                "New suffix"
+                            }
+                            Button {
+                                kind: ButtonKind::Primary,
+                                onclick: move |_| {
+                                    match save_welcome_channels(
+                                        &channel_info_draft(),
+                                        &channel_net_draft(),
+                                    ) {
+                                        Ok(()) => {
+                                            channel_note.set(String::new());
+                                            step.set(WelcomeStep::Done);
+                                        }
+                                        Err(err) => channel_note.set(err),
                                     }
                                 },
                                 "Save and continue"
@@ -787,9 +950,9 @@ pub fn WelcomeWizard(
                         h1 { class: "welcome-title", "You're set" }
                         p { class: "welcome-copy",
                             if companion_linked {
-                                "Companion is linked. Connect or manage radios anytime under Settings → Connect. Open About for version and data folder details."
+                                "Companion is linked. Private channels are saved. Connect or manage radios anytime under Settings → Connect. Open About for version and data folder details."
                             } else {
-                                "HQ is ready. Connect or manage radios anytime under Settings → Connect. Open About for version and data folder details."
+                                "HQ is ready. Private channels are saved. Connect or manage radios anytime under Settings → Connect. Open About for version and data folder details."
                             }
                         }
                         div { class: "welcome-actions",
@@ -814,5 +977,38 @@ pub fn WelcomeWizard(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_names_get_shared_suffix() {
+        let (info, net) = with_unique_suffix_if_default(CHANNEL_NAME, NET_CHANNEL_NAME, 42);
+        assert_eq!(info, "METIS-INFO-0042");
+        assert_eq!(net, "METIS-NET-0042");
+    }
+
+    #[test]
+    fn custom_names_kept() {
+        let (info, net) = with_unique_suffix_if_default("HQ-BOT", "HQ-PEERS", 99);
+        assert_eq!(info, "HQ-BOT");
+        assert_eq!(net, "HQ-PEERS");
+    }
+
+    #[test]
+    fn only_default_side_gets_suffix() {
+        let (info, net) = with_unique_suffix_if_default(CHANNEL_NAME, "CHURCH-NET", 7);
+        assert_eq!(info, "METIS-INFO-0007");
+        assert_eq!(net, "CHURCH-NET");
+    }
+
+    #[test]
+    fn empty_treated_as_default() {
+        let (info, net) = with_unique_suffix_if_default("", "", 1234);
+        assert_eq!(info, "METIS-INFO-1234");
+        assert_eq!(net, "METIS-NET-1234");
     }
 }

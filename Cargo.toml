@@ -1,6 +1,6 @@
 [package]
 name = "metis-mesh-hq"
-version = "0.1.21"
+version = "0.1.22"
 edition = "2021"
 description = "Offline emergency headquarters for MeshCore communities"
 license = "MIT"
@@ -52,6 +52,7 @@ ureq = { version = "2", default-features = false, features = ["tls", "native-cer
 uuid = "1"
 webpki-roots = "0.26"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+semver = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bluer = { version = "0.17", features = ["bluetoothd"] }

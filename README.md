@@ -10,17 +10,18 @@ Churches, neighborhoods, and volunteer groups run this on a regular computer sit
 
 - **Radio pool** — connect MeshCore companions over Bluetooth, USB serial, or TCP (Wi-Fi / Ethernet, default port 5000); multiple radios with a primary that owns bot and enrollment traffic
 - **Enrollment** — approve join requests, hand out private channel secrets, run the local bot on METIS-INFO (`#weather`, `#quake`, `#amber`, and related commands)
-- **Messages** — Channels / DMs / Contacts rail; public and private channels with session speakers under each channel; direct threads only when a public key is known (contact card / companion contact); unread and @mention tracking; optional per-channel look; block senders (including by channel display name); share via `meshcore://contact/add` and `meshcore://channel/add` chips
+- **Messages** — Channels / DMs / Contacts rail (Favorites / Saved / Discovered); public and private channels with session speakers; direct threads when a public key is known; unread and @mention tracking; **Follow newest**; local history delete / clear; optional per-channel look; block senders; share via `meshcore://contact/add` and `meshcore://channel/add` chips
 - **Inbox** — pending signups and held community alerts (weather / Amber / civil) for operator confirm or auto-relay
 - **Roster** — everyone heard on the mesh (enrolled or not); contact QR; clear NEW / prune heard-only
 - **Map** — MapLibre with a local style (optional PMTiles offline packs); live pins, message sonar, tracked movers; operator path **Trace** (tracked/claimed) and passive **Traffic** edges
-- **Overview** — companion status + activity; **Repeaters** tab when infrastructure is claimed (fleet tiles, detail window 15m–7d, Battery/Queue Chart·Gauge·Numeric)
+- **Overview** — companion status + activity; system chips (including **Webhooks**); **Repeaters** tab when infrastructure is claimed (fleet tiles, detail window 15m–7d, Battery/Queue Chart·Gauge·Numeric)
 - **Weather** — Open-Meteo and local stations (MQTT / Ecowitt); operator Weather page plus mesh bot replies
 - **Infrastructure** — claim and admin-verify repeaters, rooms, and sensors; probe and remote CLI through the primary companion
 - **Tracker** — whitelist of devices expected to share GPS; trails and stale styling on the map
 - **CLI** — companion and remote device console for operators
+- **Local API / Integrations** — opt-in read-only JSON API (bearer token, loopback by default) for Home Assistant and local apps; opt-in **Webhooks** (Settings → Services → Webhooks) POST matching live mesh RX (and HQ channel TX) to per-connection URLs with Detection / Payload / Test POST, rate limit, timeout, and optional HMAC
 - **Firmware locker** — mirror community firmware while online; flash over USB on the HQ machine when the internet is gone (Ready-for-outage, checksums, export/import pack). Optional **LAN flash locker** (Settings → Flasher): HTTPS + room PIN so other laptops download synced builds and flash via Web Serial (ESP SLIP / nRF DFU zip), plus OTAFIX UF2 downloads, Enter DFU, Custom local files, and Repeater/Room setup CLI
-- **Backup** — passphrase-encrypted HQ archive (SQLite + channel secrets); restore with confirm
+- **Backup** — passphrase-encrypted HQ archive (SQLite + channel secrets + Integration extras such as `webhook.hmac`); restore with confirm
 - **Local-first storage** — SQLite under the per-user data folder; channel secrets in the OS keyring when possible (otherwise a locked-down file)
 - **Help** — in-app operator guide, shareable radio-user signup steps, and the full offline runbook (nav under Settings; `docs/OFFLINE_RUNBOOK.md` mirrors Help for GitHub)
 - **About** — version, license, GitHub, and data-folder path (nav at the bottom, under Help)

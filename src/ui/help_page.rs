@@ -618,6 +618,40 @@ pub fn HelpPage() -> Element {
                         pre { class: "help-pre",
                             {"# configuration.yaml (or a package)\nsensor:\n  - platform: rest\n    name: Metis companion state\n    resource: http://127.0.0.1:8787/api/v1/status\n    headers:\n      Authorization: Bearer YOUR_TOKEN\n    value_template: \"{{ value_json.companion.state }}\"\n    json_attributes_path: \"$.companion\"\n    json_attributes:\n      - connected_name\n      transport\n\n  - platform: rest\n    name: Metis enrolled count\n    resource: http://127.0.0.1:8787/api/v1/stats\n    headers:\n      Authorization: Bearer YOUR_TOKEN\n    value_template: \"{{ value_json.enrollment.enrolled }}\"\n\n  - platform: rest\n    name: Metis repeater battery mV\n    resource: http://127.0.0.1:8787/api/v1/infra\n    headers:\n      Authorization: Bearer YOUR_TOKEN\n    value_template: \"{{ value_json[0].latest.battery_mv }}\"\n    unit_of_measurement: mV\n\n  - platform: rest\n    name: Metis repeater noise\n    resource: http://127.0.0.1:8787/api/v1/infra\n    headers:\n      Authorization: Bearer YOUR_TOKEN\n    value_template: \"{{ value_json[0].latest.noise_floor }}\"\n    unit_of_measurement: dBm\n\n  - platform: rest\n    name: Metis repeater probed at\n    resource: http://127.0.0.1:8787/api/v1/infra\n    headers:\n      Authorization: Bearer YOUR_TOKEN\n    value_template: \"{{ value_json[0].latest.probed_at }}\""}
                         }
+                        h4 { class: "help-subtitle", "Webhooks (mesh → automation)" }
+                        p {
+                            "Opt-in under Settings → Services → "
+                            strong { "Webhooks" }
+                            " (separate from Local API). Add "
+                            strong { "connections" }
+                            " — each has its own POST URL, Detection (kinds / channels / enrollment / optional allowed sender pubkeys / text prefix), and Payload (full event, text, command, or custom Name → Value fields with HQ tokens like "
+                            code { "{{command}}" }
+                            " / "
+                            code { "{{text}}" }
+                            "). Optional HTTP / secret headers per connection. Wizard tabs: Detection / Payload / Raw JSON. When "
+                            em { "live" }
+                            " mesh RX matches a connection, HQ POSTs to that connection’s URL. Channel messages you send from HQ also match (the companion does not echo your own TX). Connect-queue history is never forwarded. Text prefixes match the message body (after "
+                            code { "Name:" }
+                            "), so "
+                            code { "#snore" }
+                            " works on channel traffic. Page-level Enable, max posts/minute, POST timeout (3–60s, default 12), and optional HMAC ("
+                            code { "data/webhook.hmac" }
+                            ", "
+                            code { "X-Metis-Signature: sha256=…" }
+                            "). Use "
+                            strong { "Test" }
+                            " / "
+                            strong { "Send test POST" }
+                            " to fire a sample without mesh traffic (bypasses Enable and the rate limit). Recent deliveries stay in memory for this HQ session. Overview shows a "
+                            strong { "Webhooks" }
+                            " chip that opens this tab. Connections and HMAC are included in Settings → Data → Backup."
+                        }
+                        p { class: "help-muted",
+                            "Prefer a loopback or LAN URL you control. Rate-limit posts. Mesh text is untrusted — never pass it to a shell."
+                        }
+                        pre { class: "help-pre",
+                            {"# Example event (abridged)\n{\n  \"type\": \"message.received\",\n  \"api_version\": 1,\n  \"kind\": \"channel\",\n  \"channel\": \"METIS-INFO\",\n  \"from\": { \"enrollment\": \"enrolled\", \"name\": \"Ada\" },\n  \"text\": \"#gate open\",\n  \"body\": \"#gate open\",\n  \"rule\": { \"id\": \"hash-cmds\" }\n}\n\n# Verify HMAC (Python sketch)\n# import hmac, hashlib\n# sig = request.headers[\"X-Metis-Signature\"].removeprefix(\"sha256=\")\n# expect = hmac.new(secret, body, hashlib.sha256).hexdigest()"}
+                        }
                         h4 { class: "help-subtitle", "Home Assistant (MQTT discovery)" }
                         p {
                             "Opt-in under Settings → Services → Local API → "
@@ -713,7 +747,9 @@ pub fn HelpPage() -> Element {
                         }
                         p { "Settings → Data → Backup: encrypted "
                             code { ".metisbak" }
-                            " (passphrase) of the database and channel secrets. Prefer that over copying files by hand."
+                            " (passphrase) of the database, channel secrets, and Integration extras such as "
+                            code { "data/webhook.hmac" }
+                            ". Prefer that over copying files by hand."
                         }
                         p {
                             "Separate "

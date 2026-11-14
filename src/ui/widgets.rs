@@ -443,19 +443,27 @@ pub fn Dialog(
     open: bool,
     title: String,
     on_close: EventHandler<()>,
+    /// Wider sheet for dense editors (webhook rule wizard, etc.).
+    #[props(default)]
+    wide: bool,
     children: Element,
 ) -> Element {
     if !open {
         return rsx! {};
     }
+    let panel_class = if wide {
+        "webhook-dialog-panel"
+    } else {
+        "w-full max-w-md rounded-lg border border-border bg-card p-4"
+    };
     rsx! {
         div {
             class: "fixed inset-0 z-20 flex items-center justify-center bg-black/60 p-4",
             onclick: move |_| on_close.call(()),
             div {
-                class: "w-full max-w-md rounded-lg border border-border bg-card p-4",
+                class: "{panel_class}",
                 onclick: move |event| event.stop_propagation(),
-                h2 { class: "mb-3 text-base font-semibold", "{title}" }
+                h2 { class: "mb-3 shrink-0 text-base font-semibold", "{title}" }
                 {children}
             }
         }

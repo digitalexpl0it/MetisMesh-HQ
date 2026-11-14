@@ -3,7 +3,16 @@
   "info": {
     "title": "Metis Mesh HQ Local API",
     "version": "2",
-    "description": "Opt-in read-only JSON API. Bearer token required on data routes. /docs and /openapi.json are public so a browser can load the try-it UI. No compose, send, enroll, CLI, or channel secrets."
+    "description": "Opt-in read-only JSON API. Bearer token required on data routes. /docs and /openapi.json are public so a browser can load the try-it UI. No compose, send, enroll, CLI, or channel secrets. Outbound mesh→automation webhooks are Connections under Settings → Services → Webhooks (per-connection URL; not REST routes); see Help → Webhooks for the message.received schema and HMAC header."
+  },
+  "x-metis-webhooks": {
+    "summary": "Outbound POSTs when live RX or HQ channel TX matches an enabled Connection (each has its own URL). Operator Test POST and page-level POST timeout (webhook_timeout_secs, 3–60, default 12).",
+    "event": "message.received",
+    "headers": [
+      "Content-Type: application/json",
+      "X-Metis-Event: message.received",
+      "X-Metis-Signature: sha256=<hmac-hex> (when data/webhook.hmac is set)"
+    ]
   },
   "servers": [{ "url": "/api/v1" }],
   "components": {

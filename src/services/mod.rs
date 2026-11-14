@@ -15,6 +15,7 @@ mod poller;
 mod quake;
 mod station;
 mod weather;
+pub mod webhook;
 
 pub use ecowitt::{bump_ecowitt_config, ecowitt_pull_status_line, ecowitt_push_status_line};
 pub use flash_locker::{
@@ -54,6 +55,17 @@ pub use nws::{
 pub use poller::spawn_poller;
 pub use quake::{fetch_quakes, format_quake};
 pub use weather::{fetch_weather_detail, fetch_weather_line, short_wx_label, WeatherQuery};
+pub use webhook::{
+    bump_webhook_config, clear_webhook_secret, clamp_webhook_rate, clamp_webhook_timeout,
+    connection_url_label, connection_url_ok, default_payload_template, default_rules_json,
+    enqueue_test_delivery, ensure_explicit_kinds, generate_webhook_secret, load_webhook_secret,
+    migrate_legacy_webhook_url, normalize_payload_mode, normalize_sender_id, parse_rule_json,
+    parse_rule_json_draft, parse_rules_json, persist_webhook_rules, request_open_webhooks_tab,
+    save_webhook_secret, slug_rule_id, take_open_webhooks_tab, clear_webhook_deliveries,
+    webhook_dashboard_has_error, webhook_dashboard_hint, webhook_hq_tokens, webhook_last_error,
+    webhook_recent_deliveries, webhook_secret_present,
+    webhook_status_line, WebhookField, WebhookHeader, WebhookRule,
+};
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};

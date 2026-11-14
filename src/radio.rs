@@ -3896,7 +3896,7 @@ async fn transmit_channel_message(
                 "direction": "tx",
                 "origin": origin,
             });
-            match db.insert_message(
+            let inserted = match db.insert_message(
                 "channel",
                 "tx",
                 None,
@@ -3918,21 +3918,26 @@ async fn transmit_channel_message(
                     let _ = db.audit("channel_send", "", &format!("slot {slot} (deduped)"));
                     push_send_note(status, String::new());
                     write_status(status, "connected", connected_detail(status, connected_name));
+                    None
                 }
-                Ok(Some(_)) => {
+                Ok(Some(id)) => {
                     let _ = db.audit("channel_send", "", &format!("slot {slot}"));
                     push_send_note(status, String::new());
                     write_status(status, "connected", connected_detail(status, connected_name));
+                    Some(id)
                 }
                 Err(err) => {
                     let msg = format!("Sent on air, but could not save history: {err}");
                     push_send_note(status, &msg);
                     return Err(msg);
                 }
-            }
+            };
             // Companion does not echo our own TX back as ChannelMsgRecv — run
-            // METIS-INFO bot commands locally so the operator can test from HQ.
+            // METIS-INFO bot commands and webhooks locally so the operator can test from HQ.
             if is_primary {
+                if let Some(message_id) = inserted {
+                    maybe_enqueue_local_channel_webhook(db, message_id, slot, &advert_name, text);
+                }
                 maybe_handle_local_metis_command(db, slot, text);
             }
             Ok(())
@@ -3944,6 +3949,43 @@ async fn transmit_channel_message(
             Err(msg)
         }
     }
+}
+
+/// Operator (or bot) channel TX — companion never echoes it as ChannelMsgRecv.
+fn maybe_enqueue_local_channel_webhook(
+    db: &Arc<Db>,
+    message_id: i64,
+    slot: u8,
+    advert_name: &str,
+    text: &str,
+) {
+    let channel_name = db.active_channel_on_slot(slot as i64).ok().flatten();
+    let hq = db.hq_node().ok().flatten();
+    let from_pubkey = hq.as_ref().map(|n| n.pubkey.clone());
+    let from_prefix = hq
+        .as_ref()
+        .map(|n| n.prefix.clone())
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| advert_name.chars().take(12).collect());
+    let enrollment = crate::services::webhook::enrollment_for_pubkey(db, from_pubkey.as_deref());
+    let body = text.trim().to_string();
+    crate::services::webhook::try_enqueue_mesh_event(
+        db,
+        crate::services::webhook::MeshEvent {
+            message_id,
+            kind: "channel",
+            channel: channel_name,
+            channel_idx: Some(slot as i64),
+            from_pubkey,
+            from_name: Some(advert_name.to_string()),
+            from_prefix,
+            enrollment,
+            text: body.clone(),
+            body,
+            hop_count: Some(0),
+            timestamp: crate::db::unix_now(),
+        },
+    );
 }
 
 fn maybe_handle_local_metis_command(db: &Arc<Db>, slot: u8, text: &str) {
@@ -6077,7 +6119,7 @@ async fn handle_event(
 ) -> Result<(), String> {
     match event.payload {
         EventPayload::ContactMessage(message) => {
-            let inserted = on_direct(db, meshcore, message, radio_id).await?;
+            let inserted = on_direct(db, meshcore, message, radio_id, live_bot).await?;
             if inserted {
                 if let Some(status) = status {
                     bump_rx_seq(status);
@@ -6185,6 +6227,42 @@ async fn handle_event(
                     }
                 }
             }
+            // Opt-in Local API webhooks — live RX only; match rules decide delivery.
+            if live_bot {
+                if let Some(message_id) = inserted {
+                    let hq_name = db.hq_advert_name().unwrap_or_default();
+                    let from_self = sender_name
+                        .as_ref()
+                        .is_some_and(|n| !hq_name.is_empty() && n.eq_ignore_ascii_case(&hq_name));
+                    if !from_self {
+                        let channel_name = db
+                            .active_channel_on_slot(message.channel_idx as i64)
+                            .ok()
+                            .flatten();
+                        let enrollment = crate::services::webhook::enrollment_for_pubkey(
+                            db,
+                            sender_pubkey.as_deref(),
+                        );
+                        crate::services::webhook::try_enqueue_mesh_event(
+                            db,
+                            crate::services::webhook::MeshEvent {
+                                message_id,
+                                kind: "channel",
+                                channel: channel_name,
+                                channel_idx: Some(message.channel_idx as i64),
+                                from_pubkey: sender_pubkey.clone(),
+                                from_name: sender_name.clone(),
+                                from_prefix: sender_prefix.clone(),
+                                enrollment,
+                                text: message.text.clone(),
+                                body: body.clone(),
+                                hop_count: hops,
+                                timestamp: crate::db::unix_now(),
+                            },
+                        );
+                    }
+                }
+            }
             // Bot commands live on METIS-INFO (private, enrolled secret), not DMs.
             // Skip during connect drain, skip our own advert name (local TX path
             // already answered), and claim so reconnect/redelivery cannot loop.
@@ -6246,6 +6324,7 @@ async fn on_direct(
     meshcore: &MeshCore,
     message: ContactMessage,
     radio_id: i64,
+    live_bot: bool,
 ) -> Result<bool, String> {
     let prefix = message.sender_prefix_hex();
     let matches = db.nodes_by_prefix(&prefix).map_err(|err| err.to_string())?;
@@ -6310,6 +6389,38 @@ async fn on_direct(
         }
         let _ = db.touch_node_radio(pubkey, radio_id);
         remember_route(db, meshcore, pubkey, message_id).await;
+    }
+    if live_bot && !is_cli_data {
+        let from_name = matches.first().and_then(|n| {
+            let name = n.name.trim();
+            if name.is_empty() {
+                None
+            } else {
+                Some(name.to_string())
+            }
+        });
+        let enrollment = pubkey
+            .as_deref()
+            .and_then(|pk| db.get_node(pk).ok().flatten())
+            .map(|n| n.enrollment)
+            .unwrap_or(decision.enrollment);
+        crate::services::webhook::try_enqueue_mesh_event(
+            db,
+            crate::services::webhook::MeshEvent {
+                message_id,
+                kind: "direct",
+                channel: None,
+                channel_idx: None,
+                from_pubkey: pubkey.clone(),
+                from_name,
+                from_prefix: prefix.clone(),
+                enrollment,
+                text: message.text.clone(),
+                body: message.text.clone(),
+                hop_count: hops,
+                timestamp: crate::db::unix_now(),
+            },
+        );
     }
     if let Some(reply) = decision.reply {
         if let Some(pubkey) = matches.first().map(|node| node.pubkey.clone()) {

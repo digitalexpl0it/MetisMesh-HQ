@@ -49,6 +49,8 @@ pub fn spawn_poller(db: Arc<Db>, secrets: Arc<Secrets>, radio: RadioHandle) {
                 tokio::spawn(crate::services::flash_locker::flash_locker_loop(locker_db));
                 tokio::spawn(crate::services::ha_mqtt::ha_mqtt_loop(ha_db, ha_radio));
                 crate::services::map_upload::spawn_map_upload_worker(map_db, map_radio);
+                let webhook_db = db.clone();
+                crate::services::webhook::spawn_webhook_worker(webhook_db);
                 poller_loop(db, secrets, radio).await;
             });
         })

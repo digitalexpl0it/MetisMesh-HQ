@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.1.24 — 2026-11-14
+
+Package version `0.1.24` (Cargo / About). Windows Details may show `0.1.24.0`.
+
+### Local API / Integrations
+
+- Opt-in **webhooks** as **Connections** (Settings → Services → **Webhooks**): each connection owns POST URL + Detection + Payload (**Detection** / **Payload** / **Raw JSON** wizard); HQ RX token chips; Name → Value fields/headers/secrets; page Enable + rate + optional HMAC; migrates legacy global `webhook_url`; backups include connections + HMAC
+- Webhooks also fire on **channel messages you send from HQ** (companion does not echo TX); text prefixes match the body after `Name:` (e.g. `#snore` on METIS-NET)
+- Saving a ready webhook connection turns on the page **Enable webhooks** master switch (was easy to miss with a connection enabled but posts never firing)
+- Webhooks: configurable **POST timeout** (3–60s), in-memory **Recent deliveries** slide-down (Clear history / Close), per-connection **Test POST**, and Overview **Webhooks** chip (opens Settings → Services → Webhooks)
+- Webhook Detection: themed enrollment presets (removed broken Custom list); optional **Allowed senders** allowlist by contact pubkey / hex prefix
+- Webhook event time field **`timestamp`** / **`ts`** (Unix seconds); token `{{timestamp}}` (old `{{received_at}}` still expands)
+
 ## 0.1.23 — 2026-11-14
 
 Package version `0.1.23` (Cargo / About). Windows Details may show `0.1.23.0`.

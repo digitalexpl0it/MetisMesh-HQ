@@ -1676,6 +1676,8 @@ fn DashboardPage(on_navigate: EventHandler<Page>) -> Element {
     } else {
         format!("{pending_alerts} alerts waiting")
     };
+    let webhook_hint = crate::services::webhook_dashboard_hint(&state().db);
+    let webhook_chip_error = crate::services::webhook_dashboard_has_error(&state().db);
     let mention_unread = state()
         .db
         .total_unread_mentions()
@@ -1801,6 +1803,27 @@ fn DashboardPage(on_navigate: EventHandler<Page>) -> Element {
                         span { class: "min-w-0",
                             span { class: "block text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground", "Firmware" }
                             span { class: "block truncate text-sm text-foreground", "{firmware_hint}" }
+                        }
+                    }
+                    button {
+                        class: "overview-chip overview-chip-webhooks",
+                        onclick: move |_| {
+                            crate::services::request_open_webhooks_tab();
+                            on_navigate.call(Page::Settings);
+                        },
+                        span { class: "overview-chip__icon",
+                            Icon { name: IconName::Signal, size: 14 }
+                        }
+                        span { class: "min-w-0",
+                            span { class: "block text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground", "Webhooks" }
+                            span {
+                                class: if webhook_chip_error {
+                                    "block truncate text-sm text-amber-200"
+                                } else {
+                                    "block truncate text-sm text-foreground"
+                                },
+                                "{webhook_hint}"
+                            }
                         }
                     }
                 }
@@ -8891,8 +8914,16 @@ enum ServicesTab {
     Ecowitt,
     Mqtt,
     LocalApi,
+    Webhooks,
     Alerts,
     Quake,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WebhookWizardTab {
+    Detection,
+    Payload,
+    Raw,
 }
 
 fn custom_var_label(key: &str) -> String {
@@ -9493,6 +9524,13 @@ fn SettingsPage(
     let mut settings_tab = use_signal(|| SettingsTab::Hq);
     let mut hq_tab = use_signal(|| HqTab::Connect);
     let mut services_tab = use_signal(|| ServicesTab::Site);
+    use_effect(move || {
+        if crate::services::take_open_webhooks_tab() {
+            settings_tab.set(SettingsTab::Hq);
+            hq_tab.set(HqTab::Services);
+            services_tab.set(ServicesTab::Webhooks);
+        }
+    });
     let mut flasher_subtab = use_signal(|| FlasherSubTab::Library);
     let mut usb_scanned = use_signal(|| false);
     let mut flasher_tick = use_signal(|| 0u32);
@@ -9783,6 +9821,45 @@ fn SettingsPage(
             .unwrap_or_else(|| "30".into())
     });
     let mut local_api_token_reveal = use_signal(String::new);
+    let mut webhook_enabled = use_signal(|| {
+        crate::services::setting_bool(&state().db, "webhook_enabled", false)
+    });
+    let mut webhook_rate = use_signal(|| {
+        state()
+            .db
+            .setting("webhook_rate_per_min")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "30".into())
+    });
+    let mut webhook_timeout = use_signal(|| {
+        state()
+            .db
+            .setting("webhook_timeout_secs")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "12".into())
+    });
+    let mut webhook_rules = use_signal(|| {
+        let _ = crate::services::migrate_legacy_webhook_url(&state().db);
+        state()
+            .db
+            .setting("webhook_rules")
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(crate::services::default_rules_json)
+    });
+    let mut webhook_rules_note = use_signal(String::new);
+    let mut webhook_secret_reveal = use_signal(String::new);
+    // Connection wizard: `(edit_index, draft)`. `edit_index` is `None` when adding.
+    let mut webhook_wizard = use_signal(|| None::<(Option<usize>, crate::services::WebhookRule)>);
+    let mut webhook_wizard_tab = use_signal(|| WebhookWizardTab::Detection);
+    let mut webhook_wizard_json = use_signal(String::new);
+    let mut webhook_wizard_json_note = use_signal(String::new);
+    let mut webhook_allowed_pick = use_signal(String::new);
+    let mut webhook_allowed_manual = use_signal(String::new);
+    let mut webhook_deliveries_open = use_signal(|| false);
     let mut flash_locker_enabled = use_signal(|| {
         crate::services::setting_bool(&state().db, "flash_locker_enabled", false)
     });
@@ -10051,6 +10128,11 @@ fn SettingsPage(
     let ecowitt_pull_status = crate::services::ecowitt_pull_status_line(&state().db);
     let local_api_status = crate::services::local_api_status_line(&state().db);
     let local_api_has_token = crate::services::local_api_token_present(&crate::data_dir());
+    let webhook_status = crate::services::webhook_status_line(&state().db);
+    let webhook_has_secret = crate::services::webhook_secret_present(&crate::data_dir());
+    let webhook_err = crate::services::webhook_last_error();
+    let webhook_recent = crate::services::webhook_recent_deliveries();
+    let webhook_now = crate::db::unix_now();
     let ha_mqtt_status = crate::services::ha_mqtt_status_line(&state().db);
     let ha_mqtt_pass_saved = crate::services::ha_mqtt_password_present(&crate::data_dir());
     let mqtt_template_default =
@@ -10674,6 +10756,11 @@ fn SettingsPage(
                             "Local API"
                         }
                         button {
+                            class: if services_tab() == ServicesTab::Webhooks { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
+                            onclick: move |_| services_tab.set(ServicesTab::Webhooks),
+                            "Webhooks"
+                        }
+                        button {
                             class: if services_tab() == ServicesTab::Alerts { "settings-subtab settings-subtab-active" } else { "settings-subtab" },
                             onclick: move |_| services_tab.set(ServicesTab::Alerts),
                             "Alerts"
@@ -11233,7 +11320,7 @@ fn SettingsPage(
                 if services_tab() == ServicesTab::LocalApi {
                     div { class: "services-panel",
                         p { class: "text-sm text-muted-foreground",
-                            "Opt-in read-only JSON API (v2) for local apps and Home Assistant. Default bind is loopback. Bearer token is required on data routes (/health, /status, chat, infra, …). /docs and /openapi.json are open so you can paste the token in the browser. Compose/send/secrets stay denied. Token is stored as local-api.token under the HQ data folder (0600). See Help → Local API."
+                            "Opt-in read-only JSON API (v2) for local apps and Home Assistant. Default bind is loopback. Bearer token is required on data routes (/health, /status, chat, infra, …). /docs and /openapi.json are open so you can paste the token in the browser. Compose/send/secrets stay denied. Token is stored as local-api.token under the HQ data folder (0600). Mesh→automation webhooks are under the Webhooks tab. See Help → Local API."
                         }
                         p { class: "text-xs text-muted-foreground", "{local_api_status}" }
                         p { class: "text-xs text-muted-foreground",
@@ -11877,6 +11964,1631 @@ fn SettingsPage(
                                     "Fill from Weather MQTT"
                                 }
                             }
+                        }
+                    }
+                }
+
+                if services_tab() == ServicesTab::Webhooks {
+                    {
+                        let parsed_rules = crate::services::parse_rules_json(&webhook_rules())
+                            .unwrap_or_else(|_| {
+                                vec![crate::services::WebhookRule::default_hash_commands()]
+                            });
+                        rsx! {
+                    div { class: "services-panel",
+                        p { class: "text-sm text-muted-foreground",
+                            "Each connection POSTs matching live mesh RX — and channel messages you send from HQ — to its own URL (Node-RED, Home Assistant, n8n, …). Use Test on a connection to fire a sample without mesh traffic. Connect-queue history is never forwarded. HMAC (optional) signs every POST. Overview shows a Webhooks chip. Connections are included in HQ backups."
+                        }
+                        p { class: "text-xs text-muted-foreground", "{webhook_status}" }
+                        if !webhook_enabled()
+                            && parsed_rules.iter().any(|r| {
+                                r.enabled && crate::services::connection_url_ok(&r.url)
+                            })
+                        {
+                            p { class: "text-xs text-amber-200",
+                                "Connections are ready but the master switch is off — turn on Enable webhooks (or re-save a connection)."
+                            }
+                        }
+                        if !webhook_err.is_empty() {
+                            p { class: "text-xs text-amber-200", "Last error: {webhook_err}" }
+                        }
+                        div { class: "grid gap-3 sm:grid-cols-3",
+                            ToggleSwitch {
+                                checked: webhook_enabled(),
+                                label: "Enable webhooks".to_string(),
+                                hint: Some("Master switch for all connections. Saving a ready connection turns this on.".to_string()),
+                                onchange: move |next| {
+                                    let prev = crate::services::setting_bool(
+                                        &state().db,
+                                        "webhook_enabled",
+                                        false,
+                                    );
+                                    if next {
+                                        let rules = state()
+                                            .db
+                                            .setting("webhook_rules")
+                                            .ok()
+                                            .flatten()
+                                            .unwrap_or_default();
+                                        if rules.trim().is_empty() {
+                                            let def = crate::services::default_rules_json();
+                                            let _ = state().db.set_setting("webhook_rules", &def);
+                                            webhook_rules.set(def);
+                                        }
+                                        if let Ok(Some(stored)) =
+                                            crate::services::migrate_legacy_webhook_url(&state().db)
+                                        {
+                                            webhook_rules.set(stored);
+                                        }
+                                    }
+                                    webhook_enabled.set(next);
+                                    crate::services::set_setting_bool(
+                                        &state().db,
+                                        "webhook_enabled",
+                                        next,
+                                    );
+                                    if prev != next {
+                                        let _ = state().db.audit(
+                                            if next { "webhook_enable" } else { "webhook_disable" },
+                                            "",
+                                            "",
+                                        );
+                                    }
+                                    crate::services::bump_webhook_config();
+                                }
+                            }
+                            div { class: "flex flex-col gap-1",
+                                label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Max posts / minute" }
+                                TextInput {
+                                    value: webhook_rate(),
+                                    placeholder: "30".to_string(),
+                                    oninput: move |event: FormEvent| {
+                                        let value = event.value();
+                                        webhook_rate.set(value.clone());
+                                        let n = value.trim().parse::<u32>().unwrap_or(30);
+                                        let clamped = crate::services::clamp_webhook_rate(n);
+                                        let _ = state().db.set_setting(
+                                            "webhook_rate_per_min",
+                                            &clamped.to_string(),
+                                        );
+                                        crate::services::bump_webhook_config();
+                                    },
+                                }
+                            }
+                            div { class: "flex flex-col gap-1",
+                                label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "POST timeout (seconds)" }
+                                TextInput {
+                                    value: webhook_timeout(),
+                                    placeholder: "12".to_string(),
+                                    oninput: move |event: FormEvent| {
+                                        let value = event.value();
+                                        webhook_timeout.set(value.clone());
+                                        let n = value.trim().parse::<u32>().unwrap_or(12);
+                                        let clamped = crate::services::clamp_webhook_timeout(n);
+                                        let _ = state().db.set_setting(
+                                            "webhook_timeout_secs",
+                                            &clamped.to_string(),
+                                        );
+                                        crate::services::bump_webhook_config();
+                                    },
+                                }
+                            }
+                        }
+
+                        {
+                            let delivery_n = webhook_recent.len();
+                            let deliveries_label = if delivery_n == 0 {
+                                "Recent deliveries".to_string()
+                            } else {
+                                format!("Recent deliveries ({delivery_n})")
+                            };
+                            rsx! {
+                                div { class: "mt-3",
+                                    Button {
+                                        kind: ButtonKind::Ghost,
+                                        onclick: move |_| webhook_deliveries_open.set(true),
+                                        "{deliveries_label}"
+                                    }
+                                }
+                                SlideDownPanel {
+                                    open: webhook_deliveries_open(),
+                                    title: "Recent deliveries".to_string(),
+                                    subtitle: "In-memory for this HQ session (clears on restart). Audit log keeps successful posts.".to_string(),
+                                    icon: Some(IconName::Signal),
+                                    on_close: move |_| webhook_deliveries_open.set(false),
+                                    footer: rsx! {
+                                        Button {
+                                            kind: ButtonKind::Ghost,
+                                            onclick: move |_| {
+                                                crate::services::clear_webhook_deliveries();
+                                                crate::toast::push(
+                                                    crate::toast::ToastKind::Success,
+                                                    "Delivery history cleared.",
+                                                );
+                                            },
+                                            "Clear history"
+                                        }
+                                        Button {
+                                            kind: ButtonKind::Ghost,
+                                            onclick: move |_| webhook_deliveries_open.set(false),
+                                            "Close"
+                                        }
+                                    },
+                                    if webhook_recent.is_empty() {
+                                        p { class: "text-sm text-muted-foreground", "No deliveries yet." }
+                                    } else {
+                                        ul { class: "flex flex-col gap-1 text-sm",
+                                            for rec in webhook_recent.iter() {
+                                                {
+                                                    let age = (webhook_now - rec.at_unix).max(0);
+                                                    let age_label = if age < 60 {
+                                                        format!("{age}s ago")
+                                                    } else if age < 3600 {
+                                                        format!("{}m ago", age / 60)
+                                                    } else {
+                                                        format!("{}h ago", age / 3600)
+                                                    };
+                                                    let status_label = if rec.ok {
+                                                        if rec.http > 0 {
+                                                            format!("HTTP {}", rec.http)
+                                                        } else {
+                                                            "OK".into()
+                                                        }
+                                                    } else if rec.http > 0 {
+                                                        format!("HTTP {}", rec.http)
+                                                    } else {
+                                                        rec.detail.clone()
+                                                    };
+                                                    let name = if rec.rule_name.trim().is_empty() {
+                                                        rec.rule_id.clone()
+                                                    } else {
+                                                        rec.rule_name.clone()
+                                                    };
+                                                    let test_badge = if rec.kind == "test" {
+                                                        " · test"
+                                                    } else {
+                                                        ""
+                                                    };
+                                                    let url_label = rec.url_label.clone();
+                                                    rsx! {
+                                                        li { class: "flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 border-b border-border/40 py-2 last:border-0",
+                                                            span { class: "min-w-0 truncate text-foreground",
+                                                                "{name}"
+                                                                span { class: "text-muted-foreground", "{test_badge} · {url_label}" }
+                                                            }
+                                                            span {
+                                                                class: if rec.ok {
+                                                                    "shrink-0 text-muted-foreground"
+                                                                } else {
+                                                                    "shrink-0 text-amber-200"
+                                                                },
+                                                                "{status_label} · {age_label}"
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        div { class: "mt-4 flex flex-col gap-2",
+                            div { class: "flex flex-wrap items-center justify-between gap-2",
+                                h3 { class: "text-sm font-medium text-foreground", "Connections" }
+                                Button {
+                                    kind: ButtonKind::Primary,
+                                    onclick: move |_| {
+                                        webhook_wizard_tab.set(WebhookWizardTab::Detection);
+                                        webhook_wizard_json.set(String::new());
+                                        webhook_wizard_json_note.set(String::new());
+                                        webhook_allowed_pick.set(String::new());
+                                        webhook_allowed_manual.set(String::new());
+                                        webhook_wizard.set(Some((
+                                            None,
+                                            crate::services::WebhookRule::blank(),
+                                        )));
+                                    },
+                                    "Add connection"
+                                }
+                            }
+                            p { class: "text-xs text-muted-foreground",
+                                "Each connection has Detection, Payload (URL + body), and Raw JSON tabs."
+                            }
+                            if parsed_rules.is_empty() {
+                                p { class: "rounded-md border border-dashed border-border px-3 py-6 text-center text-sm text-muted-foreground",
+                                    "No connections yet. Add one to POST mesh commands to your automation URL."
+                                }
+                            }
+                            for (idx, rule) in parsed_rules.iter().enumerate() {
+                                {
+                                    let rule = rule.clone();
+                                    let rule_id = rule.id.clone();
+                                    let rule_name = if rule.name.trim().is_empty() {
+                                        rule.id.clone()
+                                    } else {
+                                        rule.name.clone()
+                                    };
+                                    let url_label = crate::services::connection_url_label(&rule.url);
+                                    let kinds_label = if rule.kinds.is_empty() {
+                                        "channel + DM".into()
+                                    } else {
+                                        rule.kinds.join(", ")
+                                    };
+                                    let ch_label = if rule.channels.is_empty()
+                                        || rule.channels.iter().any(|c| c == "*")
+                                    {
+                                        "any channel".into()
+                                    } else {
+                                        rule.channels.join(", ")
+                                    };
+                                    let enr_label = if rule.enrollment.is_empty() {
+                                        "enrolled".into()
+                                    } else {
+                                        rule.enrollment.join(", ")
+                                    };
+                                    let senders_label = if rule.allowed_senders.is_empty() {
+                                        "any sender".into()
+                                    } else {
+                                        format!("{} sender(s)", rule.allowed_senders.len())
+                                    };
+                                    let prefix_label = if rule.text_prefix.is_empty() {
+                                        "(any text)".into()
+                                    } else {
+                                        format!("starts with “{}”", rule.text_prefix)
+                                    };
+                                    let payload_label =
+                                        crate::services::normalize_payload_mode(&rule.payload_mode);
+                                    let enabled = rule.enabled;
+                                    rsx! {
+                                        div {
+                                            key: "wh-conn-{rule_id}-{idx}",
+                                            class: "flex flex-wrap items-start justify-between gap-3 rounded-md border border-border bg-card/40 px-3 py-2.5",
+                                            div { class: "min-w-0 flex-1",
+                                                div { class: "mb-0.5 flex flex-wrap items-center gap-2",
+                                                    p { class: "font-medium text-foreground", "{rule_name}" }
+                                                    if enabled {
+                                                        Badge { tone: "ok".to_string(), "On" }
+                                                    } else {
+                                                        Badge { tone: "pending".to_string(), "Off" }
+                                                    }
+                                                }
+                                                p { class: "font-mono text-[0.7rem] text-muted-foreground", "id: {rule_id}" }
+                                                p { class: "mt-0.5 font-mono text-[0.7rem] text-sky-200/90", "{url_label}" }
+                                                p { class: "mt-1 text-xs text-muted-foreground",
+                                                    "{kinds_label} · {ch_label} · {enr_label} · {senders_label} · {prefix_label} · payload {payload_label}"
+                                                }
+                                            }
+                                            div { class: "flex shrink-0 flex-wrap gap-1",
+                                                Button {
+                                                    kind: ButtonKind::Ghost,
+                                                    onclick: {
+                                                        let mut rule = rule.clone();
+                                                        move |_| {
+                                                            crate::services::ensure_explicit_kinds(&mut rule);
+                                                            if rule.payload_mode.trim().is_empty() {
+                                                                rule.payload_mode = "full".into();
+                                                            }
+                                                            webhook_wizard_tab.set(WebhookWizardTab::Detection);
+                                                            webhook_wizard_json.set(String::new());
+                                                            webhook_wizard_json_note.set(String::new());
+                                                            webhook_allowed_pick.set(String::new());
+                                                            webhook_allowed_manual.set(String::new());
+                                                            webhook_wizard.set(Some((Some(idx), rule.clone())));
+                                                        }
+                                                    },
+                                                    "Edit"
+                                                }
+                                                Button {
+                                                    kind: ButtonKind::Ghost,
+                                                    onclick: {
+                                                        let rule = rule.clone();
+                                                        move |_| {
+                                                            match crate::services::enqueue_test_delivery(
+                                                                &state().db,
+                                                                &rule,
+                                                            ) {
+                                                                Ok(()) => crate::toast::push(
+                                                                    crate::toast::ToastKind::Success,
+                                                                    format!(
+                                                                        "Test POST queued for {}.",
+                                                                        if rule.name.trim().is_empty() {
+                                                                            rule.id.as_str()
+                                                                        } else {
+                                                                            rule.name.as_str()
+                                                                        }
+                                                                    ),
+                                                                ),
+                                                                Err(err) => crate::toast::push(
+                                                                    crate::toast::ToastKind::Error,
+                                                                    err,
+                                                                ),
+                                                            }
+                                                        }
+                                                    },
+                                                    "Test"
+                                                }
+                                                Button {
+                                                    kind: ButtonKind::Ghost,
+                                                    onclick: {
+                                                        let rule_id = rule_id.clone();
+                                                        move |_| {
+                                                            let mut rules = crate::services::parse_rules_json(&webhook_rules())
+                                                                .unwrap_or_default();
+                                                            if let Some(r) = rules.get_mut(idx) {
+                                                                r.enabled = !r.enabled;
+                                                            }
+                                                            match crate::services::persist_webhook_rules(
+                                                                &state().db,
+                                                                &rules,
+                                                            ) {
+                                                                Ok(stored) => {
+                                                                    webhook_rules.set(stored);
+                                                                    webhook_enabled.set(
+                                                                        crate::services::setting_bool(
+                                                                            &state().db,
+                                                                            "webhook_enabled",
+                                                                            false,
+                                                                        ),
+                                                                    );
+                                                                    webhook_rules_note.set(String::new());
+                                                                    crate::toast::push(
+                                                                        crate::toast::ToastKind::Success,
+                                                                        format!("Toggled {rule_id}."),
+                                                                    );
+                                                                }
+                                                                Err(err) => crate::toast::push(
+                                                                    crate::toast::ToastKind::Error,
+                                                                    err,
+                                                                ),
+                                                            }
+                                                        }
+                                                    },
+                                                    if enabled { "Disable" } else { "Enable" }
+                                                }
+                                                Button {
+                                                    kind: ButtonKind::Danger,
+                                                    onclick: {
+                                                        let rule_id = rule_id.clone();
+                                                        move |_| {
+                                                            let mut rules = crate::services::parse_rules_json(&webhook_rules())
+                                                                .unwrap_or_default();
+                                                            if idx < rules.len() {
+                                                                rules.remove(idx);
+                                                            }
+                                                            match crate::services::persist_webhook_rules(
+                                                                &state().db,
+                                                                &rules,
+                                                            ) {
+                                                                Ok(stored) => {
+                                                                    webhook_rules.set(stored);
+                                                                    webhook_rules_note.set(String::new());
+                                                                    crate::toast::push(
+                                                                        crate::toast::ToastKind::Success,
+                                                                        format!("Deleted {rule_id}."),
+                                                                    );
+                                                                }
+                                                                Err(err) => crate::toast::push(
+                                                                    crate::toast::ToastKind::Error,
+                                                                    err,
+                                                                ),
+                                                            }
+                                                        }
+                                                    },
+                                                    "Delete"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: move |_| {
+                                    let def = crate::services::default_rules_json();
+                                    let _ = state().db.set_setting("webhook_rules", &def);
+                                    webhook_rules.set(def);
+                                    webhook_rules_note.set(String::new());
+                                    crate::services::bump_webhook_config();
+                                    crate::toast::push(
+                                        crate::toast::ToastKind::Success,
+                                        "Restored default hash-command connection (set a URL to enable).",
+                                    );
+                                },
+                                "Reset to default connection"
+                            }
+                        }
+
+                        div { class: "mt-4 flex flex-col gap-2 border-t border-border/60 pt-4",
+                            label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "HMAC signing (optional, all connections)" }
+                            p { class: "text-xs text-muted-foreground",
+                                "When set, every webhook POST includes X-Metis-Signature: sha256=… over the raw body so receivers can verify it came from this HQ. Stored in data/webhook.hmac (0600) and HQ backups — not shown automatically after restart."
+                            }
+                            if !webhook_secret_reveal().is_empty() {
+                                TextInput {
+                                    value: webhook_secret_reveal(),
+                                    placeholder: "".to_string(),
+                                    oninput: move |_| {},
+                                }
+                            } else if webhook_has_secret {
+                                p { class: "text-sm text-foreground",
+                                    "Secret is saved on disk. Use Reveal or Copy to read it."
+                                }
+                            } else {
+                                p { class: "text-sm text-muted-foreground",
+                                    "No secret — POSTs are unsigned."
+                                }
+                            }
+                            div { class: "flex flex-wrap gap-2",
+                                if webhook_has_secret && webhook_secret_reveal().is_empty() {
+                                    Button {
+                                        kind: ButtonKind::Ghost,
+                                        onclick: move |_| {
+                                            let secret = crate::services::load_webhook_secret(
+                                                &crate::data_dir(),
+                                            );
+                                            if secret.is_empty() {
+                                                crate::toast::push(
+                                                    crate::toast::ToastKind::Error,
+                                                    "Could not read webhook.hmac.",
+                                                );
+                                            } else {
+                                                webhook_secret_reveal.set(secret);
+                                            }
+                                        },
+                                        "Reveal secret"
+                                    }
+                                }
+                                if !webhook_secret_reveal().is_empty() {
+                                    Button {
+                                        kind: ButtonKind::Ghost,
+                                        onclick: move |_| webhook_secret_reveal.set(String::new()),
+                                        "Hide"
+                                    }
+                                }
+                                Button {
+                                    kind: ButtonKind::Ghost,
+                                    onclick: move |_| {
+                                        let secret = crate::services::generate_webhook_secret();
+                                        match crate::services::save_webhook_secret(
+                                            &crate::data_dir(),
+                                            &secret,
+                                        ) {
+                                            Ok(()) => {
+                                                webhook_secret_reveal.set(secret);
+                                                let _ = state().db.audit(
+                                                    "webhook_secret_rotate",
+                                                    "",
+                                                    "",
+                                                );
+                                                crate::toast::push(
+                                                    crate::toast::ToastKind::Success,
+                                                    "Webhook HMAC secret saved to data/webhook.hmac.",
+                                                );
+                                            }
+                                            Err(err) => crate::toast::push(
+                                                crate::toast::ToastKind::Error,
+                                                err,
+                                            ),
+                                        }
+                                    },
+                                    if webhook_has_secret {
+                                        "Rotate secret"
+                                    } else {
+                                        "Generate secret"
+                                    }
+                                }
+                                Button {
+                                    kind: ButtonKind::Ghost,
+                                    onclick: move |_| {
+                                        let secret = if !webhook_secret_reveal().is_empty() {
+                                            webhook_secret_reveal()
+                                        } else {
+                                            crate::services::load_webhook_secret(&crate::data_dir())
+                                        };
+                                        if secret.is_empty() {
+                                            crate::toast::push(
+                                                crate::toast::ToastKind::Error,
+                                                "No secret to copy.",
+                                            );
+                                        } else {
+                                            copy_text_to_clipboard(&secret);
+                                            crate::toast::push(
+                                                crate::toast::ToastKind::Success,
+                                                "Webhook secret copied.",
+                                            );
+                                        }
+                                    },
+                                    "Copy secret"
+                                }
+                                if webhook_has_secret || !webhook_secret_reveal().is_empty() {
+                                    Button {
+                                        kind: ButtonKind::Danger,
+                                        onclick: move |_| {
+                                            crate::services::clear_webhook_secret(&crate::data_dir());
+                                            webhook_secret_reveal.set(String::new());
+                                            let _ = state().db.audit("webhook_secret_clear", "", "");
+                                            crate::toast::push(
+                                                crate::toast::ToastKind::Success,
+                                                "Webhook HMAC secret cleared.",
+                                            );
+                                        },
+                                        "Clear secret"
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Dialog {
+                        open: webhook_wizard().is_some(),
+                        wide: true,
+                        title: if webhook_wizard().as_ref().and_then(|(i, _)| *i).is_some() {
+                            "Edit connection".to_string()
+                        } else {
+                            "Add connection".to_string()
+                        },
+                        on_close: move |_| {
+                            webhook_wizard.set(None);
+                            webhook_wizard_tab.set(WebhookWizardTab::Detection);
+                            webhook_wizard_json.set(String::new());
+                            webhook_wizard_json_note.set(String::new());
+                        },
+                        {
+                            let draft = webhook_wizard().map(|(_, r)| r);
+                            let edit_idx = webhook_wizard().and_then(|(i, _)| i);
+                            let tab = webhook_wizard_tab();
+                            if let Some(draft) = draft {
+                                let kind_channel = draft
+                                    .kinds
+                                    .iter()
+                                    .any(|k| k.eq_ignore_ascii_case("channel"));
+                                let kind_direct = draft
+                                    .kinds
+                                    .iter()
+                                    .any(|k| k.eq_ignore_ascii_case("direct"));
+                                let payload_mode =
+                                    crate::services::normalize_payload_mode(&draft.payload_mode)
+                                        .to_string();
+                                let known_channels: Vec<String> = state()
+                                    .db
+                                    .list_channels()
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .map(|c| c.name)
+                                    .filter(|n| !n.trim().is_empty())
+                                    .collect();
+                                let channel_select = {
+                                    let ch = &draft.channels;
+                                    if ch.is_empty()
+                                        || ch.iter().any(|c| c.trim() == "*")
+                                    {
+                                        "*".to_string()
+                                    } else if ch.len() == 1 {
+                                        ch[0].clone()
+                                    } else {
+                                        // Multi-name legacy: show first known match, else first entry.
+                                        ch.iter()
+                                            .find(|c| {
+                                                known_channels.iter().any(|k| {
+                                                    k.eq_ignore_ascii_case(c.trim())
+                                                })
+                                            })
+                                            .cloned()
+                                            .unwrap_or_else(|| ch[0].clone())
+                                    }
+                                };
+                                let enrollment_preset = {
+                                    let e = &draft.enrollment;
+                                    if e.iter().any(|x| x == "*" || x.eq_ignore_ascii_case("any")) {
+                                        "any"
+                                    } else if e.iter().any(|x| x.eq_ignore_ascii_case("pending"))
+                                        && e.iter().any(|x| x.eq_ignore_ascii_case("enrolled"))
+                                    {
+                                        "enrolled_pending"
+                                    } else if e.len() == 1 && e[0].eq_ignore_ascii_case("heard") {
+                                        "heard"
+                                    } else {
+                                        // Default / unknown free-text → enrolled only
+                                        "enrolled"
+                                    }
+                                };
+                                let roster_for_allow: Vec<(String, String, String)> = state()
+                                    .db
+                                    .list_nodes()
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .filter(|n| n.enrollment != Enrollment::Hq)
+                                    .map(|n| {
+                                        let label = if n.name.trim().is_empty() {
+                                            n.prefix.clone()
+                                        } else {
+                                            n.name.clone()
+                                        };
+                                        let short = if n.prefix.trim().is_empty() {
+                                            n.pubkey.chars().take(12).collect::<String>()
+                                        } else {
+                                            n.prefix.clone()
+                                        };
+                                        (n.pubkey, label, short)
+                                    })
+                                    .collect();
+                                let plain_headers: Vec<(usize, crate::services::WebhookHeader)> =
+                                    draft
+                                        .headers
+                                        .iter()
+                                        .cloned()
+                                        .enumerate()
+                                        .filter(|(_, h)| !h.secret)
+                                        .collect();
+                                let secret_headers: Vec<(usize, crate::services::WebhookHeader)> =
+                                    draft
+                                        .headers
+                                        .iter()
+                                        .cloned()
+                                        .enumerate()
+                                        .filter(|(_, h)| h.secret)
+                                        .collect();
+                                rsx! {
+                                    div { class: "flex min-h-0 flex-1 flex-col gap-3",
+                                        div { class: "settings-subtabs shrink-0",
+                                            button {
+                                                r#type: "button",
+                                                class: if tab == WebhookWizardTab::Detection {
+                                                    "settings-subtab settings-subtab-active"
+                                                } else {
+                                                    "settings-subtab"
+                                                },
+                                                onclick: move |_| {
+                                                    if webhook_wizard_tab() == WebhookWizardTab::Raw {
+                                                        // Draft parse only — full checks run on Save.
+                                                        match crate::services::parse_rule_json_draft(
+                                                            &webhook_wizard_json(),
+                                                        ) {
+                                                            Ok(rule) => {
+                                                                webhook_wizard.with_mut(|w| {
+                                                                    if let Some(slot) = w.as_mut() {
+                                                                        slot.1 = rule;
+                                                                    }
+                                                                });
+                                                                webhook_wizard_json_note.set(String::new());
+                                                                webhook_wizard_tab
+                                                                    .set(WebhookWizardTab::Detection);
+                                                            }
+                                                            Err(err) => {
+                                                                webhook_wizard_json_note.set(err.clone());
+                                                                crate::toast::push(
+                                                                    crate::toast::ToastKind::Error,
+                                                                    err,
+                                                                );
+                                                            }
+                                                        }
+                                                    } else {
+                                                        webhook_wizard_tab
+                                                            .set(WebhookWizardTab::Detection);
+                                                    }
+                                                },
+                                                "Detection"
+                                            }
+                                            button {
+                                                r#type: "button",
+                                                class: if tab == WebhookWizardTab::Payload {
+                                                    "settings-subtab settings-subtab-active"
+                                                } else {
+                                                    "settings-subtab"
+                                                },
+                                                onclick: move |_| {
+                                                    if webhook_wizard_tab() == WebhookWizardTab::Raw {
+                                                        match crate::services::parse_rule_json_draft(
+                                                            &webhook_wizard_json(),
+                                                        ) {
+                                                            Ok(rule) => {
+                                                                webhook_wizard.with_mut(|w| {
+                                                                    if let Some(slot) = w.as_mut() {
+                                                                        slot.1 = rule;
+                                                                    }
+                                                                });
+                                                                webhook_wizard_json_note.set(String::new());
+                                                                webhook_wizard_tab
+                                                                    .set(WebhookWizardTab::Payload);
+                                                            }
+                                                            Err(err) => {
+                                                                webhook_wizard_json_note.set(err.clone());
+                                                                crate::toast::push(
+                                                                    crate::toast::ToastKind::Error,
+                                                                    err,
+                                                                );
+                                                            }
+                                                        }
+                                                    } else {
+                                                        webhook_wizard_tab.set(WebhookWizardTab::Payload);
+                                                    }
+                                                },
+                                                "Payload"
+                                            }
+                                            button {
+                                                r#type: "button",
+                                                class: if tab == WebhookWizardTab::Raw {
+                                                    "settings-subtab settings-subtab-active"
+                                                } else {
+                                                    "settings-subtab"
+                                                },
+                                                onclick: move |_| {
+                                                    if let Some((_, rule)) = webhook_wizard() {
+                                                        match serde_json::to_string_pretty(&rule) {
+                                                            Ok(raw) => {
+                                                                webhook_wizard_json.set(raw);
+                                                                webhook_wizard_json_note.set(String::new());
+                                                                webhook_wizard_tab
+                                                                    .set(WebhookWizardTab::Raw);
+                                                            }
+                                                            Err(err) => crate::toast::push(
+                                                                crate::toast::ToastKind::Error,
+                                                                err.to_string(),
+                                                            ),
+                                                        }
+                                                    }
+                                                },
+                                                "Raw JSON"
+                                            }
+                                        }
+
+                                        div { class: "webhook-wizard-scroll",
+                                            if tab == WebhookWizardTab::Detection {
+                                                div { class: "flex flex-col gap-3",
+                                                    p { class: "text-sm text-muted-foreground",
+                                                        "What mesh traffic should fire this connection."
+                                                    }
+                                                    div { class: "grid gap-3 sm:grid-cols-2",
+                                                        div { class: "flex flex-col gap-1",
+                                                            label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Name" }
+                                                            TextInput {
+                                                                value: draft.name.clone(),
+                                                                placeholder: "Hash commands".to_string(),
+                                                                oninput: move |event: FormEvent| {
+                                                                    webhook_wizard.with_mut(|w| {
+                                                                        if let Some((_, r)) = w.as_mut() {
+                                                                            r.name = event.value();
+                                                                            if edit_idx.is_none() {
+                                                                                r.id = crate::services::slug_rule_id(
+                                                                                    &r.name,
+                                                                                );
+                                                                            }
+                                                                        }
+                                                                    });
+                                                                },
+                                                            }
+                                                        }
+                                                        div { class: "flex flex-col gap-1",
+                                                            label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Id" }
+                                                            TextInput {
+                                                                value: draft.id.clone(),
+                                                                placeholder: "hash-cmds".to_string(),
+                                                                oninput: move |event: FormEvent| {
+                                                                    webhook_wizard.with_mut(|w| {
+                                                                        if let Some((_, r)) = w.as_mut() {
+                                                                            r.id = event.value().trim().to_string();
+                                                                        }
+                                                                    });
+                                                                },
+                                                            }
+                                                        }
+                                                    }
+                                                    ToggleSwitch {
+                                                        checked: draft.enabled,
+                                                        label: "Connection enabled".to_string(),
+                                                        onchange: move |next| {
+                                                            webhook_wizard.with_mut(|w| {
+                                                                if let Some((_, r)) = w.as_mut() {
+                                                                    r.enabled = next;
+                                                                }
+                                                            });
+                                                        }
+                                                    }
+                                                    div { class: "flex flex-col gap-1",
+                                                        label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Message kinds" }
+                                                        div { class: "flex flex-wrap gap-3",
+                                                            label { class: "flex items-center gap-2 text-sm",
+                                                                input {
+                                                                    r#type: "checkbox",
+                                                                    checked: kind_channel,
+                                                                    onchange: move |_| {
+                                                                        webhook_wizard.with_mut(|w| {
+                                                                            if let Some((_, r)) = w.as_mut() {
+                                                                                let has = r.kinds.iter().any(|k| {
+                                                                                    k.eq_ignore_ascii_case("channel")
+                                                                                });
+                                                                                if has {
+                                                                                    r.kinds.retain(|k| {
+                                                                                        !k.eq_ignore_ascii_case("channel")
+                                                                                    });
+                                                                                } else {
+                                                                                    r.kinds.push("channel".into());
+                                                                                }
+                                                                            }
+                                                                        });
+                                                                    },
+                                                                }
+                                                                "Channel"
+                                                            }
+                                                            label { class: "flex items-center gap-2 text-sm",
+                                                                input {
+                                                                    r#type: "checkbox",
+                                                                    checked: kind_direct,
+                                                                    onchange: move |_| {
+                                                                        webhook_wizard.with_mut(|w| {
+                                                                            if let Some((_, r)) = w.as_mut() {
+                                                                                let has = r.kinds.iter().any(|k| {
+                                                                                    k.eq_ignore_ascii_case("direct")
+                                                                                });
+                                                                                if has {
+                                                                                    r.kinds.retain(|k| {
+                                                                                        !k.eq_ignore_ascii_case("direct")
+                                                                                    });
+                                                                                } else {
+                                                                                    r.kinds.push("direct".into());
+                                                                                }
+                                                                            }
+                                                                        });
+                                                                    },
+                                                                }
+                                                                "Direct message"
+                                                            }
+                                                        }
+                                                    }
+                                                    if kind_channel {
+                                                        div { class: "flex flex-col gap-1",
+                                                            label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Channel" }
+                                                            SelectInput {
+                                                                id: "webhook-conn-channel".to_string(),
+                                                                value: channel_select.clone(),
+                                                                onchange: move |event: FormEvent| {
+                                                                    let v = event.value();
+                                                                    webhook_wizard.with_mut(|w| {
+                                                                        if let Some((_, r)) = w.as_mut() {
+                                                                            r.channels = if v.trim() == "*"
+                                                                                || v.trim().is_empty()
+                                                                            {
+                                                                                vec!["*".into()]
+                                                                            } else {
+                                                                                vec![v]
+                                                                            };
+                                                                        }
+                                                                    });
+                                                                },
+                                                                option { value: "*", "Any channel" }
+                                                                for name in known_channels.iter().cloned() {
+                                                                    option {
+                                                                        value: "{name}",
+                                                                        "{name}"
+                                                                    }
+                                                                }
+                                                                // Keep a saved name visible even if it is no longer on the radio.
+                                                                if channel_select != "*"
+                                                                    && !known_channels.iter().any(|k| {
+                                                                        k.eq_ignore_ascii_case(
+                                                                            &channel_select,
+                                                                        )
+                                                                    })
+                                                                {
+                                                                    option {
+                                                                        value: "{channel_select}",
+                                                                        "{channel_select} (not on radio)"
+                                                                    }
+                                                                }
+                                                            }
+                                                            p { class: "text-[0.7rem] text-muted-foreground",
+                                                                if known_channels.is_empty() {
+                                                                    "No channels in HQ yet — create/join them under Messages first. Applies to channel messages only."
+                                                                } else if kind_direct {
+                                                                    "Applies to channel messages only. Direct messages ignore this filter."
+                                                                } else {
+                                                                    "Pick a headquarters channel, or Any."
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    div { class: "flex flex-col gap-1",
+                                                        label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Enrollment" }
+                                                        SelectInput {
+                                                            id: "webhook-rule-enrollment".to_string(),
+                                                            value: enrollment_preset.to_string(),
+                                                            onchange: move |event: FormEvent| {
+                                                                let v = event.value();
+                                                                webhook_wizard.with_mut(|w| {
+                                                                    if let Some((_, r)) = w.as_mut() {
+                                                                        r.enrollment = match v.as_str() {
+                                                                            "any" => vec!["any".into()],
+                                                                            "heard" => vec!["heard".into()],
+                                                                            "enrolled_pending" => {
+                                                                                vec!["enrolled".into(), "pending".into()]
+                                                                            }
+                                                                            _ => vec!["enrolled".into()],
+                                                                        };
+                                                                    }
+                                                                });
+                                                            },
+                                                            option { value: "enrolled", "Enrolled only (recommended)" }
+                                                            option { value: "enrolled_pending", "Enrolled or pending" }
+                                                            option { value: "heard", "Heard only" }
+                                                            option { value: "any", "Any enrollment" }
+                                                        }
+                                                        p { class: "text-[0.7rem] text-muted-foreground",
+                                                            "Who may trigger this connection by enrollment. Narrow further with Allowed senders below."
+                                                        }
+                                                    }
+                                                    div { class: "flex flex-col gap-2",
+                                                        label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Allowed senders (optional)" }
+                                                        p { class: "text-[0.7rem] text-muted-foreground",
+                                                            "Empty = any sender that passes enrollment. Otherwise the mesh pubkey (or hex prefix) must match a listed contact id."
+                                                        }
+                                                        div { class: "flex flex-wrap items-end gap-2",
+                                                            div { class: "min-w-[12rem] flex-1 flex flex-col gap-1",
+                                                                SelectInput {
+                                                                    id: "webhook-allowed-pick".to_string(),
+                                                                    value: webhook_allowed_pick(),
+                                                                    onchange: move |event: FormEvent| {
+                                                                        webhook_allowed_pick.set(event.value());
+                                                                    },
+                                                                    option { value: "", "Pick a contact…" }
+                                                                    for (pubkey, label, short) in roster_for_allow.iter() {
+                                                                        option {
+                                                                            value: "{pubkey}",
+                                                                            "{label} · {short}"
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            Button {
+                                                                kind: ButtonKind::Ghost,
+                                                                onclick: move |_| {
+                                                                    let pk = webhook_allowed_pick();
+                                                                    let id = crate::services::normalize_sender_id(&pk);
+                                                                    if id.is_empty() {
+                                                                        crate::toast::push(
+                                                                            crate::toast::ToastKind::Error,
+                                                                            "Pick a contact first.",
+                                                                        );
+                                                                        return;
+                                                                    }
+                                                                    webhook_wizard.with_mut(|w| {
+                                                                        if let Some((_, r)) = w.as_mut() {
+                                                                            if !r.allowed_senders.iter().any(|s| {
+                                                                                crate::services::normalize_sender_id(s) == id
+                                                                            }) {
+                                                                                r.allowed_senders.push(id);
+                                                                            }
+                                                                        }
+                                                                    });
+                                                                    webhook_allowed_pick.set(String::new());
+                                                                },
+                                                                "Add contact"
+                                                            }
+                                                        }
+                                                        div { class: "flex flex-wrap items-end gap-2",
+                                                            div { class: "min-w-[12rem] flex-1 flex flex-col gap-1",
+                                                                TextInput {
+                                                                    value: webhook_allowed_manual(),
+                                                                    placeholder: "Paste pubkey or hex prefix".to_string(),
+                                                                    oninput: move |event: FormEvent| {
+                                                                        webhook_allowed_manual.set(event.value());
+                                                                    },
+                                                                }
+                                                            }
+                                                            Button {
+                                                                kind: ButtonKind::Ghost,
+                                                                onclick: move |_| {
+                                                                    let id = crate::services::normalize_sender_id(
+                                                                        &webhook_allowed_manual(),
+                                                                    );
+                                                                    if id.is_empty()
+                                                                        || !id.chars().all(|c| c.is_ascii_hexdigit())
+                                                                    {
+                                                                        crate::toast::push(
+                                                                            crate::toast::ToastKind::Error,
+                                                                            "Enter a hex pubkey or prefix.",
+                                                                        );
+                                                                        return;
+                                                                    }
+                                                                    if id.len() > 64 {
+                                                                        crate::toast::push(
+                                                                            crate::toast::ToastKind::Error,
+                                                                            "Sender id is too long.",
+                                                                        );
+                                                                        return;
+                                                                    }
+                                                                    webhook_wizard.with_mut(|w| {
+                                                                        if let Some((_, r)) = w.as_mut() {
+                                                                            if !r.allowed_senders.iter().any(|s| {
+                                                                                crate::services::normalize_sender_id(s) == id
+                                                                            }) {
+                                                                                r.allowed_senders.push(id);
+                                                                            }
+                                                                        }
+                                                                    });
+                                                                    webhook_allowed_manual.set(String::new());
+                                                                },
+                                                                "Add id"
+                                                            }
+                                                        }
+                                                        if draft.allowed_senders.is_empty() {
+                                                            p { class: "text-[0.7rem] text-muted-foreground", "No sender allowlist — enrollment filter only." }
+                                                        } else {
+                                                            ul { class: "flex flex-col gap-1",
+                                                                for (si, sid) in draft.allowed_senders.iter().cloned().enumerate() {
+                                                                    {
+                                                                        let short: String = sid.chars().take(16).collect();
+                                                                        let label = roster_for_allow
+                                                                            .iter()
+                                                                            .find(|(pk, _, _)| {
+                                                                                crate::services::normalize_sender_id(pk)
+                                                                                    == crate::services::normalize_sender_id(&sid)
+                                                                                    || crate::services::normalize_sender_id(pk)
+                                                                                        .starts_with(&crate::services::normalize_sender_id(&sid))
+                                                                            })
+                                                                            .map(|(_, name, _)| name.clone())
+                                                                            .unwrap_or_else(|| {
+                                                                                if sid.len() > 16 {
+                                                                                    format!("{short}…")
+                                                                                } else {
+                                                                                    sid.clone()
+                                                                                }
+                                                                            });
+                                                                        rsx! {
+                                                                            li { class: "flex items-center justify-between gap-2 rounded-md border border-border/50 bg-card/40 px-2 py-1 text-xs",
+                                                                                span { class: "min-w-0 truncate font-mono text-foreground", title: "{sid}", "{label}" }
+                                                                                Button {
+                                                                                    kind: ButtonKind::Ghost,
+                                                                                    onclick: move |_| {
+                                                                                        webhook_wizard.with_mut(|w| {
+                                                                                            if let Some((_, r)) = w.as_mut() {
+                                                                                                if si < r.allowed_senders.len() {
+                                                                                                    r.allowed_senders.remove(si);
+                                                                                                }
+                                                                                            }
+                                                                                        });
+                                                                                    },
+                                                                                    "Remove"
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    div { class: "flex flex-col gap-1",
+                                                        label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Text prefix" }
+                                                        TextInput {
+                                                            value: draft.text_prefix.clone(),
+                                                            placeholder: "#".to_string(),
+                                                            oninput: move |event: FormEvent| {
+                                                                webhook_wizard.with_mut(|w| {
+                                                                    if let Some((_, r)) = w.as_mut() {
+                                                                        r.text_prefix = event.value();
+                                                                    }
+                                                                });
+                                                            },
+                                                        }
+                                                        p { class: "text-[0.7rem] text-muted-foreground",
+                                                            "Empty matches any text. Use # for MeshCore-style commands."
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            if tab == WebhookWizardTab::Payload {
+                                                div { class: "flex flex-col gap-3",
+                                                    div { class: "flex flex-col gap-1",
+                                                        label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "POST URL" }
+                                                        TextInput {
+                                                            value: draft.url.clone(),
+                                                            placeholder: "http://127.0.0.1:1880/hq-event".to_string(),
+                                                            oninput: move |event: FormEvent| {
+                                                                webhook_wizard.with_mut(|w| {
+                                                                    if let Some((_, r)) = w.as_mut() {
+                                                                        r.url = event.value().trim().to_string();
+                                                                    }
+                                                                });
+                                                            },
+                                                        }
+                                                        p { class: "text-[0.7rem] text-muted-foreground",
+                                                            "Required to enable this connection. http:// or https:// only."
+                                                        }
+                                                    }
+                                                    div { class: "flex flex-col gap-1",
+                                                        label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "What to POST" }
+                                                        SelectInput {
+                                                            id: "webhook-rule-payload".to_string(),
+                                                            value: payload_mode.clone(),
+                                                            onchange: move |event: FormEvent| {
+                                                                let v = crate::services::normalize_payload_mode(
+                                                                    &event.value(),
+                                                                )
+                                                                .to_string();
+                                                                webhook_wizard.with_mut(|w| {
+                                                                    if let Some((_, r)) = w.as_mut() {
+                                                                        if v == "custom"
+                                                                            && r.payload_template
+                                                                                == crate::services::default_payload_template()
+                                                                        {
+                                                                            r.payload_template.clear();
+                                                                        }
+                                                                        r.payload_mode = v;
+                                                                    }
+                                                                });
+                                                            },
+                                                            option { value: "full", "Full event (message.received)" }
+                                                            option { value: "text", "Message text only" }
+                                                            option { value: "command", "Command (strip text prefix)" }
+                                                            option { value: "custom", "Custom body (fields below)" }
+                                                        }
+                                                    }
+                                                    if payload_mode != "custom" {
+                                                        div { class: "webhook-kv-section",
+                                                            p { class: "text-sm text-foreground",
+                                                                match payload_mode.as_str() {
+                                                                    "text" => "Sends {\"text\": \"…\"} with the mesh message.",
+                                                                    "command" => "Sends the text after the Detection prefix, plus from/rule metadata.",
+                                                                    _ => "Sends the full HQ message.received envelope.",
+                                                                }
+                                                            }
+                                                        }
+                                                    } else {
+                                                        div { class: "webhook-kv-section",
+                                                            div { class: "webhook-kv-head",
+                                                                span { class: "webhook-kv-title", "Body fields" }
+                                                                button {
+                                                                    r#type: "button",
+                                                                    class: "text-sm text-sky-300 hover:underline",
+                                                                    onclick: move |_| {
+                                                                        webhook_wizard.with_mut(|w| {
+                                                                            if let Some((_, r)) = w.as_mut() {
+                                                                                if r.fields.len() < 16 {
+                                                                                    r.fields.push(
+                                                                                        crate::services::WebhookField {
+                                                                                            key: String::new(),
+                                                                                            value: String::new(),
+                                                                                        },
+                                                                                    );
+                                                                                }
+                                                                            }
+                                                                        });
+                                                                    },
+                                                                    "+ Add"
+                                                                }
+                                                            }
+                                                            p { class: "webhook-kv-hint",
+                                                                "Name → value. Click a HQ token to add a field from live mesh RX."
+                                                            }
+                                                            div { class: "webhook-token-list",
+                                                                for (token, key, label) in crate::services::webhook_hq_tokens() {
+                                                                    {
+                                                                        let token = *token;
+                                                                        let key = *key;
+                                                                        let label = *label;
+                                                                        rsx! {
+                                                                            button {
+                                                                                r#type: "button",
+                                                                                class: "webhook-token-chip",
+                                                                                title: "{label} → {token}",
+                                                                                onclick: move |_| {
+                                                                                    webhook_wizard.with_mut(|w| {
+                                                                                        if let Some((_, r)) = w.as_mut() {
+                                                                                            if r.fields.len() >= 16 {
+                                                                                                return;
+                                                                                            }
+                                                                                            if r.fields.iter().any(|f| f.key == key) {
+                                                                                                return;
+                                                                                            }
+                                                                                            r.fields.push(
+                                                                                                crate::services::WebhookField {
+                                                                                                    key: key.to_string(),
+                                                                                                    value: token.to_string(),
+                                                                                                },
+                                                                                            );
+                                                                                        }
+                                                                                    });
+                                                                                },
+                                                                                "{token}"
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            if !draft.fields.is_empty() {
+                                                                div { class: "webhook-kv-row text-[0.65rem] uppercase tracking-[0.12em] text-muted-foreground",
+                                                                    span { class: "min-w-0 flex-1", "Name" }
+                                                                    span { class: "shrink-0 w-4" }
+                                                                    span { class: "min-w-0 flex-1", "Value" }
+                                                                    span { class: "w-9" }
+                                                                }
+                                                            }
+                                                            if draft.fields.is_empty() {
+                                                                p { class: "text-sm text-muted-foreground", "No fields yet — click a token or Add." }
+                                                            }
+                                                            for (f_idx, field) in draft.fields.iter().enumerate() {
+                                                                div {
+                                                                    key: "wh-fld-{f_idx}",
+                                                                    class: "webhook-kv-row",
+                                                                    div { class: "min-w-0",
+                                                                        TextInput {
+                                                                            value: field.key.clone(),
+                                                                            placeholder: "command".to_string(),
+                                                                            oninput: move |event: FormEvent| {
+                                                                                webhook_wizard.with_mut(|w| {
+                                                                                    if let Some((_, r)) = w.as_mut() {
+                                                                                        if let Some(f) = r.fields.get_mut(f_idx) {
+                                                                                            f.key = event.value();
+                                                                                        }
+                                                                                    }
+                                                                                });
+                                                                            },
+                                                                        }
+                                                                    }
+                                                                    span { class: "shrink-0 text-muted-foreground", "→" }
+                                                                    div { class: "min-w-0",
+                                                                        TextInput {
+                                                                            value: field.value.clone(),
+                                                                            placeholder: "{{command}}".to_string(),
+                                                                            oninput: move |event: FormEvent| {
+                                                                                webhook_wizard.with_mut(|w| {
+                                                                                    if let Some((_, r)) = w.as_mut() {
+                                                                                        if let Some(f) = r.fields.get_mut(f_idx) {
+                                                                                            f.value = event.value();
+                                                                                        }
+                                                                                    }
+                                                                                });
+                                                                            },
+                                                                        }
+                                                                    }
+                                                                    button {
+                                                                        r#type: "button",
+                                                                        class: "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-card hover:text-foreground",
+                                                                        title: "Remove",
+                                                                        onclick: move |_| {
+                                                                            webhook_wizard.with_mut(|w| {
+                                                                                if let Some((_, r)) = w.as_mut() {
+                                                                                    if f_idx < r.fields.len() {
+                                                                                        r.fields.remove(f_idx);
+                                                                                    }
+                                                                                }
+                                                                            });
+                                                                        },
+                                                                        Icon { name: IconName::Trash, size: 16 }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+
+                                                        div { class: "webhook-kv-section",
+                                                            div { class: "webhook-kv-head",
+                                                                span { class: "webhook-kv-title", "HTTP headers" }
+                                                                button {
+                                                                    r#type: "button",
+                                                                    class: "text-sm text-sky-300 hover:underline",
+                                                                    onclick: move |_| {
+                                                                        webhook_wizard.with_mut(|w| {
+                                                                            if let Some((_, r)) = w.as_mut() {
+                                                                                if r.headers.len() < 16 {
+                                                                                    r.headers.push(
+                                                                                        crate::services::WebhookHeader {
+                                                                                            key: String::new(),
+                                                                                            value: String::new(),
+                                                                                            secret: false,
+                                                                                        },
+                                                                                    );
+                                                                                }
+                                                                            }
+                                                                        });
+                                                                    },
+                                                                    "+ Add"
+                                                                }
+                                                            }
+                                                            for (h_idx, header) in plain_headers {
+                                                                div {
+                                                                    key: "wh-hdr-{h_idx}",
+                                                                    class: "webhook-kv-row",
+                                                                    div { class: "min-w-0",
+                                                                        TextInput {
+                                                                            value: header.key.clone(),
+                                                                            placeholder: "X-Custom-Header".to_string(),
+                                                                            oninput: move |event: FormEvent| {
+                                                                                webhook_wizard.with_mut(|w| {
+                                                                                    if let Some((_, r)) = w.as_mut() {
+                                                                                        if let Some(h) = r.headers.get_mut(h_idx) {
+                                                                                            h.key = event.value();
+                                                                                        }
+                                                                                    }
+                                                                                });
+                                                                            },
+                                                                        }
+                                                                    }
+                                                                    span { class: "shrink-0 text-muted-foreground", "→" }
+                                                                    div { class: "min-w-0",
+                                                                        TextInput {
+                                                                            value: header.value.clone(),
+                                                                            placeholder: "value".to_string(),
+                                                                            oninput: move |event: FormEvent| {
+                                                                                webhook_wizard.with_mut(|w| {
+                                                                                    if let Some((_, r)) = w.as_mut() {
+                                                                                        if let Some(h) = r.headers.get_mut(h_idx) {
+                                                                                            h.value = event.value();
+                                                                                        }
+                                                                                    }
+                                                                                });
+                                                                            },
+                                                                        }
+                                                                    }
+                                                                    button {
+                                                                        r#type: "button",
+                                                                        class: "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-card hover:text-foreground",
+                                                                        title: "Remove",
+                                                                        onclick: move |_| {
+                                                                            webhook_wizard.with_mut(|w| {
+                                                                                if let Some((_, r)) = w.as_mut() {
+                                                                                    if h_idx < r.headers.len() {
+                                                                                        r.headers.remove(h_idx);
+                                                                                    }
+                                                                                }
+                                                                            });
+                                                                        },
+                                                                        Icon { name: IconName::Trash, size: 16 }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+
+                                                        div { class: "webhook-kv-section",
+                                                            div { class: "webhook-kv-head",
+                                                                span { class: "webhook-kv-title", "Secret headers" }
+                                                                button {
+                                                                    r#type: "button",
+                                                                    class: "text-sm text-sky-300 hover:underline",
+                                                                    onclick: move |_| {
+                                                                        webhook_wizard.with_mut(|w| {
+                                                                            if let Some((_, r)) = w.as_mut() {
+                                                                                if r.headers.len() < 16 {
+                                                                                    r.headers.push(
+                                                                                        crate::services::WebhookHeader {
+                                                                                            key: String::new(),
+                                                                                            value: String::new(),
+                                                                                            secret: true,
+                                                                                        },
+                                                                                    );
+                                                                                }
+                                                                            }
+                                                                        });
+                                                                    },
+                                                                    "+ Add"
+                                                                }
+                                                            }
+                                                            p { class: "webhook-kv-hint", "Masked here; stored in connection JSON / backups." }
+                                                            for (h_idx, header) in secret_headers {
+                                                                div {
+                                                                    key: "wh-sec-{h_idx}",
+                                                                    class: "webhook-kv-row",
+                                                                    div { class: "min-w-0",
+                                                                        TextInput {
+                                                                            value: header.key.clone(),
+                                                                            placeholder: "Authorization".to_string(),
+                                                                            oninput: move |event: FormEvent| {
+                                                                                webhook_wizard.with_mut(|w| {
+                                                                                    if let Some((_, r)) = w.as_mut() {
+                                                                                        if let Some(h) = r.headers.get_mut(h_idx) {
+                                                                                            h.key = event.value();
+                                                                                        }
+                                                                                    }
+                                                                                });
+                                                                            },
+                                                                        }
+                                                                    }
+                                                                    span { class: "shrink-0 text-muted-foreground", "→" }
+                                                                    input {
+                                                                        r#type: "password",
+                                                                        class: "h-9 min-w-0 flex-1 rounded-md border border-border bg-card px-3 text-sm text-foreground outline-none",
+                                                                        value: "{header.value}",
+                                                                        placeholder: "secret value",
+                                                                        autocomplete: "new-password",
+                                                                        oninput: move |event: FormEvent| {
+                                                                            webhook_wizard.with_mut(|w| {
+                                                                                if let Some((_, r)) = w.as_mut() {
+                                                                                    if let Some(h) = r.headers.get_mut(h_idx) {
+                                                                                        h.value = event.value();
+                                                                                    }
+                                                                                }
+                                                                            });
+                                                                        },
+                                                                    }
+                                                                    button {
+                                                                        r#type: "button",
+                                                                        class: "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-card hover:text-foreground",
+                                                                        title: "Remove",
+                                                                        onclick: move |_| {
+                                                                            webhook_wizard.with_mut(|w| {
+                                                                                if let Some((_, r)) = w.as_mut() {
+                                                                                    if h_idx < r.headers.len() {
+                                                                                        r.headers.remove(h_idx);
+                                                                                    }
+                                                                                }
+                                                                            });
+                                                                        },
+                                                                        Icon { name: IconName::Trash, size: 16 }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            if tab == WebhookWizardTab::Raw {
+                                                div { class: "flex h-full flex-col gap-2",
+                                                    p { class: "text-sm text-muted-foreground",
+                                                        "Full connection as JSON. Leaving this tab applies the draft; Save runs full checks (URL, custom fields, …)."
+                                                    }
+                                                    textarea {
+                                                        class: "webhook-raw-editor",
+                                                        value: "{webhook_wizard_json}",
+                                                        spellcheck: false,
+                                                        oninput: move |event: FormEvent| {
+                                                            webhook_wizard_json.set(event.value());
+                                                            webhook_wizard_json_note.set(String::new());
+                                                        },
+                                                    }
+                                                    if !webhook_wizard_json_note().is_empty() {
+                                                        p { class: "text-xs text-amber-200", "{webhook_wizard_json_note}" }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        div { class: "flex shrink-0 flex-wrap justify-end gap-2 border-t border-border/60 pt-3",
+                                            Button {
+                                                kind: ButtonKind::Ghost,
+                                                onclick: move |_| {
+                                                    let rule = if webhook_wizard_tab()
+                                                        == WebhookWizardTab::Raw
+                                                    {
+                                                        match crate::services::parse_rule_json_draft(
+                                                            &webhook_wizard_json(),
+                                                        ) {
+                                                            Ok(rule) => rule,
+                                                            Err(err) => {
+                                                                crate::toast::push(
+                                                                    crate::toast::ToastKind::Error,
+                                                                    err,
+                                                                );
+                                                                return;
+                                                            }
+                                                        }
+                                                    } else {
+                                                        let Some((_, rule)) = webhook_wizard() else {
+                                                            return;
+                                                        };
+                                                        rule
+                                                    };
+                                                    match crate::services::enqueue_test_delivery(
+                                                        &state().db,
+                                                        &rule,
+                                                    ) {
+                                                        Ok(()) => crate::toast::push(
+                                                            crate::toast::ToastKind::Success,
+                                                            "Test POST queued.",
+                                                        ),
+                                                        Err(err) => crate::toast::push(
+                                                            crate::toast::ToastKind::Error,
+                                                            err,
+                                                        ),
+                                                    }
+                                                },
+                                                "Send test POST"
+                                            }
+                                            Button {
+                                                kind: ButtonKind::Ghost,
+                                                onclick: move |_| {
+                                                    webhook_wizard.set(None);
+                                                    webhook_wizard_tab.set(WebhookWizardTab::Detection);
+                                                    webhook_wizard_json.set(String::new());
+                                                    webhook_wizard_json_note.set(String::new());
+                                                },
+                                                "Cancel"
+                                            }
+                                            Button {
+                                                onclick: move |_| {
+                                                    let mut rule = if webhook_wizard_tab()
+                                                        == WebhookWizardTab::Raw
+                                                    {
+                                                        match crate::services::parse_rule_json(
+                                                            &webhook_wizard_json(),
+                                                        ) {
+                                                            Ok(rule) => rule,
+                                                            Err(err) => {
+                                                                webhook_wizard_json_note.set(err.clone());
+                                                                crate::toast::push(
+                                                                    crate::toast::ToastKind::Error,
+                                                                    err,
+                                                                );
+                                                                return;
+                                                            }
+                                                        }
+                                                    } else {
+                                                        let Some((_, rule)) = webhook_wizard() else {
+                                                            return;
+                                                        };
+                                                        rule
+                                                    };
+                                                    let idx = webhook_wizard().and_then(|(i, _)| i);
+                                                    if rule.id.trim().is_empty() {
+                                                        rule.id = crate::services::slug_rule_id(&rule.name);
+                                                    }
+                                                    if rule.id.trim().is_empty() {
+                                                        crate::toast::push(
+                                                            crate::toast::ToastKind::Error,
+                                                            "Connection needs an id or name.",
+                                                        );
+                                                        return;
+                                                    }
+                                                    if rule.kinds.is_empty() {
+                                                        rule.kinds =
+                                                            vec!["channel".into(), "direct".into()];
+                                                    }
+                                                    rule.payload_mode =
+                                                        crate::services::normalize_payload_mode(
+                                                            &rule.payload_mode,
+                                                        )
+                                                        .to_string();
+                                                    let mut rules = crate::services::parse_rules_json(
+                                                        &webhook_rules(),
+                                                    )
+                                                    .unwrap_or_default();
+                                                    match idx {
+                                                        Some(i) if i < rules.len() => {
+                                                            rules[i] = rule;
+                                                        }
+                                                        _ => rules.push(rule),
+                                                    }
+                                                    match crate::services::persist_webhook_rules(
+                                                        &state().db,
+                                                        &rules,
+                                                    ) {
+                                                        Ok(stored) => {
+                                                            webhook_rules.set(stored);
+                                                            webhook_enabled.set(
+                                                                crate::services::setting_bool(
+                                                                    &state().db,
+                                                                    "webhook_enabled",
+                                                                    false,
+                                                                ),
+                                                            );
+                                                            webhook_rules_note.set(String::new());
+                                                            webhook_wizard.set(None);
+                                                            webhook_wizard_tab
+                                                                .set(WebhookWizardTab::Detection);
+                                                            webhook_wizard_json.set(String::new());
+                                                            webhook_wizard_json_note.set(String::new());
+                                                            crate::toast::push(
+                                                                crate::toast::ToastKind::Success,
+                                                                "Connection saved.",
+                                                            );
+                                                        }
+                                                        Err(err) => crate::toast::push(
+                                                            crate::toast::ToastKind::Error,
+                                                            err,
+                                                        ),
+                                                    }
+                                                },
+                                                "Save connection"
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                rsx! {}
+                            }
+                        }
+                    }
                         }
                     }
                 }
@@ -12588,12 +14300,14 @@ fn SettingsPage(
                                         crate::toast::push(crate::toast::ToastKind::Error, msg);
                                         return;
                                     }
-                                    let path = crate::backup::default_backup_path(&crate::data_dir());
+                                    let data_dir = crate::data_dir();
+                                    let path = crate::backup::default_backup_path(&data_dir);
                                     match crate::backup::write_backup_file(
                                         &state().db,
                                         &state().secrets,
                                         a.trim(),
                                         &path,
+                                        &data_dir,
                                     ) {
                                         Ok(saved) => {
                                             let _ = state().db.audit(
@@ -16267,6 +17981,7 @@ fn SettingsPage(
                                             &state().db,
                                             &state().secrets,
                                             &payload,
+                                            &crate::data_dir(),
                                         ) {
                                             Ok(()) => {
                                                 let _ = state().db.audit(

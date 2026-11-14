@@ -36,6 +36,10 @@ pub struct BackupPayload {
     pub secrets: BTreeMap<String, String>,
     /// Consistent SQLite snapshot (base64).
     pub db_base64: String,
+    /// Opt-in data-dir files (basename → UTF-8 contents). Older backups omit this.
+    /// Includes webhook HMAC (`webhook.hmac`) so Integrations restore with rules in SQLite.
+    #[serde(default)]
+    pub data_files: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -140,11 +144,43 @@ fn collect_secrets(db: &Db, secrets: &Secrets) -> Result<BTreeMap<String, String
     Ok(map)
 }
 
+/// Small data-dir files that must ride with the SQLite snapshot (settings alone
+/// are not enough — HMAC / similar live as 0600 files next to the DB).
+fn collect_data_files(data_dir: &Path) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    for name in ["webhook.hmac"] {
+        let path = data_dir.join(name);
+        if let Ok(raw) = fs::read_to_string(&path) {
+            let trimmed = raw.trim_end_matches(['\r', '\n']).to_string();
+            if !trimmed.is_empty() {
+                map.insert(name.to_string(), trimmed);
+            }
+        }
+    }
+    map
+}
+
+fn restore_data_files(data_dir: &Path, files: &BTreeMap<String, String>) -> Result<(), BackupError> {
+    for (name, content) in files {
+        match name.as_str() {
+            "webhook.hmac" => {
+                crate::services::save_webhook_secret(data_dir, content)
+                    .map_err(BackupError::Msg)?;
+            }
+            _ => {
+                hq_log!(debug, "backup restore: skip unknown data file {name}");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Build encrypted `.metisbak` bytes from the live HQ database + secrets.
 pub fn create_backup_bytes(
     db: &Db,
     secrets: &Secrets,
     passphrase: &str,
+    data_dir: &Path,
 ) -> Result<Vec<u8>, BackupError> {
     let db_bytes = db
         .sqlite_snapshot_bytes()
@@ -163,6 +199,7 @@ pub fn create_backup_bytes(
         hq_name,
         secrets: collect_secrets(db, secrets)?,
         db_base64: B64.encode(db_bytes),
+        data_files: collect_data_files(data_dir),
     };
     let json = serde_json::to_vec(&payload).map_err(|e| BackupError::Msg(e.to_string()))?;
     encrypt_payload(passphrase, &json)
@@ -173,11 +210,12 @@ pub fn write_backup_file(
     secrets: &Secrets,
     passphrase: &str,
     path: &Path,
+    data_dir: &Path,
 ) -> Result<PathBuf, BackupError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| BackupError::Msg(e.to_string()))?;
     }
-    let bytes = create_backup_bytes(db, secrets, passphrase)?;
+    let bytes = create_backup_bytes(db, secrets, passphrase, data_dir)?;
     fs::write(path, bytes).map_err(|e| BackupError::Msg(e.to_string()))?;
     #[cfg(unix)]
     {
@@ -423,7 +461,7 @@ pub fn maybe_run_scheduled_backup(db: &Db, secrets: &Secrets, data_dir: &Path) {
         return;
     };
     let path = default_backup_path(data_dir);
-    match write_backup_file(db, secrets, &pass, &path) {
+    match write_backup_file(db, secrets, &pass, &path, data_dir) {
         Ok(saved) => {
             let _ = db.set_setting("backup_last_at", &now.to_string());
             let _ = db.audit("backup_scheduled", "", &saved.display().to_string());
@@ -461,11 +499,12 @@ pub fn preview_backup(payload: &BackupPayload) -> Result<BackupPreview, BackupEr
     })
 }
 
-/// Replace live DB contents and re-store channel secrets. Caller should audit.
+/// Replace live DB contents and re-store channel secrets (+ data files). Caller should audit.
 pub fn apply_restore(
     db: &Db,
     secrets: &Secrets,
     payload: &BackupPayload,
+    data_dir: &Path,
 ) -> Result<(), BackupError> {
     let db_bytes = B64
         .decode(payload.db_base64.as_bytes())
@@ -484,6 +523,7 @@ pub fn apply_restore(
             .map_err(|e| BackupError::Msg(e))?;
         let _ = db.set_setting("secret_store", kind.as_str());
     }
+    restore_data_files(data_dir, &payload.data_files)?;
     Ok(())
 }
 
@@ -513,8 +553,8 @@ mod tests {
     #[test]
     fn empty_passphrase_rejected() {
         let (db, secrets, dir) = test_pair();
-        assert!(create_backup_bytes(&db, &secrets, "").is_err());
-        assert!(create_backup_bytes(&db, &secrets, "   ").is_err());
+        assert!(create_backup_bytes(&db, &secrets, "", &dir).is_err());
+        assert!(create_backup_bytes(&db, &secrets, "   ", &dir).is_err());
         assert!(save_schedule_passphrase(&dir, "").is_err());
         assert!(save_schedule_passphrase(&dir, "  ").is_err());
         let _ = fs::remove_dir_all(dir);
@@ -528,8 +568,17 @@ mod tests {
         let _ = db.set_setting("hq_name", "Test HQ");
         // Private channel row for secret inventory (Public occupies slot 0 in defaults).
         let _ = db.create_channel_with_region("BACKUP-TEST", "private", &secrets, None);
+        crate::services::save_webhook_secret(&dir, "test-hmac-secret").unwrap();
+        let _ = db.set_setting("webhook_enabled", "1");
+        let mut wh = crate::services::WebhookRule::default_hash_commands();
+        wh.enabled = true;
+        wh.url = "http://127.0.0.1:9999/hook".into();
+        let _ = db.set_setting(
+            "webhook_rules",
+            &serde_json::to_string_pretty(&[wh]).unwrap(),
+        );
 
-        let bytes = create_backup_bytes(&db, &secrets, "correct horse").unwrap();
+        let bytes = create_backup_bytes(&db, &secrets, "correct horse", &dir).unwrap();
         assert!(bytes.starts_with(MAGIC));
 
         let path = dir.join("t.metisbak");
@@ -543,16 +592,28 @@ mod tests {
             Some(hex::encode(secret).as_str())
         );
         assert!(payload.secrets.contains_key("BACKUP-TEST"));
+        assert_eq!(
+            payload.data_files.get("webhook.hmac").map(String::as_str),
+            Some("test-hmac-secret")
+        );
         let preview = preview_backup(&payload).unwrap();
         assert!(preview.secret_count >= 1);
 
         let (db2, secrets2, dir2) = test_pair();
-        apply_restore(&db2, &secrets2, &payload).unwrap();
+        apply_restore(&db2, &secrets2, &payload, &dir2).unwrap();
         assert_eq!(secrets2.load("METIS-INFO").unwrap(), Some(secret));
         assert_eq!(
             db2.setting("hq_name").unwrap().as_deref(),
             Some("Test HQ")
         );
+        assert_eq!(
+            crate::services::load_webhook_secret(&dir2).as_str(),
+            "test-hmac-secret"
+        );
+        let rules_raw = db2.setting("webhook_rules").unwrap().unwrap_or_default();
+        let rules: Vec<crate::services::WebhookRule> =
+            serde_json::from_str(&rules_raw).unwrap();
+        assert_eq!(rules[0].url, "http://127.0.0.1:9999/hook");
         let _ = fs::remove_dir_all(dir);
         let _ = fs::remove_dir_all(dir2);
     }

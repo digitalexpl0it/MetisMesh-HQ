@@ -146,11 +146,17 @@ pub fn TextInput(
 }
 
 pub const COMPOSE_SPELLCHECK_KEY: &str = "compose_spellcheck";
+pub const MESSAGES_FOLLOW_NEWEST_KEY: &str = "messages_follow_newest";
 
 /// Cached preference — avoid a SQLite read on every compose keystroke.
 static COMPOSE_SPELLCHECK: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(true);
 static COMPOSE_SPELLCHECK_LOADED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+static FOLLOW_NEWEST: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+static FOLLOW_NEWEST_LOADED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// Whether Messages / Broadcast compose should use OS WebView spellcheck.
@@ -172,6 +178,27 @@ pub fn set_compose_spellcheck_enabled(on: bool) {
     crate::services::set_setting_bool(&super::state().db, COMPOSE_SPELLCHECK_KEY, on);
     #[cfg(all(feature = "desktop", target_os = "linux"))]
     crate::enable_linux_webview_spellcheck();
+}
+
+/// When on, live channel/DM traffic always scrolls to the newest message.
+/// When off, follow only if already near the bottom (jump chip otherwise).
+pub fn messages_follow_newest() -> bool {
+    use std::sync::atomic::Ordering;
+    if !FOLLOW_NEWEST_LOADED.load(Ordering::Relaxed) {
+        let on =
+            crate::services::setting_bool(&super::state().db, MESSAGES_FOLLOW_NEWEST_KEY, true);
+        FOLLOW_NEWEST.store(on, Ordering::Relaxed);
+        FOLLOW_NEWEST_LOADED.store(true, Ordering::Relaxed);
+    }
+    FOLLOW_NEWEST.load(Ordering::Relaxed)
+}
+
+/// Persist + cache the Messages “Follow newest” preference.
+pub fn set_messages_follow_newest(on: bool) {
+    use std::sync::atomic::Ordering;
+    FOLLOW_NEWEST.store(on, Ordering::Relaxed);
+    FOLLOW_NEWEST_LOADED.store(true, Ordering::Relaxed);
+    crate::services::set_setting_bool(&super::state().db, MESSAGES_FOLLOW_NEWEST_KEY, on);
 }
 
 /// Channel / DM / Broadcast compose editor with optional OS spellcheck and a
@@ -1677,6 +1704,9 @@ pub fn ConversationAvatar(
     /// Larger circle for thread headers inside the bubble.
     #[props(default = false)]
     large: bool,
+    /// Gold star stamp (top-right) when this person is in Favorites.
+    #[props(default = false)]
+    favorited: bool,
 ) -> Element {
     let emojis = name_avatar_emojis(&label);
     let letter = conversation_avatar_letter(&label);
@@ -1688,23 +1718,56 @@ pub fn ConversationAvatar(
     } else {
         "messages-avatar"
     };
-    if !emojis.is_empty() {
+    let stamp_size = if large {
+        11
+    } else if compact {
+        8
+    } else {
+        9
+    };
+    let wrap_class = if large {
+        "messages-avatar-wrap messages-avatar-wrap-lg"
+    } else if compact {
+        "messages-avatar-wrap messages-avatar-wrap-sm"
+    } else {
+        "messages-avatar-wrap"
+    };
+    let avatar = if !emojis.is_empty() {
         let emoji_class = format!("{size} messages-avatar-emoji");
-        return rsx! {
+        rsx! {
             span {
                 class: "{emoji_class}",
                 title: "{label}",
                 aria_hidden: "true",
                 "{emojis}"
             }
-        };
-    }
+        }
+    } else {
+        rsx! {
+            span {
+                class: "{size} messages-avatar-{tone}",
+                title: "{label}",
+                aria_hidden: "true",
+                "{letter}"
+            }
+        }
+    };
     rsx! {
         span {
-            class: "{size} messages-avatar-{tone}",
-            title: "{label}",
-            aria_hidden: "true",
-            "{letter}"
+            class: "{wrap_class}",
+            title: if favorited {
+                format!("{label} · Favorited")
+            } else {
+                label.clone()
+            },
+            {avatar}
+            if favorited {
+                span {
+                    class: "messages-avatar-fav-stamp",
+                    aria_hidden: "true",
+                    Icon { name: IconName::Star, size: stamp_size }
+                }
+            }
         }
     }
 }

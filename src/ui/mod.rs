@@ -53,8 +53,9 @@ use widgets::{
     BarMixRow, BatteryChart, BatteryPill, BatterySample, Button, ButtonKind, Card, ChartSeries,
     ComposeField, ComposePlusAction, ComposePlusButton, ConversationAvatar, Dialog,
     EmojiPickerButton, LineChart, MeshTextCount, PageHeading, PinSlideDown, PopoverDismissLayer,
-    SelectInput, set_compose_spellcheck_enabled, SlideDownPanel, Sparkline, TextInput, Throbber,
-    ToastHost, ToggleSwitch, COMPOSE_SPELLCHECK_KEY, MESH_TEXT_MAX_BYTES,
+    SelectInput, set_compose_spellcheck_enabled, set_messages_follow_newest, SlideDownPanel,
+    Sparkline, TextInput, Throbber, ToastHost, ToggleSwitch, COMPOSE_SPELLCHECK_KEY,
+    MESH_TEXT_MAX_BYTES, messages_follow_newest,
 };
 pub use widgets::compose_spellcheck_enabled;
 
@@ -142,6 +143,9 @@ const NAV_SEARCH_INDEX: &[NavSearchEntry] = &[
             "chat",
             "unread",
             "channel secret",
+            "Follow newest",
+            "auto scroll",
+            "autoscroll",
         ],
     },
     NavSearchEntry {
@@ -2540,6 +2544,9 @@ enum RosterTab {
     Roster,
 }
 
+/// How many rows to paint before "Load more" on Roster / Contacts tabs.
+const ROSTER_LIST_PAGE: usize = 50;
+
 #[allow(non_snake_case)]
 fn RosterPage() -> Element {
     // Own refresh — do not rely on App shell tick (R2).
@@ -2567,7 +2574,9 @@ fn RosterPage() -> Element {
     let secrets = state().secrets.clone();
     let mut tab = use_signal(|| RosterTab::Contacts);
     let mut query = use_signal(String::new);
-    let mut note = use_signal(String::new);
+    let mut roster_limit = use_signal(|| ROSTER_LIST_PAGE);
+    let mut contacts_limit = use_signal(|| ROSTER_LIST_PAGE);
+    let mut list_query_epoch = use_signal(String::new);
     let mut dm_target = use_signal(|| None::<(String, String)>);
     let mut dm_body = use_signal(String::new);
     let mut invite_target = use_signal(|| None::<(String, String)>);
@@ -2592,6 +2601,12 @@ fn RosterPage() -> Element {
     let unnoticed_count = state().db.count_unnoticed_nodes().unwrap_or(0);
     let heard_only_count = state().db.count_heard_only_nodes().unwrap_or(0);
     let needle = query();
+    // Fresh search resets visible windows so results start from the top page.
+    if list_query_epoch() != needle {
+        list_query_epoch.set(needle.clone());
+        roster_limit.set(ROSTER_LIST_PAGE);
+        contacts_limit.set(ROSTER_LIST_PAGE);
+    }
     let mut ranked: Vec<_> = nodes
         .into_iter()
         .filter_map(|node| {
@@ -2612,6 +2627,8 @@ fn RosterPage() -> Element {
         })
         .collect();
     ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.to_lowercase().cmp(&b.2.to_lowercase())));
+    let roster_total = ranked.len();
+    ranked.truncate(roster_limit().min(roster_total));
     let mut ranked_contacts: Vec<_> = pinned_contacts
         .into_iter()
         .filter_map(|row| {
@@ -2627,6 +2644,8 @@ fn RosterPage() -> Element {
         b.0.cmp(&a.0)
             .then_with(|| a.1.label.to_lowercase().cmp(&b.1.label.to_lowercase()))
     });
+    let contacts_total = ranked_contacts.len();
+    ranked_contacts.truncate(contacts_limit().min(contacts_total));
     let claimed_keys = state()
         .db
         .claimed_pubkey_set()
@@ -2895,7 +2914,7 @@ fn RosterPage() -> Element {
                                 match state().db.mark_all_nodes_noticed() {
                                     Ok(n) => {
                                         confirm_clear_new.set(false);
-                                        note.set(if n == 0 {
+                                        status_note(if n == 0 {
                                             "No NEW badges to clear.".into()
                                         } else {
                                             format!("Cleared NEW on {n} node(s).")
@@ -2903,7 +2922,7 @@ fn RosterPage() -> Element {
                                     }
                                     Err(err) => {
                                         confirm_clear_new.set(false);
-                                        note.set(err.to_string());
+                                        status_note(err.to_string());
                                     }
                                 }
                             },
@@ -2918,7 +2937,7 @@ fn RosterPage() -> Element {
                 on_close: move |_| confirm_prune_heard.set(false),
                 div { class: "flex flex-col gap-3",
                     p { class: "text-sm text-muted-foreground",
-                        "Remove {heard_only_count} heard-only node(s) from the roster? Enrolled, pending, denied, and HQ stay. Tracker, block, and claim rows for removed keys are cleared. Message history is kept (use Settings purge for that)."
+                        "Remove {heard_only_count} heard-only node(s) from the roster? Enrolled, pending, denied, HQ, and claimed infrastructure stay. Tracker/block rows for removed keys are cleared. Message history is kept (use Settings purge for that)."
                     }
                     div { class: "flex justify-end gap-2",
                         Button {
@@ -2933,7 +2952,7 @@ fn RosterPage() -> Element {
                                     Ok(n) => {
                                         confirm_prune_heard.set(false);
                                         details_pubkey.set(None);
-                                        note.set(if n == 0 {
+                                        status_note(if n == 0 {
                                             "No heard-only nodes to remove.".into()
                                         } else {
                                             format!("Removed {n} heard-only node(s).")
@@ -2941,7 +2960,7 @@ fn RosterPage() -> Element {
                                     }
                                     Err(err) => {
                                         confirm_prune_heard.set(false);
-                                        note.set(err.to_string());
+                                        status_note(err.to_string());
                                     }
                                 }
                             },
@@ -2950,9 +2969,6 @@ fn RosterPage() -> Element {
                         }
                     }
                 }
-            }
-            if !note().is_empty() {
-                p { class: "text-xs text-amber-200", "{note}" }
             }
             match tab() {
                 RosterTab::Contacts => rsx! {
@@ -2967,7 +2983,13 @@ fn RosterPage() -> Element {
                                 }
                             }
                             p { class: "text-xs text-muted-foreground",
-                                "{ranked_contacts.len()} contact(s)"
+                                if contacts_total == 0 {
+                                    "0 contacts"
+                                } else if ranked_contacts.len() < contacts_total {
+                                    "{ranked_contacts.len()} of {contacts_total} contacts"
+                                } else {
+                                    "{contacts_total} contact(s)"
+                                }
                             }
                         }
                         p { class: "text-sm text-muted-foreground",
@@ -3013,12 +3035,14 @@ fn RosterPage() -> Element {
                                         let zebra = if row_i % 2 == 1 { " row-zebra" } else { "" };
                                         let in_roster = has_key
                                             && state().db.get_node(&pubkey).ok().flatten().is_some();
+                                        let fav_on = messages_rail::contact_is_favorited(&pubkey);
                                         rsx! {
                                             div { class: "flex flex-wrap items-center justify-between gap-3 px-3 py-2.5{zebra}",
                                                 div { class: "flex min-w-0 flex-1 items-center gap-3",
                                                     ConversationAvatar {
                                                         label: label.clone(),
                                                         seed: pubkey.clone(),
+                                                        favorited: fav_on,
                                                     }
                                                     div { class: "min-w-0",
                                                         div { class: "mb-0.5 flex flex-wrap items-center gap-2",
@@ -3065,7 +3089,6 @@ fn RosterPage() -> Element {
                                                                 let label = label.clone();
                                                                 move |_| {
                                                                     dm_body.set(String::new());
-                                                                    note.set(String::new());
                                                                     dm_target.set(Some((
                                                                         pubkey.clone(),
                                                                         label.clone(),
@@ -3085,10 +3108,10 @@ fn RosterPage() -> Element {
                                                             let label = label.clone();
                                                             move |_| {
                                                                 match state().db.unpin_contact(&pubkey) {
-                                                                    Ok(()) => note.set(format!(
+                                                                    Ok(()) => status_note(format!(
                                                                         "Removed {label} from Contacts."
                                                                     )),
-                                                                    Err(err) => note.set(err.to_string()),
+                                                                    Err(err) => status_note(err.to_string()),
                                                                 }
                                                             }
                                                         },
@@ -3096,6 +3119,21 @@ fn RosterPage() -> Element {
                                                     }
                                                 }
                                             }
+                                        }
+                                    }
+                                }
+                                if contacts_limit() < contacts_total {
+                                    div { class: "border-t border-border px-3 py-2",
+                                        Button {
+                                            kind: ButtonKind::Ghost,
+                                            onclick: move |_| {
+                                                contacts_limit.set(
+                                                    contacts_limit()
+                                                        .saturating_add(ROSTER_LIST_PAGE)
+                                                        .min(contacts_total),
+                                                );
+                                            },
+                                            "Load more · {contacts_total.saturating_sub(contacts_limit())} remaining"
                                         }
                                     }
                                 }
@@ -3127,7 +3165,13 @@ fn RosterPage() -> Element {
                         onclick: move |_| confirm_prune_heard.set(true),
                         "Remove heard-only"
                     }
-                    p { class: "text-xs text-muted-foreground", "{ranked.len()} shown" }
+                    p { class: "text-xs text-muted-foreground",
+                        if ranked.len() < roster_total {
+                            "{ranked.len()} of {roster_total} shown"
+                        } else {
+                            "{roster_total} shown"
+                        }
+                    }
                 }
             }
             div { class: "overflow-hidden rounded-lg border border-border",
@@ -3287,7 +3331,6 @@ fn RosterPage() -> Element {
                                                     let title = title.clone();
                                                     move |_| {
                                                         dm_body.set(String::new());
-                                                        note.set(String::new());
                                                         dm_target.set(Some((pubkey.clone(), title.clone())));
                                                     }
                                                 },
@@ -3302,7 +3345,6 @@ fn RosterPage() -> Element {
                                                     let pubkey = node.pubkey.clone();
                                                     let title = title.clone();
                                                     move |_| {
-                                                        note.set(String::new());
                                                         invite_target.set(Some((pubkey.clone(), title.clone())));
                                                     }
                                                 },
@@ -3320,11 +3362,10 @@ fn RosterPage() -> Element {
                                                     let secrets = secrets.clone();
                                                     move |_| {
                                                         match state().db.revoke(&pubkey, &secrets) {
-                                                            Ok(_) => note.set(
-                                                                "Revoked and rotated private channel secrets."
-                                                                    .into(),
+                                                            Ok(_) => status_note(
+                                                                "Revoked and rotated private channel secrets.",
                                                             ),
-                                                            Err(err) => note.set(err.to_string()),
+                                                            Err(err) => status_note(err.to_string()),
                                                         }
                                                     }
                                                 },
@@ -3336,6 +3377,21 @@ fn RosterPage() -> Element {
                             }
                                 }
                             }
+                        }
+                    }
+                }
+                if roster_limit() < roster_total {
+                    div { class: "flex justify-center border-t border-border px-3 py-2",
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| {
+                                roster_limit.set(
+                                    roster_limit()
+                                        .saturating_add(ROSTER_LIST_PAGE)
+                                        .min(roster_total),
+                                );
+                            },
+                            "Load more · {roster_total.saturating_sub(roster_limit())} remaining"
                         }
                     }
                 }
@@ -3383,18 +3439,18 @@ fn RosterPage() -> Element {
                                         return;
                                     }
                                     if body.len() > MESH_TEXT_MAX_BYTES {
-                                        note.set(format!(
+                                        status_note(format!(
                                             "Mesh text is limited to {MESH_TEXT_MAX_BYTES} bytes."
                                         ));
                                         return;
                                     }
                                     match state().db.queue_text(&pubkey, &body, &body) {
                                         Ok(_) => {
-                                            note.set("Direct message queued for the companion.".into());
+                                            status_note("Direct message queued for the companion.");
                                             dm_target.set(None);
                                             dm_body.set(String::new());
                                         }
-                                        Err(err) => note.set(err.to_string()),
+                                        Err(err) => status_note(err.to_string()),
                                     }
                                 },
                                 Icon { name: IconName::Messages, size: 14 }
@@ -3481,9 +3537,10 @@ fn RosterPage() -> Element {
                                                 Ok(()) => {
                                                     claim_target.set(None);
                                                     claim_password.set(String::new());
-                                                    note.set(format!(
-                                                        "Claimed and verified {label}."
-                                                    ));
+                                                    crate::toast::push(
+                                                        crate::toast::ToastKind::Success,
+                                                        format!("Claimed and verified {label}."),
+                                                    );
                                                 }
                                                 Err(err) => claim_error.set(err.to_string()),
                                             }
@@ -3564,10 +3621,12 @@ fn RosterPage() -> Element {
                                     &state().secrets,
                                 ) {
                                     Ok(()) => {
-                                        note.set(format!("Queued private-channel invite for {channel}."));
+                                        status_note(format!(
+                                            "Queued private-channel invite for {channel}."
+                                        ));
                                         invite_target.set(None);
                                     }
-                                    Err(err) => note.set(err.to_string()),
+                                    Err(err) => status_note(err.to_string()),
                                 }
                             },
                             Icon { name: IconName::Key, size: 14 }
@@ -3799,6 +3858,7 @@ fn InboxPage() -> Element {
 #[derive(Clone, PartialEq, Eq)]
 enum MessagesRailConfirm {
     DeleteChannel(String),
+    ClearChannel { name: String, slot: i64 },
     ClearDm { pubkey: String, name: String },
 }
 
@@ -4416,6 +4476,7 @@ fn MessagesThreadShell(
     on_select_channel: EventHandler<String>,
     on_select_dm: EventHandler<String>,
     on_after_delete_channel: EventHandler<String>,
+    on_after_clear_channel: EventHandler<String>,
     on_after_clear_dm: EventHandler<String>,
     on_channel_appearance: EventHandler<String>,
     children: Element,
@@ -4465,6 +4526,9 @@ fn MessagesThreadShell(
                 on_select_dm: move |pubkey| on_select_dm.call(pubkey),
                 on_delete_channel: move |name| {
                     confirm.set(Some(MessagesRailConfirm::DeleteChannel(name)));
+                },
+                on_clear_channel: move |(name, slot)| {
+                    confirm.set(Some(MessagesRailConfirm::ClearChannel { name, slot }));
                 },
                 on_clear_dm: move |(pubkey, name)| {
                     confirm.set(Some(MessagesRailConfirm::ClearDm { pubkey, name }));
@@ -4554,6 +4618,7 @@ fn MessagesThreadShell(
                 open: confirm().is_some(),
                 title: match confirm() {
                     Some(MessagesRailConfirm::DeleteChannel(_)) => "Delete channel".into(),
+                    Some(MessagesRailConfirm::ClearChannel { .. }) => "Clear history".into(),
                     Some(MessagesRailConfirm::ClearDm { .. }) => "Clear conversation".into(),
                     None => String::new(),
                 },
@@ -4563,6 +4628,9 @@ fn MessagesThreadShell(
                         match confirm() {
                             Some(MessagesRailConfirm::DeleteChannel(name)) => format!(
                                 "Remove {name} from HQ? System channels cannot be deleted. The companion slot will be cleared when connected."
+                            ),
+                            Some(MessagesRailConfirm::ClearChannel { name, .. }) => format!(
+                                "Delete all local messages in {name}? The channel and secret stay. Not removed from other radios."
                             ),
                             Some(MessagesRailConfirm::ClearDm { name, .. }) => format!(
                                 "Delete all direct messages with {name}? The node stays on the roster."
@@ -4616,6 +4684,25 @@ fn MessagesThreadShell(
                                             }
                                         }
                                     }
+                                    Some(MessagesRailConfirm::ClearChannel { name, slot }) => {
+                                        match state().db.clear_channel_messages(slot) {
+                                            Ok(n) => {
+                                                confirm.set(None);
+                                                status_note(if n == 0 {
+                                                    format!("No local messages in {name}.")
+                                                } else if n == 1 {
+                                                    format!("Cleared 1 local message in {name}.")
+                                                } else {
+                                                    format!("Cleared {n} local messages in {name}.")
+                                                });
+                                                on_after_clear_channel.call(name);
+                                            }
+                                            Err(err) => {
+                                                confirm.set(None);
+                                                status_note(err.to_string());
+                                            }
+                                        }
+                                    }
                                     Some(MessagesRailConfirm::ClearDm { pubkey, name }) => {
                                         match state().db.clear_dm_thread(&pubkey) {
                                             Ok(_) => {
@@ -4634,7 +4721,8 @@ fn MessagesThreadShell(
                             },
                             Icon { name: IconName::Trash, size: 14 }
                             match confirm() {
-                                Some(MessagesRailConfirm::ClearDm { .. }) => "Clear",
+                                Some(MessagesRailConfirm::ClearDm { .. })
+                                | Some(MessagesRailConfirm::ClearChannel { .. }) => "Clear",
                                 _ => "Delete",
                             }
                         }
@@ -4690,6 +4778,11 @@ fn MessagesPage() -> Element {
     // Smart live scroll: last followed message id + pending jump chip when scrolled up.
     let mut follow_msg_id = use_signal(|| 0i64);
     let mut jump_new_count = use_signal(|| 0usize);
+    let mut follow_newest = use_signal(messages_follow_newest);
+    let mut select_mode = use_signal(|| false);
+    let mut selected_ids = use_signal(std::collections::BTreeSet::<i64>::new);
+    // Local delete confirm: one id, or many for multi-select.
+    let mut history_confirm = use_signal(|| None::<Vec<i64>>);
     let mut message_keep = use_signal(|| {
         state()
             .db
@@ -4847,6 +4940,7 @@ fn MessagesPage() -> Element {
                     "dm-scroller",
                     jump_new_count,
                     added,
+                    follow_newest(),
                     move || {
                         let _ = state().db.mark_dm_caught_up(&peer);
                         refresh.set(refresh() + 1);
@@ -4867,13 +4961,7 @@ fn MessagesPage() -> Element {
         } else {
             "min-h-0 flex-1 space-y-3 overflow-auto p-4"
         };
-        let dm_favorited = state()
-            .db
-            .list_pinned_contacts()
-            .ok()
-            .into_iter()
-            .flatten()
-            .any(|row| row.pubkey.eq_ignore_ascii_case(&dm_pubkey));
+        let dm_favorited = messages_rail::contact_is_favorited(&dm_pubkey);
         return rsx! {
             MessagesThreadShell {
                 channels: channels.clone(),
@@ -4891,6 +4979,8 @@ fn MessagesPage() -> Element {
                     msg_window.set(None);
                     follow_msg_id.set(0);
                     jump_new_count.set(0);
+                    select_mode.set(false);
+                    selected_ids.set(std::collections::BTreeSet::new());
                     note.set(String::new());
                 },
                 on_select_dm: move |pubkey: String| {
@@ -4901,6 +4991,8 @@ fn MessagesPage() -> Element {
                     msg_window.set(None);
                     follow_msg_id.set(0);
                     jump_new_count.set(0);
+                    select_mode.set(false);
+                    selected_ids.set(std::collections::BTreeSet::new());
                     note.set(String::new());
                 },
                 on_after_delete_channel: move |name: String| {
@@ -4914,6 +5006,17 @@ fn MessagesPage() -> Element {
                         draft.set(String::new());
                     }
                     refresh.set(refresh() + 1);
+                },
+                on_after_clear_channel: move |name: String| {
+                    if selected_channel() == Some(name) {
+                        reply_target.set(None);
+                        read_session.set(None);
+                        msg_window.set(None);
+                        follow_msg_id.set(0);
+                        jump_new_count.set(0);
+                    }
+                    refresh.set(refresh() + 1);
+                    rail_epoch.with_mut(|n| *n = n.wrapping_add(1));
                 },
                 on_after_clear_dm: move |pubkey: String| {
                     if selected_dm() == Some(pubkey) {
@@ -4932,6 +5035,71 @@ fn MessagesPage() -> Element {
                     target: appearance_edit,
                     on_saved: move |_| refresh.set(refresh() + 1),
                 }
+                Dialog {
+                    open: history_confirm().is_some(),
+                    title: if history_confirm().as_ref().map(|ids| ids.len()).unwrap_or(0) > 1 {
+                        "Delete messages".to_string()
+                    } else {
+                        "Delete message".to_string()
+                    },
+                    on_close: move |_| history_confirm.set(None),
+                    {
+                        let n = history_confirm().as_ref().map(|ids| ids.len()).unwrap_or(0);
+                        rsx! {
+                            div { class: "flex flex-col gap-3",
+                                p { class: "text-sm text-muted-foreground",
+                                    if n > 1 {
+                                        "Delete {n} messages from HQ only? Other radios keep their copies."
+                                    } else {
+                                        "Remove this message from HQ only? Other radios keep their copies."
+                                    }
+                                }
+                                div { class: "flex justify-end gap-2",
+                                    Button {
+                                        kind: ButtonKind::Ghost,
+                                        onclick: move |_| history_confirm.set(None),
+                                        "Cancel"
+                                    }
+                                    Button {
+                                        kind: ButtonKind::Danger,
+                                        onclick: move |_| {
+                                            let Some(ids) = history_confirm() else { return };
+                                            history_confirm.set(None);
+                                            let result = if ids.len() == 1 {
+                                                state().db.delete_message(ids[0]).map(|_| 1u64)
+                                            } else {
+                                                state().db.delete_messages(&ids)
+                                            };
+                                            match result {
+                                                Ok(n) => {
+                                                    if let Some(rt) = reply_target() {
+                                                        if ids.contains(&rt.id) {
+                                                            reply_target.set(None);
+                                                        }
+                                                    }
+                                                    msg_window.set(None);
+                                                    select_mode.set(false);
+                                                    selected_ids.set(std::collections::BTreeSet::new());
+                                                    jump_new_count.set(0);
+                                                    status_note(if n == 1 {
+                                                        "Deleted 1 local message.".into()
+                                                    } else {
+                                                        format!("Deleted {n} local messages.")
+                                                    });
+                                                    refresh.set(refresh() + 1);
+                                                    rail_epoch.with_mut(|n| *n = n.wrapping_add(1));
+                                                }
+                                                Err(err) => status_note(err.to_string()),
+                                            }
+                                        },
+                                        Icon { name: IconName::Trash, size: 14 }
+                                        "Delete"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 div { class: "flex flex-wrap items-center justify-between gap-3",
                     div { class: "flex min-w-0 items-center gap-3",
                         Button {
@@ -4942,6 +5110,8 @@ fn MessagesPage() -> Element {
                                 msg_window.set(None);
                                 follow_msg_id.set(0);
                                 jump_new_count.set(0);
+                                select_mode.set(false);
+                                selected_ids.set(std::collections::BTreeSet::new());
                                 draft.set(String::new());
                                 note.set(String::new());
                             },
@@ -4968,6 +5138,35 @@ fn MessagesPage() -> Element {
                             .any(|row| row.pubkey.eq_ignore_ascii_case(&peer));
                         rsx! {
                             div { class: "flex flex-wrap items-center gap-2",
+                                div { class: "follow-newest-toggle",
+                                    ToggleSwitch {
+                                        checked: follow_newest(),
+                                        label: "Follow newest".to_string(),
+                                        hint: Some(if follow_newest() {
+                                            "On — always jump to live messages.".into()
+                                        } else {
+                                            "Off — only when already at the bottom.".into()
+                                        }),
+                                        onchange: move |next: bool| {
+                                            follow_newest.set(next);
+                                            set_messages_follow_newest(next);
+                                        },
+                                    }
+                                }
+                                Button {
+                                    kind: ButtonKind::Ghost,
+                                    onclick: move |_| {
+                                        if select_mode() {
+                                            select_mode.set(false);
+                                            selected_ids.set(std::collections::BTreeSet::new());
+                                        } else {
+                                            select_mode.set(true);
+                                            selected_ids.set(std::collections::BTreeSet::new());
+                                            reply_target.set(None);
+                                        }
+                                    },
+                                    if select_mode() { "Cancel" } else { "Select" }
+                                }
                                 Button {
                                     kind: ButtonKind::Ghost,
                                     onclick: {
@@ -5114,10 +5313,35 @@ fn MessagesPage() -> Element {
                                 let peer_seed = dm_pubkey.clone();
                                 let peer_label = title.clone();
                                 let peer_tone = conversation_avatar_tone(&peer_seed);
+                                let mid = message.id;
+                                let selected = selected_ids().contains(&mid);
                                 rsx! {
                                     div {
                                         key: "{message.id}",
-                                        class: "flex w-full flex-col gap-1",
+                                        class: "messages-history-row flex w-full items-start gap-2",
+                                        if select_mode() {
+                                            label {
+                                                class: if selected {
+                                                    "messages-history-check messages-history-check-on"
+                                                } else {
+                                                    "messages-history-check"
+                                                },
+                                                title: "Select message",
+                                                input {
+                                                    r#type: "checkbox",
+                                                    checked: selected,
+                                                    onchange: move |_| {
+                                                        selected_ids.with_mut(|set| {
+                                                            if !set.insert(mid) {
+                                                                set.remove(&mid);
+                                                            }
+                                                        });
+                                                    },
+                                                }
+                                            }
+                                        }
+                                        div {
+                                            class: "flex min-w-0 flex-1 flex-col gap-1",
                                         div {
                                             class: if outgoing {
                                                 "ml-auto flex max-w-[85%] flex-col items-end gap-1"
@@ -5133,12 +5357,23 @@ fn MessagesPage() -> Element {
                                                 } else {
                                                     "message-bubble min-w-[12rem] rounded-2xl rounded-bl-md message-bubble-tone-{peer_tone} text-sm"
                                                 },
+                                                onclick: move |_| {
+                                                    if !select_mode() {
+                                                        return;
+                                                    }
+                                                    selected_ids.with_mut(|set| {
+                                                        if !set.insert(mid) {
+                                                            set.remove(&mid);
+                                                        }
+                                                    });
+                                                },
                                                 div { class: "message-meta-head",
                                                     if !outgoing {
                                                         ConversationAvatar {
                                                             label: peer_label.clone(),
                                                             seed: peer_seed.clone(),
                                                             large: true,
+                                                            favorited: dm_favorited,
                                                         }
                                                     }
                                                     span { class: "message-meta-name", title: "{peer_label}",
@@ -5150,98 +5385,116 @@ fn MessagesPage() -> Element {
                                                     outgoing,
                                                     sender_pubkey: Some(dm_pubkey.clone()),
                                                 }
-                                                div { class: "message-actions",
-                                                    {
-                                                        let can_ping =
-                                                            messages_rail::node_has_unicast_route(&dm_pubkey);
-                                                        rsx! {
-                                                            if !can_ping {
-                                                                button {
-                                                                    class: "message-action-btn message-action-btn-path",
-                                                                    title: "Read companion advert-path cache (local — builds a unicast route for Ping). Needs that node’s advert already heard by this companion.",
-                                                                    onclick: {
-                                                                        let pk = dm_pubkey.clone();
-                                                                        let nm = title.clone();
-                                                                        move |_| {
-                                                                            messages_rail::begin_advert_path_fetch(
-                                                                                pk.clone(),
-                                                                                nm.clone(),
-                                                                            );
-                                                                        }
-                                                                    },
-                                                                    Icon { name: IconName::Locate, size: 12 }
-                                                                    "Advert path"
-                                                                }
-                                                            }
-                                                            if can_ping {
-                                                                button {
-                                                                    class: "message-action-btn message-action-btn-ping",
-                                                                    title: "Mesh status ping (uses airtime; needs a unicast route)",
-                                                                    onclick: {
-                                                                        let pk = dm_pubkey.clone();
-                                                                        let nm = title.clone();
-                                                                        move |_| {
-                                                                            messages_rail::begin_node_ping(
-                                                                                pk.clone(),
-                                                                                nm.clone(),
-                                                                            );
-                                                                        }
-                                                                    },
-                                                                    Icon { name: IconName::Radio, size: 12 }
-                                                                    "Ping"
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                    if !outgoing {
-                                                        {
-                                                            let fav_class = if dm_favorited {
-                                                                "message-action-btn message-action-btn-favorite message-action-btn-favorite-on"
-                                                            } else {
-                                                                "message-action-btn message-action-btn-favorite"
-                                                            };
-                                                            let fav_title = if dm_favorited {
-                                                                "Remove from Favorites"
-                                                            } else {
-                                                                "Favorite this contact"
-                                                            };
-                                                            let fav_label = if dm_favorited {
-                                                                "Favorited"
-                                                            } else {
-                                                                "Favorite"
-                                                            };
-                                                            rsx! {
-                                                                button {
-                                                                    class: "{fav_class}",
-                                                                    title: "{fav_title}",
-                                                                    onclick: {
-                                                                        let pk = dm_pubkey.clone();
-                                                                        let nm = title.clone();
-                                                                        move |_| {
-                                                                            match messages_rail::toggle_contact_favorite(
-                                                                                &pk, &nm,
-                                                                            ) {
-                                                                                Ok((on, name_only)) => {
-                                                                                    let msg = if on && name_only {
-                                                                                        "Saved to Contacts → Pinned (no public key yet — upgrades when they advert)."
-                                                                                    } else if on {
-                                                                                        "Contact added to Favorites."
-                                                                                    } else {
-                                                                                        "Contact removed from Favorites."
-                                                                                    };
-                                                                                    status_note(msg);
-                                                                                    rail_epoch.with_mut(|n| {
-                                                                                        *n = n.wrapping_add(1)
-                                                                                    });
-                                                                                    refresh.set(refresh() + 1);
+                                                if !select_mode() {
+                                                    div {
+                                                        class: if outgoing {
+                                                            "message-action-wrap message-action-wrap-end"
+                                                        } else {
+                                                            "message-action-wrap message-action-wrap-start"
+                                                        },
+                                                        div { class: "message-action-bar",
+                                                            {
+                                                                let can_ping =
+                                                                    messages_rail::node_has_unicast_route(&dm_pubkey);
+                                                                rsx! {
+                                                                    if !can_ping {
+                                                                        button {
+                                                                            class: "message-action-btn message-action-btn-path",
+                                                                            title: "Read companion advert-path cache (local — builds a unicast route for Ping). Needs that node’s advert already heard by this companion.",
+                                                                            onclick: {
+                                                                                let pk = dm_pubkey.clone();
+                                                                                let nm = title.clone();
+                                                                                move |_| {
+                                                                                    messages_rail::begin_advert_path_fetch(
+                                                                                        pk.clone(),
+                                                                                        nm.clone(),
+                                                                                    );
                                                                                 }
-                                                                                Err(err) => status_note(err),
-                                                                            }
+                                                                            },
+                                                                            Icon { name: IconName::Locate, size: 12 }
+                                                                            "Advert path"
                                                                         }
-                                                                    },
-                                                                    Icon { name: IconName::Star, size: 12 }
-                                                                    "{fav_label}"
+                                                                    }
+                                                                    if can_ping {
+                                                                        button {
+                                                                            class: "message-action-btn message-action-btn-ping",
+                                                                            title: "Mesh status ping (uses airtime; needs a unicast route)",
+                                                                            onclick: {
+                                                                                let pk = dm_pubkey.clone();
+                                                                                let nm = title.clone();
+                                                                                move |_| {
+                                                                                    messages_rail::begin_node_ping(
+                                                                                        pk.clone(),
+                                                                                        nm.clone(),
+                                                                                    );
+                                                                                }
+                                                                            },
+                                                                            Icon { name: IconName::Radio, size: 12 }
+                                                                            "Ping"
+                                                                        }
+                                                                    }
                                                                 }
+                                                            }
+                                                            if !outgoing {
+                                                                {
+                                                                    let fav_class = if dm_favorited {
+                                                                        "message-action-btn message-action-btn-favorite message-action-btn-favorite-on"
+                                                                    } else {
+                                                                        "message-action-btn message-action-btn-favorite"
+                                                                    };
+                                                                    let fav_title = if dm_favorited {
+                                                                        "Remove from Favorites"
+                                                                    } else {
+                                                                        "Favorite this contact"
+                                                                    };
+                                                                    let fav_label = if dm_favorited {
+                                                                        "Favorited"
+                                                                    } else {
+                                                                        "Favorite"
+                                                                    };
+                                                                    rsx! {
+                                                                        button {
+                                                                            class: "{fav_class}",
+                                                                            title: "{fav_title}",
+                                                                            onclick: {
+                                                                                let pk = dm_pubkey.clone();
+                                                                                let nm = title.clone();
+                                                                                move |_| {
+                                                                                    match messages_rail::toggle_contact_favorite(
+                                                                                        &pk, &nm,
+                                                                                    ) {
+                                                                                        Ok((on, name_only)) => {
+                                                                                            let msg = if on && name_only {
+                                                                                                "Saved to Favorites (no public key yet — upgrades when they advert)."
+                                                                                            } else if on {
+                                                                                                "Contact added to Favorites."
+                                                                                            } else {
+                                                                                                "Contact removed from Favorites."
+                                                                                            };
+                                                                                            status_note(msg);
+                                                                                            rail_epoch.with_mut(|n| {
+                                                                                                *n = n.wrapping_add(1)
+                                                                                            });
+                                                                                            refresh.set(refresh() + 1);
+                                                                                        }
+                                                                                        Err(err) => status_note(err),
+                                                                                    }
+                                                                                }
+                                                                            },
+                                                                            Icon { name: IconName::Star, size: 12 }
+                                                                            "{fav_label}"
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            button {
+                                                                class: "message-action-btn message-action-btn-delete",
+                                                                title: "Delete from HQ only",
+                                                                onclick: move |_| {
+                                                                    history_confirm.set(Some(vec![mid]));
+                                                                },
+                                                                Icon { name: IconName::Trash, size: 12 }
+                                                                "Delete"
                                                             }
                                                         }
                                                     }
@@ -5277,9 +5530,25 @@ fn MessagesPage() -> Element {
                                             }
                                         }
                                         if show_new {
-                                            span { class: "text-[0.7rem] font-medium text-signal",
+                                            button {
+                                                r#type: "button",
+                                                class: "messages-new-marker-btn messages-new-marker-btn-inline",
+                                                title: "Jump to newest messages",
+                                                onclick: {
+                                                    let peer = dm_pubkey.clone();
+                                                    move |_| {
+                                                        jump_new_count.set(0);
+                                                        let peer = peer.clone();
+                                                        spawn(async move {
+                                                            scroll_scroller_to_bottom("dm-scroller");
+                                                            let _ = state().db.mark_dm_caught_up(&peer);
+                                                            refresh.set(refresh() + 1);
+                                                        });
+                                                    }
+                                                },
                                                 if new_count == 1 { "New messages · 1" } else { "New messages · {new_count}" }
                                             }
+                                        }
                                         }
                                     }
                                 }
@@ -5311,6 +5580,41 @@ fn MessagesPage() -> Element {
                             }
                         }
                     }
+                    }
+                    if select_mode() {
+                        div { class: "messages-select-bar",
+                            span { class: "messages-select-bar-count",
+                                if selected_ids().is_empty() {
+                                    "Select messages"
+                                } else if selected_ids().len() == 1 {
+                                    "1 selected"
+                                } else {
+                                    "{selected_ids().len()} selected"
+                                }
+                            }
+                            div { class: "messages-select-bar-actions",
+                                Button {
+                                    kind: ButtonKind::Ghost,
+                                    onclick: move |_| {
+                                        select_mode.set(false);
+                                        selected_ids.set(std::collections::BTreeSet::new());
+                                    },
+                                    "Cancel"
+                                }
+                                Button {
+                                    kind: ButtonKind::Danger,
+                                    disabled: selected_ids().is_empty(),
+                                    onclick: move |_| {
+                                        let ids: Vec<i64> = selected_ids().iter().copied().collect();
+                                        if !ids.is_empty() {
+                                            history_confirm.set(Some(ids));
+                                        }
+                                    },
+                                    Icon { name: IconName::Trash, size: 14 }
+                                    "Delete"
+                                }
+                            }
+                        }
                     }
                     DmComposeDock {
                         draft,
@@ -5410,17 +5714,22 @@ fn MessagesPage() -> Element {
             follow_msg_id.set(messages.last().map(|m| m.id).unwrap_or(0));
             jump_new_count.set(0);
             let scroll_anchor = stored_read;
-            let scroll_to_bottom = !show_banner;
+            // Follow newest always lands on the latest message; otherwise keep the
+            // unread divider / last-read anchor so operators can catch up mid-thread.
+            let force_newest = follow_newest();
+            let scroll_to_bottom = force_newest || !show_banner;
             let anchor_in_window = scroll_anchor
                 .filter(|id| *id != 0)
                 .is_some_and(|id| messages.iter().any(|m| m.id == id));
             spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(60)).await;
                 if scroll_to_bottom {
-                    document::eval(
-                        r#"const scroller = document.getElementById('channel-scroller');
-                           if (scroller) { scroller.scrollTop = scroller.scrollHeight; }"#,
-                    );
+                    scroll_scroller_to_bottom("channel-scroller");
+                    // Avatars / wrap can grow height after first paint — stick again.
+                    for _ in 0..3 {
+                        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                        scroll_scroller_to_bottom("channel-scroller");
+                    }
                 } else if anchor_in_window {
                     if let Some(id) = scroll_anchor {
                         document::eval(&format!(
@@ -5439,13 +5748,17 @@ fn MessagesPage() -> Element {
                     session.scrolled = true;
                     read_session.set(Some(session));
                 }
-                // Only auto-clear when the thread cannot scroll the break away
-                // (short unread that already fits on screen). Do not treat
-                // "landed near bottom" alone as caught up on open.
                 if show_banner {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    if channel_unread_is_caught_up(false).await {
+                    if force_newest {
+                        // Operator asked to always follow newest — opening counts as catch-up.
                         dismiss_channel_new_banner(read_session, refresh);
+                    } else {
+                        // Only auto-clear when the thread cannot scroll the break away
+                        // (short unread that already fits on screen).
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        if channel_unread_is_caught_up(false).await {
+                            dismiss_channel_new_banner(read_session, refresh);
+                        }
                     }
                 }
             });
@@ -5502,6 +5815,7 @@ fn MessagesPage() -> Element {
                         "channel-scroller",
                         jump_new_count,
                         added,
+                        follow_newest(),
                         dismiss,
                     );
                 }
@@ -5526,12 +5840,13 @@ fn MessagesPage() -> Element {
             .into_iter()
             .map(|row| row.pubkey)
             .collect();
-        let pinned_set: std::collections::HashSet<String> = state()
+        let fav_set: std::collections::HashSet<String> = state()
             .db
-            .list_pinned_contacts()
+            .list_messages_favorites()
             .unwrap_or_default()
             .into_iter()
-            .map(|row| row.pubkey.to_ascii_lowercase())
+            .filter(|(kind, _)| kind == "dm")
+            .map(|(_, key)| key.to_ascii_lowercase())
             .collect();
         let channel_appearance = state()
             .db
@@ -5563,6 +5878,8 @@ fn MessagesPage() -> Element {
                     msg_window.set(None);
                     follow_msg_id.set(0);
                     jump_new_count.set(0);
+                    select_mode.set(false);
+                    selected_ids.set(std::collections::BTreeSet::new());
                     note.set(String::new());
                 },
                 on_select_dm: move |pubkey: String| {
@@ -5574,6 +5891,8 @@ fn MessagesPage() -> Element {
                     msg_window.set(None);
                     follow_msg_id.set(0);
                     jump_new_count.set(0);
+                    select_mode.set(false);
+                    selected_ids.set(std::collections::BTreeSet::new());
                     note.set(String::new());
                 },
                 on_after_delete_channel: move |name: String| {
@@ -5587,6 +5906,17 @@ fn MessagesPage() -> Element {
                         draft.set(String::new());
                     }
                     refresh.set(refresh() + 1);
+                },
+                on_after_clear_channel: move |name: String| {
+                    if selected_channel() == Some(name) {
+                        reply_target.set(None);
+                        read_session.set(None);
+                        msg_window.set(None);
+                        follow_msg_id.set(0);
+                        jump_new_count.set(0);
+                    }
+                    refresh.set(refresh() + 1);
+                    rail_epoch.with_mut(|n| *n = n.wrapping_add(1));
                 },
                 on_after_clear_dm: move |pubkey: String| {
                     if selected_dm() == Some(pubkey) {
@@ -5604,6 +5934,71 @@ fn MessagesPage() -> Element {
                 AppearanceEditor {
                     target: appearance_edit,
                     on_saved: move |_| refresh.set(refresh() + 1),
+                }
+                Dialog {
+                    open: history_confirm().is_some(),
+                    title: if history_confirm().as_ref().map(|ids| ids.len()).unwrap_or(0) > 1 {
+                        "Delete messages".to_string()
+                    } else {
+                        "Delete message".to_string()
+                    },
+                    on_close: move |_| history_confirm.set(None),
+                    {
+                        let n = history_confirm().as_ref().map(|ids| ids.len()).unwrap_or(0);
+                        rsx! {
+                            div { class: "flex flex-col gap-3",
+                                p { class: "text-sm text-muted-foreground",
+                                    if n > 1 {
+                                        "Delete {n} messages from HQ only? Other radios keep their copies."
+                                    } else {
+                                        "Remove this message from HQ only? Other radios keep their copies."
+                                    }
+                                }
+                                div { class: "flex justify-end gap-2",
+                                    Button {
+                                        kind: ButtonKind::Ghost,
+                                        onclick: move |_| history_confirm.set(None),
+                                        "Cancel"
+                                    }
+                                    Button {
+                                        kind: ButtonKind::Danger,
+                                        onclick: move |_| {
+                                            let Some(ids) = history_confirm() else { return };
+                                            history_confirm.set(None);
+                                            let result = if ids.len() == 1 {
+                                                state().db.delete_message(ids[0]).map(|_| 1u64)
+                                            } else {
+                                                state().db.delete_messages(&ids)
+                                            };
+                                            match result {
+                                                Ok(n) => {
+                                                    if let Some(rt) = reply_target() {
+                                                        if ids.contains(&rt.id) {
+                                                            reply_target.set(None);
+                                                        }
+                                                    }
+                                                    msg_window.set(None);
+                                                    select_mode.set(false);
+                                                    selected_ids.set(std::collections::BTreeSet::new());
+                                                    jump_new_count.set(0);
+                                                    status_note(if n == 1 {
+                                                        "Deleted 1 local message.".into()
+                                                    } else {
+                                                        format!("Deleted {n} local messages.")
+                                                    });
+                                                    refresh.set(refresh() + 1);
+                                                    rail_epoch.with_mut(|n| *n = n.wrapping_add(1));
+                                                }
+                                                Err(err) => status_note(err.to_string()),
+                                            }
+                                        },
+                                        Icon { name: IconName::Trash, size: 14 }
+                                        "Delete"
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 div { class: "flex flex-wrap items-center justify-between gap-3",
                     div { class: "flex min-w-0 items-center gap-3",
@@ -5626,6 +6021,8 @@ fn MessagesPage() -> Element {
                                 msg_window.set(None);
                                 follow_msg_id.set(0);
                                 jump_new_count.set(0);
+                                select_mode.set(false);
+                                selected_ids.set(std::collections::BTreeSet::new());
                             },
                             Icon { name: IconName::ChevronRight, size: 14 }
                             "Channels"
@@ -5645,6 +6042,35 @@ fn MessagesPage() -> Element {
                         }
                     }
                     div { class: "channel-header-actions",
+                        div { class: "follow-newest-toggle",
+                            ToggleSwitch {
+                                checked: follow_newest(),
+                                label: "Follow newest".to_string(),
+                                hint: Some(if follow_newest() {
+                                    "On — always jump to live messages.".into()
+                                } else {
+                                    "Off — only when already at the bottom.".into()
+                                }),
+                                onchange: move |next: bool| {
+                                    follow_newest.set(next);
+                                    set_messages_follow_newest(next);
+                                },
+                            }
+                        }
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| {
+                                if select_mode() {
+                                    select_mode.set(false);
+                                    selected_ids.set(std::collections::BTreeSet::new());
+                                } else {
+                                    select_mode.set(true);
+                                    selected_ids.set(std::collections::BTreeSet::new());
+                                    reply_target.set(None);
+                                }
+                            },
+                            if select_mode() { "Cancel" } else { "Select" }
+                        }
                         ChannelKeepSelect {
                             channel_name: channel.name.clone(),
                             current: channel
@@ -5802,9 +6228,18 @@ fn MessagesPage() -> Element {
                                     class: "h-px min-w-0 flex-1",
                                     style: "background-color: rgba(61, 214, 140, 0.45);",
                                 }
-                                span {
-                                    class: "shrink-0 text-[0.7rem] font-medium tracking-wide",
-                                    style: "color: #3dd68c; background-color: #101418; padding: 0.35rem 0.85rem; margin: 0 0.15rem;",
+                                button {
+                                    r#type: "button",
+                                    class: "messages-new-marker-btn",
+                                    title: "Jump to newest messages",
+                                    onclick: move |_| {
+                                        jump_new_count.set(0);
+                                        spawn(async move {
+                                            scroll_scroller_to_bottom("channel-scroller");
+                                            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                                            dismiss_channel_new_banner(read_session, refresh);
+                                        });
+                                    },
                                     if new_count == 1 {
                                         "New messages · 1"
                                     } else {
@@ -5859,22 +6294,47 @@ fn MessagesPage() -> Element {
                                 let already_favorited = known_pk
                                     .as_ref()
                                     .map(|pk| pk.to_ascii_lowercase())
-                                    .is_some_and(|pk| pinned_set.contains(&pk))
+                                    .is_some_and(|pk| fav_set.contains(&pk))
                                     || name_block
                                         .as_ref()
                                         .map(|nk| nk.to_ascii_lowercase())
-                                        .is_some_and(|nk| pinned_set.contains(&nk));
+                                        .is_some_and(|nk| fav_set.contains(&nk));
                                 let block_label = device_name.clone();
                                 let avatar_seed = known_pk
                                     .clone()
                                     .filter(|pk| !pk.is_empty())
                                     .unwrap_or_else(|| device_name.clone());
                                 let sender_tone = conversation_avatar_tone(&avatar_seed);
+                                let mid = message.id;
+                                let selected = selected_ids().contains(&mid);
                                 rsx! {
                                     div {
                                         id: "msg-anchor-{message.id}",
                                         key: "{message.id}",
-                                        class: "flex w-full flex-col gap-1",
+                                        class: "messages-history-row flex w-full items-start gap-2",
+                                        if select_mode() {
+                                            label {
+                                                class: if selected {
+                                                    "messages-history-check messages-history-check-on"
+                                                } else {
+                                                    "messages-history-check"
+                                                },
+                                                title: "Select message",
+                                                input {
+                                                    r#type: "checkbox",
+                                                    checked: selected,
+                                                    onchange: move |_| {
+                                                        selected_ids.with_mut(|set| {
+                                                            if !set.insert(mid) {
+                                                                set.remove(&mid);
+                                                            }
+                                                        });
+                                                    },
+                                                }
+                                            }
+                                        }
+                                        div {
+                                            class: "flex min-w-0 flex-1 flex-col gap-1",
                                         div {
                                             class: if outgoing {
                                                 "ml-auto flex max-w-[85%] flex-col items-end gap-1"
@@ -5892,12 +6352,23 @@ fn MessagesPage() -> Element {
                                                 } else {
                                                     "message-bubble min-w-[14rem] rounded-2xl rounded-bl-md message-bubble-tone-{sender_tone} text-sm"
                                                 },
+                                                onclick: move |_| {
+                                                    if !select_mode() {
+                                                        return;
+                                                    }
+                                                    selected_ids.with_mut(|set| {
+                                                        if !set.insert(mid) {
+                                                            set.remove(&mid);
+                                                        }
+                                                    });
+                                                },
                                             div { class: "message-meta-head",
                                                 if !outgoing {
                                                     ConversationAvatar {
                                                         label: device_name.clone(),
                                                         seed: avatar_seed.clone(),
                                                         large: true,
+                                                        favorited: already_favorited,
                                                     }
                                                 }
                                                 span { class: "message-meta-name", title: "{device_name}",
@@ -5909,6 +6380,7 @@ fn MessagesPage() -> Element {
                                                 outgoing,
                                                 sender_pubkey: known_pk.clone(),
                                             }
+                                            if !select_mode() {
                                             div {
                                                 class: if outgoing {
                                                     "message-action-wrap message-action-wrap-end"
@@ -5966,6 +6438,15 @@ fn MessagesPage() -> Element {
                                                         Icon { name: IconName::Copy, size: 12 }
                                                         "Copy"
                                                     }
+                                                    button {
+                                                        class: "message-action-btn message-action-btn-delete",
+                                                        title: "Delete from HQ only",
+                                                        onclick: move |_| {
+                                                            history_confirm.set(Some(vec![mid]));
+                                                        },
+                                                        Icon { name: IconName::Trash, size: 12 }
+                                                        "Delete"
+                                                    }
                                                     // Advert path / Ping stay on DM bubbles, contact
                                                     // rail menus, and Map — not channel chat. Channel
                                                     // posts often have a name-matched key but no
@@ -6004,9 +6485,9 @@ fn MessagesPage() -> Element {
                                                                             ) {
                                                                                 Ok((on, name_only)) => {
                                                                                     let msg = if on && name_only {
-                                                                                        "Saved to Contacts → Pinned (channel name only — upgrades when they advert)."
+                                                                                        "Saved to Favorites (channel name only — upgrades when they advert)."
                                                                                     } else if on {
-                                                                                        "Contact added to Favorites (Contacts → Pinned)."
+                                                                                        "Contact added to Favorites."
                                                                                     } else {
                                                                                         "Contact removed from Favorites."
                                                                                     };
@@ -6107,9 +6588,18 @@ fn MessagesPage() -> Element {
                                                 class: "h-px min-w-0 flex-1",
                                                 style: "background-color: rgba(61, 214, 140, 0.45);",
                                             }
-                                            span {
-                                                class: "shrink-0 text-[0.7rem] font-medium tracking-wide",
-                                                style: "color: #3dd68c; background-color: #101418; padding: 0.35rem 0.85rem; margin: 0 0.15rem;",
+                                            button {
+                                                r#type: "button",
+                                                class: "messages-new-marker-btn",
+                                                title: "Jump to newest messages",
+                                                onclick: move |_| {
+                                                    jump_new_count.set(0);
+                                                    spawn(async move {
+                                                        scroll_scroller_to_bottom("channel-scroller");
+                                                        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                                                        dismiss_channel_new_banner(read_session, refresh);
+                                                    });
+                                                },
                                                 if new_count == 1 {
                                                     "New messages · 1"
                                                 } else {
@@ -6120,6 +6610,8 @@ fn MessagesPage() -> Element {
                                                 class: "h-px min-w-0 flex-1",
                                                 style: "background-color: rgba(61, 214, 140, 0.45);",
                                             }
+                                        }
+                                    }
                                         }
                                     }
                                 }
@@ -6151,6 +6643,41 @@ fn MessagesPage() -> Element {
                             }
                         }
                     }
+                    }
+                    if select_mode() {
+                        div { class: "messages-select-bar",
+                            span { class: "messages-select-bar-count",
+                                if selected_ids().is_empty() {
+                                    "Select messages"
+                                } else if selected_ids().len() == 1 {
+                                    "1 selected"
+                                } else {
+                                    "{selected_ids().len()} selected"
+                                }
+                            }
+                            div { class: "messages-select-bar-actions",
+                                Button {
+                                    kind: ButtonKind::Ghost,
+                                    onclick: move |_| {
+                                        select_mode.set(false);
+                                        selected_ids.set(std::collections::BTreeSet::new());
+                                    },
+                                    "Cancel"
+                                }
+                                Button {
+                                    kind: ButtonKind::Danger,
+                                    disabled: selected_ids().is_empty(),
+                                    onclick: move |_| {
+                                        let ids: Vec<i64> = selected_ids().iter().copied().collect();
+                                        if !ids.is_empty() {
+                                            history_confirm.set(Some(ids));
+                                        }
+                                    },
+                                    Icon { name: IconName::Trash, size: 14 }
+                                    "Delete"
+                                }
+                            }
+                        }
                     }
                     ChannelComposeDock {
                         draft,
@@ -7201,12 +7728,13 @@ fn scroll_scroller_to_bottom(scroller_id: &str) {
     ));
 }
 
-/// After live inserts: stick to the bottom when the operator was already there;
-/// otherwise leave their place and raise the jump chip.
+/// After live inserts: always follow when `force_follow`, else stick to the bottom
+/// only when the operator was already there; otherwise raise the jump chip.
 fn schedule_live_message_follow(
     scroller_id: &'static str,
     mut jump_new_count: Signal<usize>,
     added: usize,
+    force_follow: bool,
     on_followed: impl FnOnce() + 'static,
 ) {
     if added == 0 {
@@ -7215,7 +7743,8 @@ fn schedule_live_message_follow(
     spawn(async move {
         // Let the new bubbles paint before measuring / scrolling.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        if scroller_near_bottom(scroller_id).await {
+        let follow = force_follow || scroller_near_bottom(scroller_id).await;
+        if follow {
             scroll_scroller_to_bottom(scroller_id);
             jump_new_count.set(0);
             on_followed();

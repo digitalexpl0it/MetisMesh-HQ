@@ -79,6 +79,15 @@ static RADIO_POOL: OnceLock<Arc<PoolShared>> = OnceLock::new();
 
 fn enqueue_channel_text(slot: u8, text: String) {
     if let Some(pool) = RADIO_POOL.get() {
+        let online = pool
+            .view_status()
+            .lock()
+            .map(|s| s.state == "connected")
+            .unwrap_or(false);
+        if !online {
+            hq_log!(debug, "channel bot reply skipped — companion not connected");
+            return;
+        }
         pool.route_to_primary(RadioCmd::SendChannel {
             slot,
             text,
@@ -1355,6 +1364,14 @@ impl RadioHandle {
         bot_activity: bool,
     ) -> oneshot::Receiver<Result<(), String>> {
         let (tx, rx) = oneshot::channel();
+        // Do not queue TX while the primary companion is offline — avoids
+        // scheduled weather / bot posts that never leave HQ looking "Sent".
+        if self.snapshot().state != "connected" {
+            let reason =
+                "Connect a primary companion radio before sending. The message was not transmitted.";
+            let _ = tx.send(Err(reason.into()));
+            return rx;
+        }
         self.pool.route_to_primary(RadioCmd::SendChannel {
             slot,
             text,

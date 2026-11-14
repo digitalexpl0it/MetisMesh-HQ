@@ -67,33 +67,44 @@ async fn poller_loop(db: Arc<Db>, secrets: Arc<Secrets>, radio: RadioHandle) {
     }
 }
 
+fn companion_connected(radio: &RadioHandle) -> bool {
+    radio.snapshot().state == "connected"
+}
+
 fn poll_once(db: &Db, secrets: &Secrets, radio: &RadioHandle) {
-    if setting_bool(db, "svc_quake_enabled", false) {
-        if let Err(err) = poll_quakes(db, radio) {
-            hq_log!(debug, "quake poll: {err}");
+    // Weather / NWS / quake / amber posts need a live primary companion. Skip the
+    // whole mesh schedule when offline so we do not mark events "sent" or show
+    // TX bubbles that never went on the air.
+    if companion_connected(radio) {
+        if setting_bool(db, "svc_quake_enabled", false) {
+            if let Err(err) = poll_quakes(db, radio) {
+                hq_log!(debug, "quake poll: {err}");
+            }
         }
-    }
-    if setting_bool(db, "svc_nws_enabled", false) {
-        if let Err(err) = poll_nws(db, radio) {
-            hq_log!(debug, "nws poll: {err}");
+        if setting_bool(db, "svc_nws_enabled", false) {
+            if let Err(err) = poll_nws(db, radio) {
+                hq_log!(debug, "nws poll: {err}");
+            }
         }
-    }
-    if setting_bool(db, "svc_weather_enabled", true)
-        && setting_bool(db, "svc_weather_hourly", false)
-    {
-        if let Err(err) = poll_weather_zips(db, radio) {
-            hq_log!(debug, "weather zip poll: {err}");
+        if setting_bool(db, "svc_weather_enabled", true)
+            && setting_bool(db, "svc_weather_hourly", false)
+        {
+            if let Err(err) = poll_weather_zips(db, radio) {
+                hq_log!(debug, "weather zip poll: {err}");
+            }
         }
-    }
-    if setting_bool(db, "svc_amber_enabled", false) {
-        if let Err(err) = poll_emergency(db, radio, "amber", AMBER_CODES, true) {
-            hq_log!(debug, "amber poll: {err}");
+        if setting_bool(db, "svc_amber_enabled", false) {
+            if let Err(err) = poll_emergency(db, radio, "amber", AMBER_CODES, true) {
+                hq_log!(debug, "amber poll: {err}");
+            }
         }
-    }
-    if setting_bool(db, "svc_emerg_enabled", false) {
-        if let Err(err) = poll_emergency(db, radio, "emerg", EMERG_CODES, false) {
-            hq_log!(debug, "emerg poll: {err}");
+        if setting_bool(db, "svc_emerg_enabled", false) {
+            if let Err(err) = poll_emergency(db, radio, "emerg", EMERG_CODES, false) {
+                hq_log!(debug, "emerg poll: {err}");
+            }
         }
+    } else {
+        hq_log!(debug, "services: mesh posts skipped — companion not connected");
     }
     backup::maybe_run_scheduled_backup(db, secrets, &crate::data_dir());
 }

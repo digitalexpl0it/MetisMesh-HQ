@@ -353,9 +353,11 @@ fn rail_begin_contact_refresh(
         return;
     }
     refreshing.write().insert(key.clone());
-    crate::toast::push(
+    // Path → status → telemetry can take ~45s; keep the progress toast visible.
+    crate::toast::push_for(
         crate::toast::ToastKind::Info,
-        "Refreshing contact (path, status, telemetry)…",
+        "Refreshing contact over the mesh (path → status → telemetry). This can take up to a minute.",
+        std::time::Duration::from_secs(55),
     );
     let rx = state().radio.refresh_contact(key.clone());
     spawn(async move {
@@ -365,7 +367,11 @@ fn rail_begin_contact_refresh(
         refreshing.write().remove(&key);
         match result {
             Ok(refresh) => {
-                crate::toast::push(crate::toast::ToastKind::Success, refresh.summary);
+                crate::toast::push_for(
+                    crate::toast::ToastKind::Success,
+                    refresh.summary,
+                    std::time::Duration::from_secs(12),
+                );
                 on_done.call(());
             }
             Err(err) => crate::toast::push(crate::toast::ToastKind::Error, err),
@@ -402,6 +408,9 @@ fn is_chat_device(contact_type: u8) -> bool {
     !matches!(contact_type, 2 | 3 | 4)
 }
 
+/// Visible rows per Contacts rail section before "Load more".
+const RAIL_CONTACTS_PAGE: usize = 40;
+
 fn section_collapsed(sections: &[MessagesRailSection], kind: &str) -> (Option<i64>, bool) {
     sections
         .iter()
@@ -419,6 +428,7 @@ pub fn MessagesRail(
     on_select_channel: EventHandler<String>,
     on_select_dm: EventHandler<String>,
     on_delete_channel: EventHandler<String>,
+    on_clear_channel: EventHandler<(String, i64)>,
     on_clear_dm: EventHandler<(String, String)>,
     on_channel_appearance: EventHandler<String>,
     rail_epoch: Signal<u64>,
@@ -435,6 +445,11 @@ pub fn MessagesRail(
     let mut channel_query = use_signal(String::new);
     let mut dm_query = use_signal(String::new);
     let mut contact_query = use_signal(String::new);
+    let mut contact_fav_limit = use_signal(|| RAIL_CONTACTS_PAGE);
+    let mut contact_saved_limit = use_signal(|| RAIL_CONTACTS_PAGE);
+    let mut contact_disc_limit = use_signal(|| RAIL_CONTACTS_PAGE);
+    let mut contact_infra_limit = use_signal(|| RAIL_CONTACTS_PAGE);
+    let mut contact_query_epoch = use_signal(String::new);
     let _ = rail_epoch();
     // Channel-name favorites (`name:…`) upgrade when that node shows up on the roster
     // (companion contact sync / advert) — not from channel text alone.
@@ -504,6 +519,8 @@ pub fn MessagesRail(
     let (channels_id, channels_collapsed) = section_collapsed(&chat_sections, "channels");
     let (dm_fav_id, dm_fav_collapsed) = section_collapsed(&dm_sections, "favorites");
     let (dms_id, dms_collapsed) = section_collapsed(&dm_sections, "dms");
+    let (contact_fav_id, contact_fav_collapsed) =
+        section_collapsed(&contact_sections, "favorites");
     let (pinned_id, pinned_collapsed) = section_collapsed(&contact_sections, "pinned");
     let (chat_dev_id, chat_dev_collapsed) = section_collapsed(&contact_sections, "chat_devices");
     let (infra_id, infra_collapsed) = section_collapsed(&contact_sections, "infra_nodes");
@@ -511,6 +528,7 @@ pub fn MessagesRail(
     let channels_icon = section_icon(&chat_sections, "channels");
     let dm_fav_icon = section_icon(&dm_sections, "favorites");
     let dms_icon = section_icon(&dm_sections, "dms");
+    let contact_fav_icon = section_icon(&contact_sections, "favorites");
     let pinned_icon = section_icon(&contact_sections, "pinned");
     let roster_icon = section_icon(&contact_sections, "chat_devices");
     let infra_icon = section_icon(&contact_sections, "infra_nodes");
@@ -553,8 +571,14 @@ pub fn MessagesRail(
         .filter(|t| dm_thread_fuzzy_match(&dm_q, t))
         .cloned()
         .collect();
+    let dm_fav_keys: HashSet<String> = favorites
+        .iter()
+        .filter(|(kind, _)| kind == "dm")
+        .map(|(_, key)| key.to_ascii_lowercase())
+        .collect();
     let roster_nodes: Vec<_> = chat_nodes
         .iter()
+        .filter(|n| !pinned_set.contains(&n.pubkey) && !pinned_set.contains(&n.pubkey.to_ascii_lowercase()))
         .filter(|n| !moved_contacts.contains(&("contact".into(), n.pubkey.clone())))
         .filter(|n| {
             let label = node_label(n);
@@ -564,6 +588,7 @@ pub fn MessagesRail(
         .collect();
     let default_infra: Vec<_> = infra_nodes
         .iter()
+        .filter(|n| !pinned_set.contains(&n.pubkey) && !pinned_set.contains(&n.pubkey.to_ascii_lowercase()))
         .filter(|n| !moved_contacts.contains(&("contact".into(), n.pubkey.clone())))
         .filter(|n| {
             let label = node_label(n);
@@ -582,6 +607,38 @@ pub fn MessagesRail(
             rail_fuzzy_match(&ct_q, &[&label, &row.pubkey])
         })
         .cloned()
+        .collect();
+    let mut contact_favorites: Vec<_> = pinned_filtered
+        .iter()
+        .filter(|row| dm_fav_keys.contains(&row.pubkey.to_ascii_lowercase()))
+        .cloned()
+        .collect();
+    let mut contact_saved: Vec<_> = pinned_filtered
+        .iter()
+        .filter(|row| !dm_fav_keys.contains(&row.pubkey.to_ascii_lowercase()))
+        .cloned()
+        .collect();
+    // Reset page windows when the Contacts search changes.
+    if contact_query_epoch() != ct_q {
+        contact_query_epoch.set(ct_q.clone());
+        contact_fav_limit.set(RAIL_CONTACTS_PAGE);
+        contact_saved_limit.set(RAIL_CONTACTS_PAGE);
+        contact_disc_limit.set(RAIL_CONTACTS_PAGE);
+        contact_infra_limit.set(RAIL_CONTACTS_PAGE);
+    }
+    let contact_fav_total = contact_favorites.len();
+    let contact_saved_total = contact_saved.len();
+    let roster_total = roster_nodes.len();
+    let infra_total = default_infra.len();
+    contact_favorites.truncate(contact_fav_limit().min(contact_fav_total));
+    contact_saved.truncate(contact_saved_limit().min(contact_saved_total));
+    let roster_nodes: Vec<_> = roster_nodes
+        .into_iter()
+        .take(contact_disc_limit().min(roster_total))
+        .collect();
+    let default_infra: Vec<_> = default_infra
+        .into_iter()
+        .take(contact_infra_limit().min(infra_total))
         .collect();
 
     let active_query = match tab() {
@@ -736,6 +793,7 @@ pub fn MessagesRail(
                                         on_select_dm: move |pk| on_select_dm.call(pk),
                                         on_appearance: move |n| on_channel_appearance.call(n),
                                         on_delete: move |n| on_delete_channel.call(n),
+                                        on_clear: move |pair| on_clear_channel.call(pair),
                                         on_changed: move |_| bump(),
                                     }
                                 }
@@ -832,6 +890,7 @@ pub fn MessagesRail(
                                                             on_select_dm: move |pk| on_select_dm.call(pk),
                                                             on_appearance: move |n| on_channel_appearance.call(n),
                                                             on_delete: move |n| on_delete_channel.call(n),
+                                                            on_clear: move |pair| on_clear_channel.call(pair),
                                                             on_changed: move |_| bump(),
                                                         }
                                                     }
@@ -899,6 +958,7 @@ pub fn MessagesRail(
                                         on_select_dm: move |pk| on_select_dm.call(pk),
                                         on_appearance: move |n| on_channel_appearance.call(n),
                                         on_delete: move |n| on_delete_channel.call(n),
+                                        on_clear: move |pair| on_clear_channel.call(pair),
                                         on_changed: move |_| bump(),
                                     }
                                 }
@@ -1168,7 +1228,7 @@ pub fn MessagesRail(
                     }
                 }
             } else {
-                // Contacts: roster auto-fills; custom sections + manual/favorite add.
+                // Contacts: Favorites / Saved / Discovered (+ infra).
                 div { class: "messages-rail-toolbar",
                     button {
                         r#type: "button",
@@ -1188,7 +1248,7 @@ pub fn MessagesRail(
                     button {
                         r#type: "button",
                         class: "messages-rail-tool",
-                        title: "Add a contact by public key",
+                        title: "Add a contact by public key (Saved)",
                         onclick: move |_| {
                             contact_key.set(String::new());
                             contact_label.set(String::new());
@@ -1199,34 +1259,36 @@ pub fn MessagesRail(
                     }
                 }
                 RailSectionHeader {
-                    title: "Pinned".to_string(),
-                    icon: pinned_icon.clone(),
-                    section_id: pinned_id,
-                    collapsed: pinned_collapsed,
+                    title: "Favorites".to_string(),
+                    icon: contact_fav_icon.clone(),
+                    section_id: contact_fav_id,
+                    collapsed: contact_fav_collapsed,
                     can_delete: false,
                     on_toggle: move |_| {
-                        if let Some(id) = pinned_id {
-                            let _ = state().db.set_messages_section_collapsed(id, !pinned_collapsed);
+                        if let Some(id) = contact_fav_id {
+                            let _ = state()
+                                .db
+                                .set_messages_section_collapsed(id, !contact_fav_collapsed);
                             bump();
                         }
                     },
                     on_delete: move |_| {},
                     on_edit_icon: move |id| {
-                        section_emoji.set(pinned_icon.clone());
+                        section_emoji.set(contact_fav_icon.clone());
                         dialog.set(Some(RailDialog::SetSectionIcon {
                             id,
-                            current: pinned_icon.clone(),
+                            current: contact_fav_icon.clone(),
                         }));
                     },
                 }
-                if !pinned_collapsed {
+                if !contact_fav_collapsed {
                     div { class: "messages-rail-list",
-                        if pinned.is_empty() {
-                            p { class: "messages-rail-empty", "Star a roster contact, Add manually, or use Add on a contact link." }
-                        } else if pinned_filtered.is_empty() {
-                            p { class: "messages-rail-empty", "No pinned contacts match." }
+                        if contact_favorites.is_empty() {
+                            p { class: "messages-rail-empty",
+                                "Star a contact for quick access."
+                            }
                         }
-                        for (stripe_i, row) in pinned_filtered.iter().enumerate() {
+                        for (stripe_i, row) in contact_favorites.iter().enumerate() {
                             {
                                 let pubkey = row.pubkey.clone();
                                 let label = if row.label.trim().is_empty() {
@@ -1248,6 +1310,7 @@ pub fn MessagesRail(
                                         contact_type: 1,
                                         active,
                                         pinned: true,
+                                        favorited: true,
                                         zebra,
                                         refreshing,
                                         sections: contact_custom_sections.clone(),
@@ -1269,6 +1332,110 @@ pub fn MessagesRail(
                                         },
                                     }
                                 }
+                            }
+                        }
+                        if contact_fav_limit() < contact_fav_total {
+                            button {
+                                r#type: "button",
+                                class: "messages-rail-load-more",
+                                onclick: move |_| {
+                                    contact_fav_limit.set(
+                                        contact_fav_limit()
+                                            .saturating_add(RAIL_CONTACTS_PAGE)
+                                            .min(contact_fav_total),
+                                    );
+                                },
+                                "Load more · {contact_fav_total.saturating_sub(contact_fav_limit())}"
+                            }
+                        }
+                    }
+                }
+                RailSectionHeader {
+                    title: "Saved".to_string(),
+                    icon: pinned_icon.clone(),
+                    section_id: pinned_id,
+                    collapsed: pinned_collapsed,
+                    can_delete: false,
+                    on_toggle: move |_| {
+                        if let Some(id) = pinned_id {
+                            let _ = state().db.set_messages_section_collapsed(id, !pinned_collapsed);
+                            bump();
+                        }
+                    },
+                    on_delete: move |_| {},
+                    on_edit_icon: move |id| {
+                        section_emoji.set(pinned_icon.clone());
+                        dialog.set(Some(RailDialog::SetSectionIcon {
+                            id,
+                            current: pinned_icon.clone(),
+                        }));
+                    },
+                }
+                if !pinned_collapsed {
+                    div { class: "messages-rail-list",
+                        if contact_saved.is_empty() {
+                            p { class: "messages-rail-empty",
+                                "Add a contact card or save a discovered node."
+                            }
+                        }
+                        for (stripe_i, row) in contact_saved.iter().enumerate() {
+                            {
+                                let pubkey = row.pubkey.clone();
+                                let label = if row.label.trim().is_empty() {
+                                    pubkey.chars().take(12).collect::<String>()
+                                } else {
+                                    row.label.clone()
+                                };
+                                let active = selected_dm.as_ref() == Some(&pubkey);
+                                let name_only = pubkey.starts_with("name:");
+                                let zebra = stripe_i % 2 == 1;
+                                rsx! {
+                                    ContactNodeItem {
+                                        pubkey: pubkey.clone(),
+                                        label: if name_only {
+                                            format!("{label} (awaiting advert)")
+                                        } else {
+                                            label
+                                        },
+                                        contact_type: 1,
+                                        active,
+                                        pinned: true,
+                                        favorited: false,
+                                        zebra,
+                                        refreshing,
+                                        sections: contact_custom_sections.clone(),
+                                        details,
+                                        on_add_section: move |(kind, key)| {
+                                            section_name.set(String::new());
+                                            section_emoji.set(String::new());
+                                            dialog.set(Some(RailDialog::NewSection {
+                                                tab: "contacts".into(),
+                                                move_item: Some((kind, key)),
+                                            }));
+                                        },
+                                        on_select: move |k: String| {
+                                            open_dm_if_pubkey(k, on_select_dm);
+                                        },
+                                        on_changed: move |_| bump(),
+                                        on_block: move |(key, label)| {
+                                            dialog.set(Some(RailDialog::BlockConfirm { key, label }));
+                                        },
+                                    }
+                                }
+                            }
+                        }
+                        if contact_saved_limit() < contact_saved_total {
+                            button {
+                                r#type: "button",
+                                class: "messages-rail-load-more",
+                                onclick: move |_| {
+                                    contact_saved_limit.set(
+                                        contact_saved_limit()
+                                            .saturating_add(RAIL_CONTACTS_PAGE)
+                                            .min(contact_saved_total),
+                                    );
+                                },
+                                "Load more · {contact_saved_total.saturating_sub(contact_saved_limit())}"
                             }
                         }
                     }
@@ -1348,7 +1515,10 @@ pub fn MessagesRail(
                                     for (stripe_i, (_ik, key)) in members.iter().enumerate() {
                                         if let Some(node) = nodes.iter().find(|n| &n.pubkey == key).cloned() {
                                             {
-                                                let pinned_on = pinned_set.contains(&node.pubkey);
+                                                let pinned_on = pinned_set.contains(&node.pubkey)
+                                                    || pinned_set.contains(&node.pubkey.to_ascii_lowercase());
+                                                let fav_on = dm_fav_keys
+                                                    .contains(&node.pubkey.to_ascii_lowercase());
                                                 let active = selected_dm.as_ref() == Some(&node.pubkey);
                                                 let zebra = stripe_i % 2 == 1;
                                                 rsx! {
@@ -1358,6 +1528,7 @@ pub fn MessagesRail(
                                                         contact_type: node.contact_type,
                                                         active,
                                                         pinned: pinned_on,
+                                                        favorited: fav_on,
                                                         zebra,
                                                         refreshing,
                                                         sections: contact_custom_sections.clone(),
@@ -1385,6 +1556,8 @@ pub fn MessagesRail(
                                                 } else {
                                                     row.label.clone()
                                                 };
+                                                let fav_on = dm_fav_keys
+                                                    .contains(&row.pubkey.to_ascii_lowercase());
                                                 let active = selected_dm.as_ref() == Some(&row.pubkey);
                                                 let zebra = stripe_i % 2 == 1;
                                                 rsx! {
@@ -1394,6 +1567,7 @@ pub fn MessagesRail(
                                                         contact_type: 1,
                                                         active,
                                                         pinned: true,
+                                                        favorited: fav_on,
                                                         zebra,
                                                         refreshing,
                                                         sections: contact_custom_sections.clone(),
@@ -1424,7 +1598,7 @@ pub fn MessagesRail(
                 }
 
                 RailSectionHeader {
-                    title: "Roster".to_string(),
+                    title: "Discovered".to_string(),
                     icon: roster_icon.clone(),
                     section_id: chat_dev_id,
                     collapsed: chat_dev_collapsed,
@@ -1447,12 +1621,13 @@ pub fn MessagesRail(
                 if !chat_dev_collapsed {
                     div { class: "messages-rail-list",
                         if roster_nodes.is_empty() {
-                            p { class: "messages-rail-empty", "Roster chat devices appear here automatically." }
+                            p { class: "messages-rail-empty",
+                                "Heard chat nodes appear here. Star to Favorite, or Add to save without starring. Enrollment ops stay on nav Roster."
+                            }
                         }
                         for (stripe_i, node) in roster_nodes.iter().enumerate() {
                             {
                                 let active = selected_dm.as_ref() == Some(&node.pubkey);
-                                let pinned_on = pinned_set.contains(&node.pubkey);
                                 let zebra = stripe_i % 2 == 1;
                                 rsx! {
                                     ContactNodeItem {
@@ -1460,7 +1635,8 @@ pub fn MessagesRail(
                                         label: node_label(node),
                                         contact_type: node.contact_type,
                                         active,
-                                        pinned: pinned_on,
+                                        pinned: false,
+                                        favorited: false,
                                         zebra,
                                         refreshing,
                                         sections: contact_custom_sections.clone(),
@@ -1480,6 +1656,20 @@ pub fn MessagesRail(
                                         },
                                     }
                                 }
+                            }
+                        }
+                        if contact_disc_limit() < roster_total {
+                            button {
+                                r#type: "button",
+                                class: "messages-rail-load-more",
+                                onclick: move |_| {
+                                    contact_disc_limit.set(
+                                        contact_disc_limit()
+                                            .saturating_add(RAIL_CONTACTS_PAGE)
+                                            .min(roster_total),
+                                    );
+                                },
+                                "Load more · {roster_total.saturating_sub(contact_disc_limit())}"
                             }
                         }
                     }
@@ -1512,7 +1702,6 @@ pub fn MessagesRail(
                         }
                         for (stripe_i, node) in default_infra.iter().enumerate() {
                             {
-                                let pinned_on = pinned_set.contains(&node.pubkey);
                                 let active = selected_dm.as_ref() == Some(&node.pubkey);
                                 let zebra = stripe_i % 2 == 1;
                                 rsx! {
@@ -1521,7 +1710,8 @@ pub fn MessagesRail(
                                         label: node_label(node),
                                         contact_type: node.contact_type,
                                         active,
-                                        pinned: pinned_on,
+                                        pinned: false,
+                                        favorited: false,
                                         zebra,
                                         refreshing,
                                         sections: contact_custom_sections.clone(),
@@ -1541,6 +1731,20 @@ pub fn MessagesRail(
                                         },
                                     }
                                 }
+                            }
+                        }
+                        if contact_infra_limit() < infra_total {
+                            button {
+                                r#type: "button",
+                                class: "messages-rail-load-more",
+                                onclick: move |_| {
+                                    contact_infra_limit.set(
+                                        contact_infra_limit()
+                                            .saturating_add(RAIL_CONTACTS_PAGE)
+                                            .min(infra_total),
+                                    );
+                                },
+                                "Load more · {infra_total.saturating_sub(contact_infra_limit())}"
                             }
                         }
                     }
@@ -1573,7 +1777,7 @@ pub fn MessagesRail(
                                     if will_move {
                                         "Name the section. The selected item moves into it after create."
                                     } else if section_tab == "contacts" {
-                                        "Create a custom Contacts section, then move roster contacts into it."
+                                        "Create a custom Contacts section, then move contacts into it."
                                     } else if section_tab == "dms" {
                                         "Create a custom DMs section, then move direct threads into it."
                                     } else {
@@ -1707,7 +1911,7 @@ pub fn MessagesRail(
                         },
                         Some(RailDialog::AddContact) => rsx! {
                             p { class: "text-sm text-muted-foreground",
-                                "Paste a 64-character public key. Optional label for the Contacts list."
+                                "Paste a 64-character public key. Adds to Contacts → Saved (star later for Favorites)."
                             }
                             TextInput {
                                 value: contact_key(),
@@ -1729,11 +1933,7 @@ pub fn MessagesRail(
                                     onclick: move |_| {
                                         match state().db.pin_contact(&contact_key(), &contact_label()) {
                                             Ok(()) => {
-                                                let _ = state().db.set_messages_favorite(
-                                                    "dm",
-                                                    &contact_key().trim().to_ascii_lowercase(),
-                                                    true,
-                                                );
+                                                // Add → Saved only; star later for Favorites.
                                                 dialog.set(None);
                                                 bump();
                                             }
@@ -1989,6 +2189,16 @@ fn RailDetailsSlide(
                     let refresh_busy = refresh_key
                         .as_ref()
                         .is_some_and(|k| refreshing().contains(k));
+                    let details_pk = node.pubkey.clone();
+                    let details_label = node_label(node);
+                    let in_saved = state()
+                        .db
+                        .list_pinned_contacts()
+                        .ok()
+                        .into_iter()
+                        .flatten()
+                        .any(|row| row.pubkey.eq_ignore_ascii_case(&details_pk));
+                    let in_fav = contact_is_favorited(&details_pk);
                     rsx! {
                 div { class: "flex flex-col gap-4 text-sm",
                     div { class: "flex flex-wrap gap-2",
@@ -2010,6 +2220,72 @@ fn RailDetailsSlide(
                                 }
                                 if refresh_busy { "Refreshing…" } else { "Refresh contact" }
                             }
+                        }
+                        if in_saved {
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                disabled: true,
+                                Icon { name: IconName::Check, size: 14 }
+                                "In Contacts"
+                            }
+                        } else {
+                            Button {
+                                kind: ButtonKind::Ghost,
+                                onclick: {
+                                    let pk = details_pk.clone();
+                                    let lb = details_label.clone();
+                                    move |_| {
+                                        match state().db.pin_contact(&pk, &lb) {
+                                            Ok(()) => {
+                                                crate::toast::push(
+                                                    crate::toast::ToastKind::Success,
+                                                    "Saved to Contacts.",
+                                                );
+                                                on_refreshed.call(());
+                                            }
+                                            Err(err) => crate::toast::push(
+                                                crate::toast::ToastKind::Error,
+                                                err.to_string(),
+                                            ),
+                                        }
+                                    }
+                                },
+                                Icon { name: IconName::Users, size: 14 }
+                                "Add to Contacts"
+                            }
+                        }
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: {
+                                let pk = details_pk.clone();
+                                let lb = details_label.clone();
+                                move |_| {
+                                    match toggle_contact_favorite(&pk, &lb) {
+                                        Ok((on, _)) => {
+                                            crate::toast::push(
+                                                crate::toast::ToastKind::Success,
+                                                if on {
+                                                    "Added to Favorites."
+                                                } else {
+                                                    "Removed from Favorites."
+                                                },
+                                            );
+                                            on_refreshed.call(());
+                                        }
+                                        Err(err) => crate::toast::push(
+                                            crate::toast::ToastKind::Error,
+                                            err,
+                                        ),
+                                    }
+                                }
+                            },
+                            Icon { name: IconName::Star, size: 14 }
+                            if in_fav { "Favorited" } else { "Favorite" }
+                        }
+                    }
+                    if refresh_busy {
+                        p { class: "text-xs text-sky-200/90",
+                            "Mesh requests in flight (path → status → telemetry). Expect up to about a minute; a toast reports the result."
                         }
                     }
                     div { class: "grid gap-3 sm:grid-cols-2",
@@ -2246,8 +2522,11 @@ fn RailItemMenuPanel(
     sections: Vec<MessagesRailSection>,
     #[props(default = false)] show_appearance: bool,
     #[props(default = false)] can_delete: bool,
+    #[props(default = "Delete".to_string())] delete_label: String,
     #[props(default = false)] show_clear: bool,
     #[props(default = false)] is_contact_pin: bool,
+    /// Save to Contacts → Saved without starring (Discovered rows).
+    #[props(default = false)] show_save_contact: bool,
     /// Contact/DM with a real pubkey — offer companion advert-path fetch.
     #[props(default = false)] show_fetch_path: bool,
     /// Lightweight advert-path cache read (no mesh Status).
@@ -2272,6 +2551,7 @@ fn RailItemMenuPanel(
     let mut move_open = use_signal(|| false);
     let fav_kind = item_kind.clone();
     let fav_key = item_key.clone();
+    let save_key = item_key.clone();
     let move_kind = item_kind.clone();
     let move_key = item_key.clone();
     let add_kind = item_kind.clone();
@@ -2325,8 +2605,8 @@ fn RailItemMenuPanel(
                     role: "menuitem",
                     onclick: move |_| {
                         if is_contact_pin {
+                            // Star = Favorites only; keep Saved on unstar.
                             if favorite {
-                                let _ = state().db.unpin_contact(&fav_key);
                                 let _ = state().db.set_messages_favorite("dm", &fav_key, false);
                             } else {
                                 let _ = state().db.pin_contact(&fav_key, "");
@@ -2341,11 +2621,26 @@ fn RailItemMenuPanel(
                     Icon { name: IconName::Star, size: 12 }
                     if favorite { "Remove favorite" } else { "Add to favorites" }
                 }
+            if show_save_contact {
+                button {
+                    r#type: "button",
+                    class: "rail-item-menu-item",
+                    role: "menuitem",
+                    title: "Save to Contacts → Saved (not Favorites)",
+                    onclick: move |_| {
+                        let _ = state().db.pin_contact(&save_key, "");
+                        on_changed.call(());
+                        on_close.call(());
+                    },
+                    Icon { name: IconName::Users, size: 12 }
+                    "Add to Contacts"
+                }
+            }
             button {
                 r#type: "button",
                 class: "rail-item-menu-item",
                 role: "menuitem",
-                title: "Open details for this item",
+                title: "Open stored details for this contact or channel",
                 onclick: move |_| {
                     on_details.call(());
                     on_close.call(());
@@ -2358,7 +2653,7 @@ fn RailItemMenuPanel(
                     r#type: "button",
                     class: "rail-item-menu-item",
                     role: "menuitem",
-                    title: "Read companion advert-path cache for this key (local — builds a route for Ping)",
+                    title: "Read this companion’s local advert-path cache (not over the air) — builds a unicast route for Ping",
                     onclick: move |_| {
                         on_close.call(());
                         on_advert_path.call(advert_key.clone());
@@ -2372,7 +2667,7 @@ fn RailItemMenuPanel(
                     r#type: "button",
                     class: "rail-item-menu-item",
                     role: "menuitem",
-                    title: "Mesh status ping — SNR / RSSI / battery (uses airtime; needs a unicast route)",
+                    title: "Mesh status ping (uses airtime; needs a unicast route from Advert path or path update)",
                     onclick: move |_| {
                         on_close.call(());
                         on_ping.call(ping_key.clone());
@@ -2531,7 +2826,7 @@ fn RailItemMenuPanel(
                         on_close.call(());
                     },
                     Icon { name: IconName::Trash, size: 12 }
-                    "Delete"
+                    "{delete_label}"
                 }
             }
             if show_clear {
@@ -2544,7 +2839,11 @@ fn RailItemMenuPanel(
                         on_close.call(());
                     },
                     Icon { name: IconName::Trash, size: 12 }
-                    "Clear conversation"
+                    if item_kind == "channel" {
+                        "Clear history"
+                    } else {
+                        "Clear conversation"
+                    }
                 }
             }
             }
@@ -2564,10 +2863,12 @@ fn ChannelRailItem(
     on_select_dm: EventHandler<String>,
     on_appearance: EventHandler<String>,
     on_delete: EventHandler<String>,
+    on_clear: EventHandler<(String, i64)>,
     on_changed: EventHandler<()>,
     on_add_section: EventHandler<(String, String)>,
 ) -> Element {
     let name = channel.name.clone();
+    let clear_slot = channel.slot;
     let can_delete = !name.eq_ignore_ascii_case("Public")
         && !state().db.is_reserved_private(&name);
     let unread = channel.unread_count;
@@ -2697,12 +2998,16 @@ fn ChannelRailItem(
                             item_key: menu_key.clone(),
                             sections: sections.clone(),
                             show_appearance: true,
+                            show_clear: true,
                             can_delete,
                             on_close: move |_| menu.set(None),
                             on_changed: move |_| on_changed.call(()),
                             on_appearance: move |_| on_appearance.call(appear_name.clone()),
                             on_delete: move |_| on_delete.call(delete_name.clone()),
-                            on_clear: move |_| {},
+                            on_clear: {
+                                let clear_name = name.clone();
+                                move |_| on_clear.call((clear_name.clone(), clear_slot))
+                            },
                             on_add_section: move |pair| on_add_section.call(pair),
                             on_details: move |_| {
                                 details.set(Some(RailDetails::Channel(details_key.clone())));
@@ -2738,6 +3043,10 @@ fn ChannelRailItem(
                         } else {
                             "messages-rail-speaker messages-rail-speaker-nokey"
                         };
+                        let sp_fav = sp_key
+                            .as_ref()
+                            .is_some_and(|pk| contact_is_favorited(pk))
+                            || contact_is_favorited(&format!("name:{}", sp_name.trim().to_ascii_lowercase()));
                         rsx! {
                             button {
                                 key: "sp-{name}-{sp_name}-{seed}",
@@ -2760,6 +3069,7 @@ fn ChannelRailItem(
                                     label: sp_name.clone(),
                                     seed: seed.clone(),
                                     compact: true,
+                                    favorited: sp_fav,
                                 }
                                 span { class: "messages-rail-speaker-label", "{sp_name}" }
                             }
@@ -2826,6 +3136,7 @@ fn DmRailItem(
                 ConversationAvatar {
                     label: label.clone(),
                     seed: pubkey.clone(),
+                    favorited: favorite,
                 }
                 span { class: "messages-rail-item-label", "{label}" }
                 if is_refreshing {
@@ -2922,7 +3233,10 @@ fn ContactNodeItem(
     label: String,
     contact_type: u8,
     active: bool,
+    /// In Contacts → Saved (or Favorites).
     pinned: bool,
+    /// In Contacts → Favorites (starred).
+    #[props(default = false)] favorited: bool,
     #[props(default = false)] zebra: bool,
     sections: Vec<MessagesRailSection>,
     details: Signal<Option<RailDetails>>,
@@ -2938,6 +3252,7 @@ fn ContactNodeItem(
     let menu_key = pubkey.clone();
     let menu_label = pin_label.clone();
     let details_key = pubkey.clone();
+    let remove_key = pubkey.clone();
     let blocked = rail_contact_is_blocked(&pubkey, &menu_label);
     let is_refreshing = refreshing().contains(&pubkey);
     let mut menu = use_signal(|| None::<RailItemMenuAnchor>);
@@ -2974,6 +3289,7 @@ fn ContactNodeItem(
                 ConversationAvatar {
                     label: label.clone(),
                     seed: pubkey.clone(),
+                    favorited,
                 }
                 span { class: "messages-rail-item-label", "{label}" }
                 if is_refreshing {
@@ -2985,27 +3301,23 @@ fn ContactNodeItem(
             }
             button {
                 r#type: "button",
-                class: if pinned {
+                class: if favorited {
                     "messages-rail-item-action messages-rail-item-action-fav-on"
                 } else {
                     "messages-rail-item-action"
                 },
-                title: if pinned {
-                    "Remove from Pinned"
+                title: if favorited {
+                    "Remove from Favorites (stays in Saved)"
                 } else {
-                    "Favorite — add to Pinned contacts"
+                    "Add to Favorites"
                 },
                 onclick: move |event: MouseEvent| {
                     event.prevent_default();
                     event.stop_propagation();
-                    if pinned {
-                        let _ = state().db.unpin_contact(&pin_key);
-                        let _ = state().db.set_messages_favorite("dm", &pin_key, false);
-                    } else {
-                        let _ = state().db.pin_contact(&pin_key, &pin_label);
-                        let _ = state().db.set_messages_favorite("dm", &pin_key, true);
+                    match toggle_contact_favorite(&pin_key, &pin_label) {
+                        Ok(_) => on_changed.call(()),
+                        Err(err) => crate::toast::push(crate::toast::ToastKind::Error, err),
                     }
-                    on_changed.call(());
                 },
                 Icon { name: IconName::Star, size: 12 }
             }
@@ -3033,12 +3345,15 @@ fn ContactNodeItem(
                 if let Some(anchor) = menu() {
                     RailItemMenuPanel {
                         anchor,
-                        favorite: pinned,
+                        favorite: favorited,
                         item_kind: "contact".to_string(),
                         item_key: menu_key.clone(),
                         item_label: menu_label.clone(),
                         sections: sections.clone(),
                         is_contact_pin: true,
+                        show_save_contact: !pinned,
+                        can_delete: pinned,
+                        delete_label: "Remove from Contacts".to_string(),
                         show_fetch_path: has_pubkey,
                         show_advert_path: has_pubkey,
                         show_ping: has_pubkey && node_has_unicast_route(&menu_key),
@@ -3047,7 +3362,11 @@ fn ContactNodeItem(
                         on_close: move |_| menu.set(None),
                         on_changed: move |_| on_changed.call(()),
                         on_appearance: move |_| {},
-                        on_delete: move |_| {},
+                        on_delete: move |_| {
+                            let _ = state().db.unpin_contact(&remove_key);
+                            let _ = state().db.set_messages_favorite("dm", &remove_key, false);
+                            on_changed.call(());
+                        },
                         on_clear: move |_| {},
                         on_add_section: move |pair| on_add_section.call(pair),
                         on_details: move |_| {
@@ -3216,6 +3535,7 @@ fn open_dm_if_pubkey(key: String, on_select_dm: EventHandler<String>) {
     }
 }
 
+/// Save to Contacts → Saved (does not auto-favorite).
 pub fn pin_contact_from_message(pubkey: &str, label: &str) -> Result<bool, String> {
     let (key, nice) = resolve_contact_pubkey(Some(pubkey), label)?;
     state()
@@ -3223,9 +3543,6 @@ pub fn pin_contact_from_message(pubkey: &str, label: &str) -> Result<bool, Strin
         .pin_contact(&key, &nice)
         .map_err(|e| e.to_string())?;
     let name_only = !is_hex_pubkey(&key);
-    if !name_only {
-        let _ = state().db.set_messages_favorite("dm", &key, true);
-    }
     let _ = unix_now();
     Ok(name_only)
 }
@@ -3272,22 +3589,28 @@ pub fn join_channel_from_message(name: &str, secret: &[u8; 16]) -> Result<String
     Ok(format!("Joined {} on slot {}", row.name, row.slot))
 }
 
-/// Toggle Pinned Contacts (+ DM favorite flag) for a sender.
-/// Returns `(now_pinned, name_only)` — `name_only` when the sender has no pubkey yet.
+/// Whether this contact key is in Contacts → Favorites (`messages_favorites` dm).
+pub fn contact_is_favorited(key: &str) -> bool {
+    let key = key.trim().to_ascii_lowercase();
+    state()
+        .db
+        .list_messages_favorites()
+        .ok()
+        .into_iter()
+        .flatten()
+        .any(|(kind, k)| {
+            kind == "dm" && (k == key || k.eq_ignore_ascii_case(&key))
+        })
+}
+
+/// Toggle Contacts → Favorites for a sender.
+/// Starring ensures they are Saved; unstarring leaves them in Saved.
+/// Returns `(now_favorited, name_only)`.
 pub fn toggle_contact_favorite(pubkey: &str, label: &str) -> Result<(bool, bool), String> {
     let (key, nice) = resolve_contact_pubkey(Some(pubkey), label)?;
     let name_only = !is_hex_pubkey(&key);
-    let pinned = state()
-        .db
-        .list_pinned_contacts()
-        .map_err(|e| e.to_string())?
-        .iter()
-        .any(|row| row.pubkey.eq_ignore_ascii_case(&key));
-    if pinned {
-        state()
-            .db
-            .unpin_contact(&key)
-            .map_err(|e| e.to_string())?;
+    let favorited = contact_is_favorited(&key);
+    if favorited {
         let _ = state().db.set_messages_favorite("dm", &key, false);
         Ok((false, name_only))
     } else {
@@ -3295,10 +3618,8 @@ pub fn toggle_contact_favorite(pubkey: &str, label: &str) -> Result<(bool, bool)
             .db
             .pin_contact(&key, &nice)
             .map_err(|e| e.to_string())?;
-        // Only star the DMs list when we have a real pubkey (name bookmarks stay in Contacts → Pinned).
-        if !name_only {
-            let _ = state().db.set_messages_favorite("dm", &key, true);
-        }
+        // Name-only bookmarks stay Saved until a pubkey exists; still mark favorite.
+        let _ = state().db.set_messages_favorite("dm", &key, true);
         Ok((true, name_only))
     }
 }

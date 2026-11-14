@@ -719,14 +719,22 @@ impl Db {
             "ALTER TABLE messages_rail_sections ADD COLUMN icon TEXT NOT NULL DEFAULT ''",
             [],
         );
-        // Older seeds used "Chat devices"; rename the builtin label in place.
+        // Older seeds used "Chat devices" then "Roster"; Contacts groups are now
+        // Favorites / Saved / Discovered (#4).
         let _ = conn.execute(
-            "UPDATE messages_rail_sections SET name = 'Roster'
-             WHERE tab = 'contacts' AND kind = 'chat_devices' AND name = 'Chat devices'",
+            "UPDATE messages_rail_sections SET name = 'Discovered'
+             WHERE tab = 'contacts' AND kind = 'chat_devices'
+               AND name IN ('Chat devices', 'Roster')",
+            [],
+        );
+        let _ = conn.execute(
+            "UPDATE messages_rail_sections SET name = 'Saved'
+             WHERE tab = 'contacts' AND kind = 'pinned' AND name = 'Pinned'",
             [],
         );
         Self::seed_messages_rail_sections(conn)?;
         Self::ensure_dms_rail_builtins(conn)?;
+        Self::ensure_contacts_rail_builtins(conn)?;
         Self::cleanup_cross_tab_section_members(conn)
     }
 
@@ -917,8 +925,9 @@ impl Db {
             ("chats", "channels", "Channels", 10),
             ("dms", "favorites", "Favorites", 0),
             ("dms", "dms", "Direct messages", 10),
-            ("contacts", "pinned", "Pinned", 0),
-            ("contacts", "chat_devices", "Roster", 10),
+            ("contacts", "favorites", "Favorites", 0),
+            ("contacts", "pinned", "Saved", 5),
+            ("contacts", "chat_devices", "Discovered", 10),
             ("contacts", "infra_nodes", "Repeaters & rooms", 20),
         ];
         for (tab, kind, name, order) in builtins {
@@ -927,6 +936,41 @@ impl Db {
                  VALUES (?1, ?2, ?3, ?4, 0, '')",
                 params![tab, kind, name, order],
             )?;
+        }
+        Ok(())
+    }
+
+    /// Contacts tab: Favorites / Saved / Discovered builtins for existing databases.
+    fn ensure_contacts_rail_builtins(conn: &Connection) -> Result<()> {
+        let builtins = [
+            ("contacts", "favorites", "Favorites", 0),
+            ("contacts", "pinned", "Saved", 5),
+            ("contacts", "chat_devices", "Discovered", 10),
+            ("contacts", "infra_nodes", "Repeaters & rooms", 20),
+        ];
+        for (tab, kind, name, order) in builtins {
+            let exists: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM messages_rail_sections
+                 WHERE tab = ?1 AND kind = ?2",
+                params![tab, kind],
+                |r| r.get(0),
+            )?;
+            if exists == 0 {
+                conn.execute(
+                    "INSERT INTO messages_rail_sections (tab, kind, name, sort_order, collapsed, icon)
+                     VALUES (?1, ?2, ?3, ?4, 0, '')",
+                    params![tab, kind, name, order],
+                )?;
+            } else {
+                // Keep operator-customized icons; refresh stock labels / order.
+                let _ = conn.execute(
+                    "UPDATE messages_rail_sections
+                     SET name = ?3, sort_order = ?4
+                     WHERE tab = ?1 AND kind = ?2
+                       AND name IN ('Pinned', 'Roster', 'Chat devices', 'Favorites', 'Saved', 'Discovered', 'Repeaters & rooms')",
+                    params![tab, kind, name, order],
+                );
+            }
         }
         Ok(())
     }
@@ -1237,6 +1281,9 @@ impl Db {
         }
         if self.setting("update_check_enabled")?.is_none() {
             self.set_setting("update_check_enabled", "1")?;
+        }
+        if self.setting("messages_follow_newest")?.is_none() {
+            self.set_setting("messages_follow_newest", "1")?;
         }
         if self.setting("svc_weather_enabled")?.is_none() {
             self.set_setting("svc_weather_enabled", "1")?;
@@ -3184,13 +3231,89 @@ impl Db {
             params![key],
         )? as u64;
         if deleted > 0 {
-            conn.execute(
-                "DELETE FROM paths WHERE message_id IS NOT NULL AND message_id NOT IN (SELECT id FROM messages)",
-                [],
-            )?;
+            Self::cleanup_orphan_paths(&conn)?;
         }
         drop(conn);
         let _ = self.set_setting(&Self::dm_last_read_key(key), "0");
+        Ok(deleted)
+    }
+
+    fn cleanup_orphan_paths(conn: &rusqlite::Connection) -> Result<()> {
+        conn.execute(
+            "DELETE FROM paths WHERE message_id IS NOT NULL AND message_id NOT IN (SELECT id FROM messages)",
+            [],
+        )?;
+        Ok(())
+    }
+
+    fn audit_local(&self, action: &str, detail: &str) -> Result<()> {
+        self.lock().execute(
+            "INSERT INTO audit (at, action, pubkey, detail) VALUES (?1, ?2, '', ?3)",
+            params![unix_now(), action, detail],
+        )?;
+        Ok(())
+    }
+
+    /// Delete one local message by id (HQ only — not a mesh retract).
+    pub fn delete_message(&self, id: i64) -> Result<()> {
+        if id <= 0 {
+            return Err(Error::Msg("Message id required.".into()));
+        }
+        let conn = self.lock();
+        let deleted = conn.execute("DELETE FROM messages WHERE id = ?1", params![id])?;
+        if deleted == 0 {
+            return Err(Error::Msg("Message not found.".into()));
+        }
+        Self::cleanup_orphan_paths(&conn)?;
+        drop(conn);
+        let _ = self.audit_local("message_delete", &id.to_string());
+        Ok(())
+    }
+
+    /// Delete many local messages by id. Returns how many rows were removed.
+    pub fn delete_messages(&self, ids: &[i64]) -> Result<u64> {
+        let ids: Vec<i64> = ids.iter().copied().filter(|id| *id > 0).collect();
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.lock();
+        let tx = conn.unchecked_transaction()?;
+        let mut deleted: u64 = 0;
+        {
+            let mut stmt = tx.prepare("DELETE FROM messages WHERE id = ?1")?;
+            for id in &ids {
+                deleted += stmt.execute(params![id])? as u64;
+            }
+        }
+        if deleted > 0 {
+            Self::cleanup_orphan_paths(&tx)?;
+        }
+        tx.commit()?;
+        drop(conn);
+        if deleted > 0 {
+            let _ = self.audit_local("message_delete_batch", &deleted.to_string());
+        }
+        Ok(deleted)
+    }
+
+    /// Delete all channel messages for a slot. Keeps the channel row and secrets.
+    pub fn clear_channel_messages(&self, slot: i64) -> Result<u64> {
+        if slot < 0 {
+            return Err(Error::Msg("Channel slot required.".into()));
+        }
+        let conn = self.lock();
+        let deleted = conn.execute(
+            "DELETE FROM messages WHERE kind = 'channel' AND channel_idx = ?1",
+            params![slot],
+        )? as u64;
+        if deleted > 0 {
+            Self::cleanup_orphan_paths(&conn)?;
+        }
+        drop(conn);
+        let _ = self.set_channel_last_read(slot, 0);
+        if deleted > 0 {
+            let _ = self.audit_local("channel_clear", &format!("slot={slot};n={deleted}"));
+        }
         Ok(deleted)
     }
 
@@ -3732,22 +3855,32 @@ impl Db {
     }
 
     /// Count heard-only nodes (eligible for roster prune).
+    /// Skips claimed infrastructure — claim is independent of enrollment.
     pub fn count_heard_only_nodes(&self) -> Result<i64> {
         let conn = self.lock();
         Ok(conn.query_row(
-            "SELECT COUNT(*) FROM nodes WHERE enrollment = 'heard'",
+            "SELECT COUNT(*) FROM nodes n
+             WHERE n.enrollment = 'heard'
+               AND NOT EXISTS (
+                 SELECT 1 FROM claimed_infra c WHERE c.pubkey = n.pubkey
+               )",
             [],
             |row| row.get(0),
         )?)
     }
 
-    /// Remove heard-only roster rows and related tracker/block/claim rows.
-    /// Keeps enrolled, pending, denied, and HQ. Does not delete message history.
+    /// Remove heard-only roster rows and related tracker/block rows.
+    /// Keeps enrolled, pending, denied, HQ, and **claimed** infra (even when
+    /// enrollment is still `heard`). Does not delete message history.
     pub fn prune_heard_nodes(&self) -> Result<u64> {
         let conn = self.lock();
         let keys: Vec<String> = {
             let mut stmt = conn.prepare(
-                "SELECT pubkey FROM nodes WHERE enrollment = 'heard'",
+                "SELECT n.pubkey FROM nodes n
+                 WHERE n.enrollment = 'heard'
+                   AND NOT EXISTS (
+                     SELECT 1 FROM claimed_infra c WHERE c.pubkey = n.pubkey
+                   )",
             )?;
             let mapped = stmt.query_map([], |row| row.get(0))?;
             mapped.collect::<std::result::Result<Vec<_>, _>>()?
@@ -3758,7 +3891,6 @@ impl Db {
         for key in &keys {
             conn.execute("DELETE FROM tracked_nodes WHERE pubkey = ?1", params![key])?;
             conn.execute("DELETE FROM blocked_nodes WHERE pubkey = ?1", params![key])?;
-            conn.execute("DELETE FROM claimed_infra WHERE pubkey = ?1", params![key])?;
             conn.execute("DELETE FROM node_radios WHERE pubkey = ?1", params![key])?;
             conn.execute("DELETE FROM nodes WHERE pubkey = ?1", params![key])?;
         }
@@ -7544,6 +7676,67 @@ mod tests {
     }
 
     #[test]
+    fn delete_message_and_batch_clear_channel() {
+        let (db, _, dir) = test_db();
+        let raw = json!({});
+        let slot = 0i64; // Public
+        let a = db
+            .insert_message(
+                "channel", "rx", Some("aa11"), "aa11", Some(slot), Some(1), 1, "one", "one",
+                None, None, &raw, "received", None, "local",
+            )
+            .unwrap()
+            .unwrap();
+        let b = db
+            .insert_message(
+                "channel", "rx", Some("bb22"), "bb22", Some(slot), Some(1), 2, "two", "two",
+                None, None, &raw, "received", None, "local",
+            )
+            .unwrap()
+            .unwrap();
+        let c = db
+            .insert_message(
+                "channel", "rx", Some("cc33"), "cc33", Some(slot), Some(1), 3, "three", "three",
+                None, None, &raw, "received", None, "local",
+            )
+            .unwrap()
+            .unwrap();
+        db.lock()
+            .execute(
+                "INSERT INTO paths (message_id, node_pubkey, source, path, hash_size, created_at)
+                 VALUES (?1, 'aa11', 'test', x'01', 1, 1)",
+                params![a],
+            )
+            .unwrap();
+        db.delete_message(a).unwrap();
+        assert!(db.list_channel_messages(slot, 50).unwrap().0.iter().all(|m| m.id != a));
+        let path_left: i64 = db
+            .lock()
+            .query_row(
+                "SELECT COUNT(*) FROM paths WHERE message_id = ?1",
+                params![a],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(path_left, 0);
+        assert_eq!(db.delete_messages(&[b, c]).unwrap(), 2);
+        assert!(db.list_channel_messages(slot, 50).unwrap().0.is_empty());
+
+        let d = db
+            .insert_message(
+                "channel", "rx", Some("dd44"), "dd44", Some(slot), Some(1), 4, "four", "four",
+                None, None, &raw, "received", None, "local",
+            )
+            .unwrap()
+            .unwrap();
+        db.set_channel_last_read(slot, d).unwrap();
+        assert_eq!(db.clear_channel_messages(slot).unwrap(), 1);
+        assert!(db.list_channel_messages(slot, 50).unwrap().0.is_empty());
+        assert_eq!(db.channel_last_read(slot).unwrap(), Some(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn claim_infra_verified_sets_kind_and_verified_at() {
         let (db, _, dir) = test_db();
         // contact_type 2 → repeater, 3 → room, 4 → sensor
@@ -7992,18 +8185,25 @@ mod tests {
             .unwrap();
         db.upsert_contact("cc33", "Cara", 1, 0, -1, &[], 1, 0, 0, 1, &json!({}), false, None)
             .unwrap();
+        // Claimed repeater still enrollment=heard — must survive prune.
+        db.upsert_contact("dd44", "Rpt1", 2, 0, -1, &[], 1, 0, 0, 1, &json!({}), false, None)
+            .unwrap();
+        db.claim_infra_verified("dd44", None, "Rpt1", "").unwrap();
         db.set_enrollment("bb22", Enrollment::Pending, None).unwrap();
         db.approve("cc33", &secrets).unwrap();
-        assert_eq!(db.count_unnoticed_nodes().unwrap(), 3);
-        assert_eq!(db.mark_all_nodes_noticed().unwrap(), 3);
+        assert_eq!(db.count_unnoticed_nodes().unwrap(), 4);
+        assert_eq!(db.mark_all_nodes_noticed().unwrap(), 4);
         assert_eq!(db.count_unnoticed_nodes().unwrap(), 0);
         db.add_tracked_node("aa11", "Ada", "").unwrap();
         db.block_node("aa11", "Ada").unwrap();
+        // Ada heard-only; claimed repeater excluded from the count.
         assert_eq!(db.count_heard_only_nodes().unwrap(), 1);
         assert_eq!(db.prune_heard_nodes().unwrap(), 1);
         assert!(db.get_node("aa11").unwrap().is_none());
         assert!(db.get_node("bb22").unwrap().is_some());
         assert!(db.get_node("cc33").unwrap().is_some());
+        assert!(db.get_node("dd44").unwrap().is_some());
+        assert_eq!(db.count_claimed_infra().unwrap(), 1);
         assert!(!db.is_blocked("aa11").unwrap());
         assert!(db.list_tracked_nodes().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);

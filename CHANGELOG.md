@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## 0.1.23 — 2026-11-14
+
+Package version `0.1.23` (Cargo / About). Windows Details may show `0.1.23.0`.
+
+### Messages
+
+- **Follow newest** toggle on channel/DM headers (default on): always scroll to live traffic; Off keeps smart near-bottom follow + jump chip
+- In-list **New messages** marker is clickable (jumps to latest, same as the floating chip)
+- Local history: bubble **Delete**, header **Select** multi-delete, and channel rail **Clear history** (DM Clear already existed); removes HQ copies and orphan path rows only — not mesh retract (#3)
+- Last bubble’s hover action bar flips above the bubble so it is not clipped by the compose dock
+- Messages → Contacts: **Favorites** / **Saved** / **Discovered** (star vs save decoupled); nav Roster unchanged for enrollment ops (#4)
+- Scheduled weather / NWS / quake / amber mesh posts skip while no companion is connected (no fake Sent)
+- Channel bubble action bars open above the bubble (clears compose dock; consistent mid-thread)
+- Roster and Contacts lists paginate (Load more) so large meshes do not paint every row at once
+- **Follow newest** on channel open scrolls to latest (and clears the unread divider) instead of landing on New messages
+- Roster **Remove heard-only** no longer deletes claimed infrastructure (claims stay even when enrollment is still heard)
+- DM bubbles use the same hover action bar (above the bubble) as channels
+- Favorited contacts show a gold star stamp on the top-right of their avatar (rail, bubbles, Roster → Contacts)
+- Refresh contact keeps a progress toast for the full mesh round-trip and explains the wait in the details pane
+- Roster claim / revoke / DM / invite / prune feedback uses the toast stack (not an amber line on the page)
+
 ## 0.1.22 — 2026-11-13
 
 Package version `0.1.22` (Cargo / About). Windows Details may show `0.1.22.0`.

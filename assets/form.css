@@ -3025,6 +3025,50 @@ option {
   border-color: rgba(61, 214, 140, 0.7);
 }
 
+/* In-list New messages divider — clickable jump to latest. */
+.messages-new-marker-btn {
+  flex-shrink: 0;
+  margin: 0 0.15rem;
+  padding: 0.35rem 0.85rem;
+  border: none;
+  border-radius: 0.35rem;
+  background-color: #101418;
+  color: #3dd68c;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.messages-new-marker-btn:hover {
+  background-color: rgba(61, 214, 140, 0.12);
+}
+
+.messages-new-marker-btn-inline {
+  margin: 0;
+  padding: 0.15rem 0.45rem;
+  background: transparent;
+  letter-spacing: 0.02em;
+}
+
+.follow-newest-toggle {
+  max-width: 11.5rem;
+}
+
+.follow-newest-toggle .toggle-row {
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.follow-newest-toggle .toggle-label {
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.follow-newest-toggle .toggle-hint {
+  display: none;
+}
+
 .channel-unread-badge-mention {
   border-color: rgba(251, 191, 36, 0.45);
   background: rgba(251, 191, 36, 0.18);
@@ -3721,6 +3765,26 @@ html.hq-col-resize body {
   color: #9aa3af;
 }
 
+.messages-rail-load-more {
+  display: block;
+  width: 100%;
+  margin: 0.15rem 0 0.35rem;
+  padding: 0.35rem 0.5rem;
+  border: 0;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 0.72rem;
+  font-weight: 550;
+  text-align: center;
+  cursor: pointer;
+}
+
+.messages-rail-load-more:hover {
+  background: rgba(148, 163, 184, 0.12);
+  color: #e2e8f0;
+}
+
 /*
  * Channel keep control. Frozen assets/tailwind.css lacks flex-nowrap and
  * arbitrary widths (w-[8.5rem]), and SelectInput is w-full — together those
@@ -3764,6 +3828,50 @@ html.hq-col-resize body {
   flex: 1 1 auto;
   flex-direction: column;
   gap: 0.75rem;
+}
+
+.messages-avatar-wrap {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+
+.messages-avatar-fav-stamp {
+  position: absolute;
+  top: -0.22rem;
+  right: -0.28rem;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 0.95rem;
+  height: 0.95rem;
+  border-radius: 999px;
+  background: #101418;
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  color: #fbbf24;
+  pointer-events: none;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+
+.messages-avatar-wrap-sm .messages-avatar-fav-stamp {
+  top: -0.18rem;
+  right: -0.22rem;
+  width: 0.8rem;
+  height: 0.8rem;
+}
+
+.messages-avatar-wrap-lg .messages-avatar-fav-stamp {
+  top: -0.2rem;
+  right: -0.24rem;
+  width: 1.1rem;
+  height: 1.1rem;
+}
+
+.messages-avatar-fav-stamp svg {
+  fill: currentColor;
+  stroke: currentColor;
 }
 
 .messages-avatar {
@@ -4064,16 +4172,22 @@ html.hq-col-resize body {
   padding: 0.75rem 0.95rem;
 }
 
+/* Small pad so Follow-newest isn't flush against the compose dock. */
+#channel-scroller,
+#dm-scroller {
+  padding-bottom: 1.25rem;
+}
+
 .message-action-wrap {
   position: absolute;
-  /* Start at the bubble edge; padding-top is the visual gap AND a hit-test
-     bridge so the cursor never leaves :hover when moving onto the pill
-     (Windows WebView2 was dropping the bar across a top offset gap). */
-  top: 100%;
-  bottom: auto;
+  /* Above the bubble so the last row clears the compose dock and mid-thread
+     bars stay consistent. padding-bottom is the hover hit-test bridge. */
+  top: auto;
+  bottom: 100%;
   z-index: 20;
   display: none;
-  padding-top: 0.35rem;
+  padding-top: 0;
+  padding-bottom: 0.35rem;
   /* Keep the pill in the scrollport: incoming grow right, outgoing grow left. */
 }
 
@@ -4226,6 +4340,10 @@ html.hq-col-resize body {
   color: #fca5a5;
 }
 
+.message-action-btn.message-action-btn-delete {
+  color: #f87171;
+}
+
 .message-action-btn.message-action-btn-reply:hover {
   background: rgba(56, 189, 248, 0.22);
 }
@@ -4256,6 +4374,65 @@ html.hq-col-resize body {
 
 .message-action-btn.message-action-btn-block:hover {
   background: rgba(248, 113, 113, 0.22);
+}
+
+.message-action-btn.message-action-btn-delete:hover {
+  background: rgba(248, 113, 113, 0.22);
+}
+
+.messages-history-row {
+  width: 100%;
+}
+
+.messages-history-check {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  margin-top: 1.55rem;
+  border-radius: 0.35rem;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  background: rgba(15, 23, 42, 0.35);
+  cursor: pointer;
+}
+
+.messages-history-check input {
+  width: 0.9rem;
+  height: 0.9rem;
+  margin: 0;
+  accent-color: #38bdf8;
+  cursor: pointer;
+}
+
+.messages-history-check-on {
+  border-color: rgba(56, 189, 248, 0.7);
+  background: rgba(56, 189, 248, 0.16);
+}
+
+.messages-select-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.65rem 0.85rem;
+  border-top: 1px solid rgba(148, 163, 184, 0.25);
+  background: rgba(15, 23, 42, 0.72);
+}
+
+.messages-select-bar-count {
+  font-size: 0.8rem;
+  font-weight: 550;
+  color: #e4e4e7;
+}
+
+.messages-select-bar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 .message-action-btn:disabled {

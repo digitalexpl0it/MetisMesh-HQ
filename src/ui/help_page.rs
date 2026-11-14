@@ -394,7 +394,23 @@ pub fn HelpPage() -> Element {
                         ul { class: "help-bullets",
                             li {
                                 strong { "Messages" }
-                                " — Channels / DMs / Contacts rail. Channel traffic tracks who posted this session under each channel name (collapsed by default; cleared when HQ restarts). Direct threads need a public key from a contact card (`meshcore://contact/add` or phone-app `<pubkey:type:name>`) or a synced companion contact — channel display names alone are not enough. "
+                                " — Channels / DMs / Contacts rail. Contacts groups are "
+                                strong { "Favorites" }
+                                " (starred), "
+                                strong { "Saved" }
+                                " (added without a star), and "
+                                strong { "Discovered" }
+                                " (heard nodes not yet saved); enrollment invite/claim stay under nav "
+                                strong { "Roster" }
+                                ". Channel traffic tracks who posted this session under each channel name (collapsed by default; cleared when HQ restarts). Direct threads need a public key from a contact card (`meshcore://contact/add` or phone-app `<pubkey:type:name>`) or a synced companion contact — channel display names alone are not enough. "
+                                strong { "Follow newest" }
+                                " (channel/DM header, default on) always scrolls to live traffic; turn off to keep position when reading history (jump chip / New messages marker still jumps to latest). "
+                                strong { "Delete" }
+                                " / "
+                                strong { "Select" }
+                                " / "
+                                strong { "Clear history" }
+                                " remove messages from this HQ only (other radios keep their copies). "
                                 strong { "Advert path" }
                                 " / "
                                 strong { "Ping" }
@@ -782,7 +798,7 @@ pub fn HelpPage() -> Element {
                             }
                             li {
                                 strong { "Roster / Contacts" }
-                                " — approve pending enrollments only for people you trust; secrets are never shown in the log. DMs need a contact card or companion contact key — not a channel display name alone."
+                                " — approve pending enrollments on nav Roster only for people you trust; secrets are never shown in the log. Messages → Contacts is Favorites / Saved / Discovered for chat. DMs need a contact card or companion contact key — not a channel display name alone."
                             }
                             li {
                                 strong { "Flash only from cache" }

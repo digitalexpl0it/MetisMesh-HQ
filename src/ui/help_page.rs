@@ -394,7 +394,7 @@ pub fn HelpPage() -> Element {
                         ul { class: "help-bullets",
                             li {
                                 strong { "Messages" }
-                                " — Channels / DMs / Contacts rail. Channel traffic lists who posted this session under each channel name (cleared when HQ restarts). Direct threads need a public key from a contact card (`meshcore://contact/add` or phone-app `<pubkey:type:name>`) or a synced companion contact — channel display names alone are not enough. "
+                                " — Channels / DMs / Contacts rail. Channel traffic tracks who posted this session under each channel name (collapsed by default; cleared when HQ restarts). Direct threads need a public key from a contact card (`meshcore://contact/add` or phone-app `<pubkey:type:name>`) or a synced companion contact — channel display names alone are not enough. "
                                 strong { "Advert path" }
                                 " reads the companion advert-path cache (builds a route). "
                                 strong { "Ping" }
@@ -778,7 +778,7 @@ pub fn HelpPage() -> Element {
                             }
                             li {
                                 strong { "Channel" }
-                                " — open Messages → Channels; post a short check-in on your community channel so volunteers know HQ is live. Speakers who post appear under the channel for this session only."
+                                " — open Messages → Channels; post a short check-in on your community channel so volunteers know HQ is live. Speakers who post are listed under the channel for this session only (collapsed by default — expand the chevron to see them)."
                             }
                             li {
                                 strong { "Roster / Contacts" }

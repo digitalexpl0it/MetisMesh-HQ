@@ -2,8 +2,9 @@
 //!
 //! Cleared every process start. Populated only when a live channel message
 //! arrives — not from history reload or connect-queue drain.
+//! Rail lists stay collapsed by default; expand state is also session-only.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
 /// Someone who has posted to a channel during this HQ session.
@@ -16,6 +17,11 @@ pub struct ChannelSpeaker {
 fn speakers() -> &'static Mutex<HashMap<String, Vec<ChannelSpeaker>>> {
     static SPEAKERS: OnceLock<Mutex<HashMap<String, Vec<ChannelSpeaker>>>> = OnceLock::new();
     SPEAKERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn expanded() -> &'static Mutex<HashSet<String>> {
+    static EXPANDED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    EXPANDED.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
 fn channel_key(name: &str) -> String {
@@ -81,10 +87,43 @@ pub fn list(channel: &str) -> Vec<ChannelSpeaker> {
         .unwrap_or_default()
 }
 
+/// Whether the rail shows speakers under this channel (default: collapsed).
+pub fn is_expanded(channel: &str) -> bool {
+    let channel = channel.trim();
+    if channel.is_empty() {
+        return false;
+    }
+    expanded()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .contains(&channel_key(channel))
+}
+
+/// Toggle rail expand for session contacts under a channel. Returns the new open state.
+pub fn toggle_expanded(channel: &str) -> bool {
+    let channel = channel.trim();
+    if channel.is_empty() {
+        return false;
+    }
+    let key = channel_key(channel);
+    let mut guard = expanded().lock().unwrap_or_else(|err| err.into_inner());
+    if guard.contains(&key) {
+        guard.remove(&key);
+        false
+    } else {
+        guard.insert(key);
+        true
+    }
+}
+
 /// Drop every session speaker (tests / explicit reset).
 #[cfg(test)]
 pub fn clear_all() {
     speakers()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clear();
+    expanded()
         .lock()
         .unwrap_or_else(|err| err.into_inner())
         .clear();
@@ -105,6 +144,17 @@ mod tests {
         assert_eq!(rows[0].name, "Ada");
         assert_eq!(rows[0].pubkey.as_deref(), Some("ccdd"));
         assert_eq!(rows[1].name, "Bob");
+        clear_all();
+    }
+
+    #[test]
+    fn rail_speakers_collapsed_by_default() {
+        clear_all();
+        assert!(!is_expanded("Public"));
+        assert!(toggle_expanded("Public"));
+        assert!(is_expanded("Public"));
+        assert!(!toggle_expanded("Public"));
+        assert!(!is_expanded("Public"));
         clear_all();
     }
 }

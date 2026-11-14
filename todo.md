@@ -184,7 +184,7 @@ Do **not**: re-bundle Ubuntu WebKit; re-enable library auto-fetch that holds the
 
 - [x] **P1** Clear UI when companion protocol &lt; 14 (CLI needs v14+) vs messaging still OK
 - [x] **P2** Soft “radio busy / retrying…” for deferred drain (alongside existing companion-busy / free-the-link copy)
-- [ ] **P3** Reconnect: preserve unread queue semantics; contact watermark careful across radios
+- [x] **P3** Reconnect: preserve unread queue semantics; contact watermark careful across radios
 - [ ] **P4** Multi-radio: primary-only bot; secondary ingest never blocks primary TX/RX
 
 ## Phase Q — Packaging / first-run (distro matrix)

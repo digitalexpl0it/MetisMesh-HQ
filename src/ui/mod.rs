@@ -4178,8 +4178,10 @@ fn ComposePlusDialogs(
     }
 }
 
-const MSG_WINDOW_INITIAL: i64 = 20;
-const MSG_WINDOW_PAGE: i64 = 10;
+const MSG_WINDOW_INITIAL: i64 = 40;
+const MSG_WINDOW_PAGE: i64 = 25;
+/// Cap for open-with-unread / after-id catch-up so a big connect drain stays contiguous.
+const MSG_WINDOW_OPEN_MAX: i64 = 200;
 
 #[derive(Clone, PartialEq, Eq)]
 enum MsgWindowKey {
@@ -4195,6 +4197,14 @@ struct MsgWindowState {
     has_older: bool,
 }
 
+/// First paint: cover unread (+ a little read context), never thinner than INITIAL.
+fn msg_open_limit(unread: i64) -> i64 {
+    unread
+        .saturating_add(12)
+        .max(MSG_WINDOW_INITIAL)
+        .min(MSG_WINDOW_OPEN_MAX)
+}
+
 fn unread_badge_class(unread_mentions: i64) -> &'static str {
     if unread_mentions > 0 {
         "channel-unread-badge channel-unread-badge-mention"
@@ -4203,13 +4213,16 @@ fn unread_badge_class(unread_mentions: i64) -> &'static str {
     }
 }
 
-fn merge_newer_messages(
+fn append_messages_after(
     window: &mut MsgWindowState,
-    newest: Vec<crate::db::MessageRow>,
+    newer: Vec<crate::db::MessageRow>,
 ) -> bool {
+    if newer.is_empty() {
+        return false;
+    }
     let last = window.messages.last().map(|m| m.id).unwrap_or(0);
     let mut changed = false;
-    for message in newest {
+    for message in newer {
         if message.id > last {
             window.messages.push(message);
             changed = true;
@@ -4647,6 +4660,9 @@ fn MessagesPage() -> Element {
     let mut msg_window = use_signal(|| None::<MsgWindowState>);
     let mut loading_older = use_signal(|| false);
     let mut scroll_preserve_height = use_signal(|| None::<f64>);
+    // Smart live scroll: last followed message id + pending jump chip when scrolled up.
+    let mut follow_msg_id = use_signal(|| 0i64);
+    let mut jump_new_count = use_signal(|| 0usize);
     let mut message_keep = use_signal(|| {
         state()
             .db
@@ -4731,21 +4747,31 @@ fn MessagesPage() -> Element {
         let window_key = MsgWindowKey::Dm(dm_pubkey.clone());
         // Paint from locals — reading msg_window() right after a set during
         // render can still be empty when switching threads in-place.
+        let dm_unread_hint = dm_threads
+            .iter()
+            .find(|row| row.pubkey == dm_pubkey)
+            .map(|row| row.unread_count.max(0))
+            .unwrap_or(0);
         let (messages, has_older) = match msg_window() {
             Some(mut window) if window.key == window_key => {
-                if let Ok((newest, _)) =
-                    state().db.list_dm_messages(&dm_pubkey, MSG_WINDOW_INITIAL)
-                {
-                    if merge_newer_messages(&mut window, newest) {
+                // After-id catch-up: newest-N merge skipped the middle of a connect drain.
+                let after = window.messages.last().map(|m| m.id).unwrap_or(0);
+                if let Ok(newer) = state().db.list_dm_messages_after(
+                    &dm_pubkey,
+                    after,
+                    MSG_WINDOW_OPEN_MAX,
+                ) {
+                    if append_messages_after(&mut window, newer) {
                         msg_window.set(Some(window.clone()));
                     }
                 }
                 (window.messages, window.has_older)
             }
             _ => {
+                let open_limit = msg_open_limit(dm_unread_hint);
                 let (messages, has_older) = state()
                     .db
-                    .list_dm_messages(&dm_pubkey, MSG_WINDOW_INITIAL)
+                    .list_dm_messages(&dm_pubkey, open_limit)
                     .unwrap_or_else(|_| (Vec::new(), false));
                 msg_window.set(Some(MsgWindowState {
                     key: window_key.clone(),
@@ -4772,6 +4798,35 @@ fn MessagesPage() -> Element {
                 let _ = state().db.set_dm_last_read(&dm_pubkey, id);
             }
         }
+        // Live DM arrivals: follow bottom or raise jump chip (same as channels).
+        let latest = latest_id.unwrap_or(0);
+        let prev_follow = follow_msg_id();
+        if latest > prev_follow {
+            let added = if prev_follow == 0 {
+                0
+            } else {
+                messages.iter().filter(|m| m.id > prev_follow).count()
+            };
+            follow_msg_id.set(latest);
+            if prev_follow == 0 {
+                // First paint for this thread — land on newest.
+                spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+                    scroll_scroller_to_bottom("dm-scroller");
+                });
+            } else if added > 0 {
+                let peer = dm_pubkey.clone();
+                schedule_live_message_follow(
+                    "dm-scroller",
+                    jump_new_count,
+                    added,
+                    move || {
+                        let _ = state().db.mark_dm_caught_up(&peer);
+                        refresh.set(refresh() + 1);
+                    },
+                );
+            }
+        }
         let dm_key = dm_pubkey.clone();
         let dm_appearance = state()
             .db
@@ -4785,6 +4840,13 @@ fn MessagesPage() -> Element {
         } else {
             "min-h-0 flex-1 space-y-3 overflow-auto p-4"
         };
+        let dm_favorited = state()
+            .db
+            .list_pinned_contacts()
+            .ok()
+            .into_iter()
+            .flatten()
+            .any(|row| row.pubkey.eq_ignore_ascii_case(&dm_pubkey));
         return rsx! {
             MessagesThreadShell {
                 channels: channels.clone(),
@@ -4800,6 +4862,8 @@ fn MessagesPage() -> Element {
                     reply_target.set(None);
                     read_session.set(None);
                     msg_window.set(None);
+                    follow_msg_id.set(0);
+                    jump_new_count.set(0);
                     note.set(String::new());
                 },
                 on_select_dm: move |pubkey: String| {
@@ -4808,6 +4872,8 @@ fn MessagesPage() -> Element {
                     draft.set(String::new());
                     reply_target.set(None);
                     msg_window.set(None);
+                    follow_msg_id.set(0);
+                    jump_new_count.set(0);
                     note.set(String::new());
                 },
                 on_after_delete_channel: move |name: String| {
@@ -4816,6 +4882,8 @@ fn MessagesPage() -> Element {
                         reply_target.set(None);
                         read_session.set(None);
                         msg_window.set(None);
+                        follow_msg_id.set(0);
+                        jump_new_count.set(0);
                         draft.set(String::new());
                     }
                     refresh.set(refresh() + 1);
@@ -4824,6 +4892,8 @@ fn MessagesPage() -> Element {
                     if selected_dm() == Some(pubkey) {
                         selected_dm.set(None);
                         msg_window.set(None);
+                        follow_msg_id.set(0);
+                        jump_new_count.set(0);
                         draft.set(String::new());
                     }
                     refresh.set(refresh() + 1);
@@ -4843,6 +4913,8 @@ fn MessagesPage() -> Element {
                                 let _ = state().db.mark_dm_caught_up(&dm_key);
                                 selected_dm.set(None);
                                 msg_window.set(None);
+                                follow_msg_id.set(0);
+                                jump_new_count.set(0);
                                 draft.set(String::new());
                                 note.set(String::new());
                             },
@@ -4928,6 +5000,7 @@ fn MessagesPage() -> Element {
                 }
                 BlockResolveFailDialog { target: block_resolve_fail }
                 div { class: "flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border bg-card",
+                    div { class: "relative min-h-0 flex-1 flex flex-col overflow-hidden",
                     div {
                         id: "dm-scroller",
                         key: "dm-scroller-{dm_pubkey}",
@@ -4936,6 +5009,13 @@ fn MessagesPage() -> Element {
                         onscroll: {
                             let peer = dm_pubkey.clone();
                             move |_| {
+                                let peer_catchup = peer.clone();
+                                spawn(async move {
+                                    if scroller_near_bottom("dm-scroller").await {
+                                        jump_new_count.set(0);
+                                        let _ = state().db.mark_dm_caught_up(&peer_catchup);
+                                    }
+                                });
                                 if !has_older || loading_older() {
                                     return;
                                 }
@@ -5079,36 +5159,55 @@ fn MessagesPage() -> Element {
                                                         }
                                                     }
                                                     if !outgoing {
-                                                        button {
-                                                            class: "message-action-btn",
-                                                            title: "Favorite this contact",
-                                                            onclick: {
-                                                                let pk = dm_pubkey.clone();
-                                                                let nm = title.clone();
-                                                                move |_| {
-                                                                    match messages_rail::toggle_contact_favorite(
-                                                                        &pk, &nm,
-                                                                    ) {
-                                                                        Ok((on, name_only)) => {
-                                                                            let msg = if on && name_only {
-                                                                                "Saved to Contacts → Pinned (no public key yet — upgrades when they advert)."
-                                                                            } else if on {
-                                                                                "Contact added to Favorites."
-                                                                            } else {
-                                                                                "Contact removed from Favorites."
-                                                                            };
-                                                                            status_note(msg);
-                                                                            rail_epoch.with_mut(|n| {
-                                                                                *n = n.wrapping_add(1)
-                                                                            });
-                                                                            refresh.set(refresh() + 1);
+                                                        {
+                                                            let fav_class = if dm_favorited {
+                                                                "message-action-btn message-action-btn-favorite message-action-btn-favorite-on"
+                                                            } else {
+                                                                "message-action-btn message-action-btn-favorite"
+                                                            };
+                                                            let fav_title = if dm_favorited {
+                                                                "Remove from Favorites"
+                                                            } else {
+                                                                "Favorite this contact"
+                                                            };
+                                                            let fav_label = if dm_favorited {
+                                                                "Favorited"
+                                                            } else {
+                                                                "Favorite"
+                                                            };
+                                                            rsx! {
+                                                                button {
+                                                                    class: "{fav_class}",
+                                                                    title: "{fav_title}",
+                                                                    onclick: {
+                                                                        let pk = dm_pubkey.clone();
+                                                                        let nm = title.clone();
+                                                                        move |_| {
+                                                                            match messages_rail::toggle_contact_favorite(
+                                                                                &pk, &nm,
+                                                                            ) {
+                                                                                Ok((on, name_only)) => {
+                                                                                    let msg = if on && name_only {
+                                                                                        "Saved to Contacts → Pinned (no public key yet — upgrades when they advert)."
+                                                                                    } else if on {
+                                                                                        "Contact added to Favorites."
+                                                                                    } else {
+                                                                                        "Contact removed from Favorites."
+                                                                                    };
+                                                                                    status_note(msg);
+                                                                                    rail_epoch.with_mut(|n| {
+                                                                                        *n = n.wrapping_add(1)
+                                                                                    });
+                                                                                    refresh.set(refresh() + 1);
+                                                                                }
+                                                                                Err(err) => status_note(err),
+                                                                            }
                                                                         }
-                                                                        Err(err) => status_note(err),
-                                                                    }
+                                                                    },
+                                                                    Icon { name: IconName::Star, size: 12 }
+                                                                    "{fav_label}"
                                                                 }
-                                                            },
-                                                            Icon { name: IconName::Star, size: 12 }
-                                                            "Favorite"
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -5152,6 +5251,32 @@ fn MessagesPage() -> Element {
                             }
                         }
                     }
+                    if jump_new_count() > 0 {
+                        button {
+                            class: "messages-jump-latest",
+                            type: "button",
+                            title: "Jump to newest messages",
+                            onclick: {
+                                let peer = dm_pubkey.clone();
+                                move |_| {
+                                    jump_new_count.set(0);
+                                    let peer = peer.clone();
+                                    spawn(async move {
+                                        scroll_scroller_to_bottom("dm-scroller");
+                                        let _ = state().db.mark_dm_caught_up(&peer);
+                                        refresh.set(refresh() + 1);
+                                    });
+                                }
+                            },
+                            Icon { name: IconName::ChevronDown, size: 14 }
+                            if jump_new_count() == 1 {
+                                "New message"
+                            } else {
+                                "New messages · {jump_new_count()}"
+                            }
+                        }
+                    }
+                    }
                     DmComposeDock {
                         draft,
                         note,
@@ -5161,7 +5286,14 @@ fn MessagesPage() -> Element {
                         linked,
                         syncing,
                         peer: dm_pubkey.clone(),
-                        on_sent: move |_| refresh.set(refresh() + 1),
+                        on_sent: move |_| {
+                            jump_new_count.set(0);
+                            spawn(async move {
+                                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                                scroll_scroller_to_bottom("dm-scroller");
+                            });
+                            refresh.set(refresh() + 1);
+                        },
                     }
                 }
             }
@@ -5186,19 +5318,26 @@ fn MessagesPage() -> Element {
         // used to leave the thread blank until leave/re-enter remounted.
         let (messages, has_older) = match msg_window() {
             Some(mut window) if window.key == window_key => {
-                if let Ok((newest, _)) =
-                    state().db.list_channel_messages(slot, MSG_WINDOW_INITIAL)
+                // After-id catch-up keeps the open window contiguous while a
+                // connect drain (or live RX) inserts many rows — newest-N merge
+                // used to skip the middle and jump/lose half the thread.
+                let after = window.messages.last().map(|m| m.id).unwrap_or(0);
+                if let Ok(newer) =
+                    state()
+                        .db
+                        .list_channel_messages_after(slot, after, MSG_WINDOW_OPEN_MAX)
                 {
-                    if merge_newer_messages(&mut window, newest) {
+                    if append_messages_after(&mut window, newer) {
                         msg_window.set(Some(window.clone()));
                     }
                 }
                 (window.messages, window.has_older)
             }
             _ => {
+                let open_limit = msg_open_limit(channel.unread_count.max(0));
                 let (messages, has_older) = state()
                     .db
-                    .list_channel_messages(slot, MSG_WINDOW_INITIAL)
+                    .list_channel_messages(slot, open_limit)
                     .unwrap_or_else(|_| (Vec::new(), false));
                 msg_window.set(Some(MsgWindowState {
                     key: window_key.clone(),
@@ -5216,8 +5355,8 @@ fn MessagesPage() -> Element {
             .unwrap_or(true);
         if needs_session {
             // Keep the raw last-read id even when it is older than the loaded
-            // window (initial load is only MSG_WINDOW_INITIAL rows). Dropping it
-            // left show_banner=true with no place to draw the divider.
+            // window. Dropping it left show_banner=true with no place to draw
+            // the divider.
             let stored_read = state().db.channel_last_read(slot).ok().flatten();
             // Match nav badge: RX + bot/service TX (origin=bot). Operator Compose TX does not.
             let new_count = channel.unread_count.max(0) as usize;
@@ -5232,6 +5371,9 @@ fn MessagesPage() -> Element {
                 new_count,
                 scrolled: false,
             }));
+            // Seed follow cursor so open paint is not treated as live arrival.
+            follow_msg_id.set(messages.last().map(|m| m.id).unwrap_or(0));
+            jump_new_count.set(0);
             let scroll_anchor = stored_read;
             let scroll_to_bottom = !show_banner;
             let anchor_in_window = scroll_anchor
@@ -5306,21 +5448,55 @@ fn MessagesPage() -> Element {
             new_count: 0,
             scrolled: true,
         });
-        let bump_refresh = move || {
+        // Live arrivals while the thread is open: follow bottom or raise jump chip.
+        if session.scrolled {
+            let latest = messages.last().map(|m| m.id).unwrap_or(0);
+            let prev = follow_msg_id();
+            if latest > prev {
+                let added = if prev == 0 {
+                    0
+                } else {
+                    messages.iter().filter(|m| m.id > prev).count()
+                };
+                follow_msg_id.set(latest);
+                if added > 0 {
+                    let dismiss = move || {
+                        dismiss_channel_new_banner(read_session, refresh);
+                    };
+                    schedule_live_message_follow(
+                        "channel-scroller",
+                        jump_new_count,
+                        added,
+                        dismiss,
+                    );
+                }
+            }
+        }
+        let mut bump_refresh = move || {
+            jump_new_count.set(0);
             spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                scroll_scroller_to_bottom("channel-scroller");
                 for _ in 0..8 {
                     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                     refresh.set(refresh() + 1);
                 }
             });
         };
-        // One blocked-set load per paint — never resolve roster per message (that froze hover).
+        // One blocked/pinned load per paint — never resolve roster per message (that froze hover).
         let blocked_set: std::collections::HashSet<String> = state()
             .db
             .list_blocked_nodes()
             .unwrap_or_default()
             .into_iter()
             .map(|row| row.pubkey)
+            .collect();
+        let pinned_set: std::collections::HashSet<String> = state()
+            .db
+            .list_pinned_contacts()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| row.pubkey.to_ascii_lowercase())
             .collect();
         let channel_appearance = state()
             .db
@@ -5350,6 +5526,8 @@ fn MessagesPage() -> Element {
                     reply_target.set(None);
                     read_session.set(None);
                     msg_window.set(None);
+                    follow_msg_id.set(0);
+                    jump_new_count.set(0);
                     note.set(String::new());
                 },
                 on_select_dm: move |pubkey: String| {
@@ -5359,6 +5537,8 @@ fn MessagesPage() -> Element {
                     reply_target.set(None);
                     read_session.set(None);
                     msg_window.set(None);
+                    follow_msg_id.set(0);
+                    jump_new_count.set(0);
                     note.set(String::new());
                 },
                 on_after_delete_channel: move |name: String| {
@@ -5367,6 +5547,8 @@ fn MessagesPage() -> Element {
                         reply_target.set(None);
                         read_session.set(None);
                         msg_window.set(None);
+                        follow_msg_id.set(0);
+                        jump_new_count.set(0);
                         draft.set(String::new());
                     }
                     refresh.set(refresh() + 1);
@@ -5375,6 +5557,8 @@ fn MessagesPage() -> Element {
                     if selected_dm() == Some(pubkey) {
                         selected_dm.set(None);
                         msg_window.set(None);
+                        follow_msg_id.set(0);
+                        jump_new_count.set(0);
                         draft.set(String::new());
                     }
                     refresh.set(refresh() + 1);
@@ -5405,6 +5589,8 @@ fn MessagesPage() -> Element {
                                 draft.set(String::new());
                                 read_session.set(None);
                                 msg_window.set(None);
+                                follow_msg_id.set(0);
+                                jump_new_count.set(0);
                             },
                             Icon { name: IconName::ChevronRight, size: 14 }
                             "Channels"
@@ -5453,6 +5639,7 @@ fn MessagesPage() -> Element {
                     } else {
                         "flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border bg-card"
                     },
+                    div { class: "relative min-h-0 flex-1 flex flex-col overflow-hidden",
                     div {
                         id: "channel-scroller",
                         // Remount the scroller when switching channels so a
@@ -5461,15 +5648,26 @@ fn MessagesPage() -> Element {
                         class: "{channel_pane_class}",
                         style: "{channel_pane_style}",
                         onscroll: move |_| {
-                            if read_session().as_ref().is_some_and(|session| session.show_banner) {
-                                spawn(async move {
+                            spawn(async move {
+                                let at_bottom = scroller_near_bottom("channel-scroller").await;
+                                if at_bottom {
+                                    jump_new_count.set(0);
+                                }
+                                if read_session().as_ref().is_some_and(|session| session.show_banner)
+                                    && channel_unread_is_caught_up(true).await
+                                {
                                     // Scroll past the break, or hit the bottom with
                                     // nowhere left to scroll — both clear the divider.
-                                    if channel_unread_is_caught_up(true).await {
-                                        dismiss_channel_new_banner(read_session, refresh);
+                                    dismiss_channel_new_banner(read_session, refresh);
+                                    // Banner removal shrinks content — re-stick if
+                                    // the operator was already at the bottom.
+                                    if at_bottom {
+                                        tokio::time::sleep(std::time::Duration::from_millis(40))
+                                            .await;
+                                        scroll_scroller_to_bottom("channel-scroller");
                                     }
-                                });
-                            }
+                                }
+                            });
                             if !has_older || loading_older() {
                                 return;
                             }
@@ -5623,6 +5821,14 @@ fn MessagesPage() -> Element {
                                     || name_block
                                         .as_ref()
                                         .is_some_and(|nk| blocked_set.contains(nk));
+                                let already_favorited = known_pk
+                                    .as_ref()
+                                    .map(|pk| pk.to_ascii_lowercase())
+                                    .is_some_and(|pk| pinned_set.contains(&pk))
+                                    || name_block
+                                        .as_ref()
+                                        .map(|nk| nk.to_ascii_lowercase())
+                                        .is_some_and(|nk| pinned_set.contains(&nk));
                                 let block_label = device_name.clone();
                                 let avatar_seed = known_pk
                                     .clone()
@@ -5772,10 +5978,25 @@ fn MessagesPage() -> Element {
                                                         {
                                                             let resolve_name = device_name.clone();
                                                             let known = known_pk.clone();
+                                                            let fav_class = if already_favorited {
+                                                                "message-action-btn message-action-btn-favorite message-action-btn-favorite-on"
+                                                            } else {
+                                                                "message-action-btn message-action-btn-favorite"
+                                                            };
+                                                            let fav_title = if already_favorited {
+                                                                "Remove from Favorites"
+                                                            } else {
+                                                                "Favorite this contact"
+                                                            };
+                                                            let fav_label = if already_favorited {
+                                                                "Favorited"
+                                                            } else {
+                                                                "Favorite"
+                                                            };
                                                             rsx! {
                                                                 button {
-                                                                    class: "message-action-btn",
-                                                                    title: "Favorite this contact",
+                                                                    class: "{fav_class}",
+                                                                    title: "{fav_title}",
                                                                     onclick: {
                                                                         let resolve_name = resolve_name.clone();
                                                                         let known = known.clone();
@@ -5803,7 +6024,7 @@ fn MessagesPage() -> Element {
                                                                         }
                                                                     },
                                                                     Icon { name: IconName::Star, size: 12 }
-                                                                    "Favorite"
+                                                                    "{fav_label}"
                                                                 }
                                                                 button {
                                                                     class: "message-action-btn message-action-btn-block",
@@ -5909,6 +6130,30 @@ fn MessagesPage() -> Element {
                         }
                             }
                         }
+                    }
+                    if jump_new_count() > 0 {
+                        button {
+                            class: "messages-jump-latest",
+                            type: "button",
+                            title: "Jump to newest messages",
+                            onclick: move |_| {
+                                let count = jump_new_count();
+                                jump_new_count.set(0);
+                                spawn(async move {
+                                    scroll_scroller_to_bottom("channel-scroller");
+                                    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                                    dismiss_channel_new_banner(read_session, refresh);
+                                    let _ = count;
+                                });
+                            },
+                            Icon { name: IconName::ChevronDown, size: 14 }
+                            if jump_new_count() == 1 {
+                                "New message"
+                            } else {
+                                "New messages · {jump_new_count()}"
+                            }
+                        }
+                    }
                     }
                     ChannelComposeDock {
                         draft,
@@ -6933,6 +7178,54 @@ async fn channel_unread_is_caught_up(allow_bottom: bool) -> bool {
     ))
     .await;
     result.ok().and_then(|value| value.as_bool()) == Some(true)
+}
+
+/// Within this many pixels of the bottom counts as "following" live traffic.
+const SCROLLER_NEAR_BOTTOM_PX: i32 = 96;
+
+async fn scroller_near_bottom(scroller_id: &str) -> bool {
+    let result = document::eval(&format!(
+        r#"return (() => {{
+          const s = document.getElementById('{scroller_id}');
+          if (!s) return true;
+          return (s.scrollHeight - s.scrollTop - s.clientHeight) < {SCROLLER_NEAR_BOTTOM_PX};
+        }})();"#
+    ))
+    .await;
+    result.ok().and_then(|value| value.as_bool()) == Some(true)
+}
+
+fn scroll_scroller_to_bottom(scroller_id: &str) {
+    document::eval(&format!(
+        r#"(() => {{
+          const s = document.getElementById('{scroller_id}');
+          if (s) s.scrollTop = s.scrollHeight;
+        }})()"#
+    ));
+}
+
+/// After live inserts: stick to the bottom when the operator was already there;
+/// otherwise leave their place and raise the jump chip.
+fn schedule_live_message_follow(
+    scroller_id: &'static str,
+    mut jump_new_count: Signal<usize>,
+    added: usize,
+    on_followed: impl FnOnce() + 'static,
+) {
+    if added == 0 {
+        return;
+    }
+    spawn(async move {
+        // Let the new bubbles paint before measuring / scrolling.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if scroller_near_bottom(scroller_id).await {
+            scroll_scroller_to_bottom(scroller_id);
+            jump_new_count.set(0);
+            on_followed();
+        } else {
+            jump_new_count.set(jump_new_count().saturating_add(added).max(1));
+        }
+    });
 }
 
 fn dismiss_channel_new_banner(

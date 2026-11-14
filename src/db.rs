@@ -1463,6 +1463,8 @@ impl Db {
                 self.set_setting("contacts_since", "1")?;
             }
         }
+        // Copy legacy global onto existing radios once; new radios stay at 0 (P3).
+        self.migrate_contacts_since_per_radio()?;
         Ok(())
     }
 
@@ -2158,6 +2160,7 @@ impl Db {
         if changed == 0 {
             return Err(Error::Msg("Radio not found.".into()));
         }
+        let _ = self.clear_contacts_since_for_radio(id);
         Ok(())
     }
 
@@ -2731,6 +2734,40 @@ impl Db {
         self.list_channel_messages_page(slot, Some(before_id), limit)
     }
 
+    /// Channel messages strictly after `after_id`, oldest → newest (fill gaps after drain).
+    pub fn list_channel_messages_after(
+        &self,
+        slot: i64,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MessageRow>> {
+        let limit = limit.max(0);
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, direction, kind, sender_name, sender_pubkey, channel_idx, hop_count,
+                    display_text, delivery, received_at, route_source, path, hash_size, snr
+             FROM (
+               SELECT m.id, m.direction, m.kind,
+                      COALESCE(n.name, m.sender_prefix, 'channel') AS sender_name,
+                      m.sender_pubkey, m.channel_idx, m.hop_count, m.display_text, m.delivery,
+                      m.received_at, p.source AS route_source, COALESCE(p.path, x'') AS path,
+                      COALESCE(p.hash_size, 1) AS hash_size, m.snr
+               FROM messages m
+               LEFT JOIN nodes n ON n.pubkey = m.sender_pubkey
+               LEFT JOIN paths p ON p.id = (
+                  SELECT id FROM paths WHERE message_id = m.id ORDER BY id DESC LIMIT 1
+               )
+               WHERE m.kind = 'channel' AND m.channel_idx = ?1 AND m.id > ?2
+               ORDER BY m.received_at ASC, m.id ASC
+               LIMIT ?3
+             )",
+        )?;
+        let rows = stmt
+            .query_map(params![slot, after_id, limit], Self::map_message_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     fn list_channel_messages_page(
         &self,
         slot: i64,
@@ -3021,6 +3058,40 @@ impl Db {
         limit: i64,
     ) -> Result<(Vec<MessageRow>, bool)> {
         self.list_dm_messages_page(pubkey, Some(before_id), limit)
+    }
+
+    /// DM messages strictly after `after_id`, oldest → newest (fill gaps after drain).
+    pub fn list_dm_messages_after(
+        &self,
+        pubkey: &str,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MessageRow>> {
+        let limit = limit.max(0);
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, direction, kind, sender_name, sender_pubkey, channel_idx, hop_count,
+                    display_text, delivery, received_at, route_source, path, hash_size, snr
+             FROM (
+               SELECT m.id, m.direction, m.kind,
+                      COALESCE(n.name, m.sender_prefix, 'direct') AS sender_name,
+                      m.sender_pubkey, m.channel_idx, m.hop_count, m.display_text, m.delivery,
+                      m.received_at, p.source AS route_source, COALESCE(p.path, x'') AS path,
+                      COALESCE(p.hash_size, 1) AS hash_size, m.snr
+               FROM messages m
+               LEFT JOIN nodes n ON n.pubkey = m.sender_pubkey
+               LEFT JOIN paths p ON p.id = (
+                  SELECT id FROM paths WHERE message_id = m.id ORDER BY id DESC LIMIT 1
+               )
+               WHERE m.kind = 'direct' AND m.sender_pubkey = ?1 AND m.id > ?2
+               ORDER BY m.received_at ASC, m.id ASC
+               LIMIT ?3
+             )",
+        )?;
+        let rows = stmt
+            .query_map(params![pubkey, after_id, limit], Self::map_message_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     fn list_dm_messages_page(
@@ -3839,24 +3910,54 @@ impl Db {
             .optional()?)
     }
 
-    /// Per-radio contact sync watermark (`contacts_since_{id}`), seeded from legacy global.
+    /// Per-radio contact sync watermark (`contacts_since_{id}`).
+    /// Missing key → 0 (full dump). Does not inherit the legacy global or
+    /// another radio's watermark — see `migrate_contacts_since_per_radio`.
     pub fn contacts_since_for_radio(&self, radio_id: i64) -> Result<u32> {
         let key = format!("contacts_since_{radio_id}");
-        if let Some(raw) = self.setting(&key)? {
-            return Ok(raw.parse::<u32>().unwrap_or(0));
+        Ok(self
+            .setting(&key)?
+            .and_then(|raw| raw.parse::<u32>().ok())
+            .unwrap_or(0))
+    }
+
+    pub fn set_contacts_since_for_radio(&self, radio_id: i64, since: u32) -> Result<()> {
+        self.set_setting(&format!("contacts_since_{radio_id}"), &since.to_string())
+    }
+
+    fn clear_contacts_since_for_radio(&self, radio_id: i64) -> Result<()> {
+        self.lock().execute(
+            "DELETE FROM settings WHERE key = ?1",
+            params![format!("contacts_since_{radio_id}")],
+        )?;
+        Ok(())
+    }
+
+    /// One-shot: copy legacy global `contacts_since` onto each saved radio that
+    /// still lacks a per-radio key. New radios after this flag stay at 0 until
+    /// their own successful sync (P3).
+    fn migrate_contacts_since_per_radio(&self) -> Result<()> {
+        if self
+            .setting("contacts_since_radios_migrated")?
+            .as_deref()
+            == Some("1")
+        {
+            return Ok(());
         }
         let global = self
             .setting("contacts_since")?
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(0);
         if global > 0 {
-            self.set_setting(&key, &global.to_string())?;
+            for radio in self.list_saved_radios()? {
+                let key = format!("contacts_since_{}", radio.id);
+                if self.setting(&key)?.is_none() {
+                    self.set_setting(&key, &global.to_string())?;
+                }
+            }
         }
-        Ok(global)
-    }
-
-    pub fn set_contacts_since_for_radio(&self, radio_id: i64, since: u32) -> Result<()> {
-        self.set_setting(&format!("contacts_since_{radio_id}"), &since.to_string())
+        self.set_setting("contacts_since_radios_migrated", "1")?;
+        Ok(())
     }
 
     /// All roster nodes whose name / requested_name matches (exact, then alnum).
@@ -7574,12 +7675,58 @@ mod tests {
         let (db, _, dir) = test_db();
         let a = db.remember_radio("ble", "AA:BB:CC:DD:EE:01", "A").unwrap();
         let b = db.remember_radio("usb", "/dev/ttyACM0", "B").unwrap();
+        // High global / sibling watermark must not leak onto a new radio (P3).
         db.set_setting("contacts_since", "42").unwrap();
-        assert_eq!(db.contacts_since_for_radio(a).unwrap(), 42);
-        assert_eq!(db.contacts_since_for_radio(b).unwrap(), 42);
         db.set_contacts_since_for_radio(a, 99).unwrap();
         assert_eq!(db.contacts_since_for_radio(a).unwrap(), 99);
-        assert_eq!(db.contacts_since_for_radio(b).unwrap(), 42);
+        assert_eq!(db.contacts_since_for_radio(b).unwrap(), 0);
+        db.set_contacts_since_for_radio(b, 7).unwrap();
+        assert_eq!(db.contacts_since_for_radio(b).unwrap(), 7);
+        assert_eq!(db.contacts_since_for_radio(a).unwrap(), 99);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn contacts_since_migrates_global_once_onto_existing_radios() {
+        let (db, _, dir) = test_db();
+        // Clear the one-shot flag so we can exercise migration after radios exist.
+        db.lock()
+            .execute(
+                "DELETE FROM settings WHERE key = 'contacts_since_radios_migrated'",
+                [],
+            )
+            .unwrap();
+        let a = db.remember_radio("ble", "AA:BB:CC:DD:EE:02", "A").unwrap();
+        db.set_setting("contacts_since", "42").unwrap();
+        assert_eq!(db.contacts_since_for_radio(a).unwrap(), 0);
+        db.ensure_defaults().unwrap();
+        assert_eq!(db.contacts_since_for_radio(a).unwrap(), 42);
+        assert_eq!(
+            db.setting("contacts_since_radios_migrated").unwrap().as_deref(),
+            Some("1")
+        );
+        let b = db.remember_radio("usb", "/dev/ttyACM1", "B").unwrap();
+        // Second ensure_defaults must not copy global onto radios added after migrate.
+        db.ensure_defaults().unwrap();
+        assert_eq!(db.contacts_since_for_radio(b).unwrap(), 0);
+        assert_eq!(db.contacts_since_for_radio(a).unwrap(), 42);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn forget_radio_clears_contacts_since() {
+        let (db, _, dir) = test_db();
+        let id = db
+            .remember_radio("usb", "/dev/ttyACM2", "Forget me")
+            .unwrap();
+        db.set_contacts_since_for_radio(id, 55).unwrap();
+        assert_eq!(db.contacts_since_for_radio(id).unwrap(), 55);
+        db.forget_radio(id).unwrap();
+        assert_eq!(db.contacts_since_for_radio(id).unwrap(), 0);
+        assert!(db
+            .setting(&format!("contacts_since_{id}"))
+            .unwrap()
+            .is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -7621,6 +7768,12 @@ mod tests {
         assert_eq!(older.len(), 2);
         assert_eq!(older[0].id, ids[1]);
         assert_eq!(older[1].id, ids[2]);
+        // After-id catch-up must return the contiguous middle, not only newest-N.
+        let after = db.list_channel_messages_after(0, ids[0], 10).unwrap();
+        assert_eq!(
+            after.iter().map(|m| m.id).collect::<Vec<_>>(),
+            ids[1..].to_vec()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

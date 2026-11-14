@@ -4633,9 +4633,10 @@ async fn run_session(
                     if is_link_error(&err) {
                         return SessionEnd::Lost(err);
                     }
-                    // No reply / soft error — treat as empty and move on to live mode.
+                    // Soft error ≠ empty queue (P3). Seed live need_msg_drain so
+                    // reconnect races keep draining after Ready (same as budget pause).
                     hq_log!(debug, "connect msg drain: {err}");
-                    connect_drain_complete = true;
+                    connect_drain_complete = false;
                     break;
                 }
             }
@@ -4746,14 +4747,9 @@ async fn run_session(
     // Contacts were just synced during connect.
     let mut last_advert_sync = Instant::now();
     let mut contact_retry_at = Instant::now() + Duration::from_secs(15);
-    // Older builds could finish a dump and still leave contacts_since at 0,
-    // which re-triggers a multi-minute BLE sync on every connect and blocks sends.
-    // Watermark is per-radio so a second companion does not inherit the primary's.
-    if db.contacts_since_for_radio(radio).unwrap_or(0) == 0 {
-        if db.list_nodes().map(|n| n.len()).unwrap_or(0) > 0 {
-            let _ = db.set_contacts_since_for_radio(radio, 1);
-        }
-    }
+    // Watermark advances only after a successful sync_contacts for this radio
+    // (marker >= 1). Do not bump from pool-wide list_nodes — that skipped full
+    // dumps on secondary radios (P3).
     let mut need_contact_retry = db.contacts_since_for_radio(radio).unwrap_or(0) == 0;
     // Soft-deferred channel setup (BLE timeout after contact dump) retries here.
     let mut channel_setup_retry_at = if channel_setup_done.load(Ordering::SeqCst) {
@@ -7640,8 +7636,13 @@ mod tests {
             drained: 400,
             complete: false,
         }));
+        // Soft connect get_msg error (P3) and budget pause both use complete=false.
         assert!(need_msg_drain_after_connect(ConnectMsgDrain {
             drained: 0,
+            complete: false,
+        }));
+        assert!(need_msg_drain_after_connect(ConnectMsgDrain {
+            drained: 3,
             complete: false,
         }));
     }

@@ -2579,8 +2579,15 @@ fn ChannelRailItem(
     let menu_key = name.clone();
     let details_key = name.clone();
     let speakers = crate::channel_speakers::list(&name);
+    let speaker_count = speakers.len();
+    let speakers_open = crate::channel_speakers::is_expanded(&name);
     let row_class = rail_item_row_class(active, false, zebra);
     let mut menu = use_signal(|| None::<RailItemMenuAnchor>);
+    // Local mirror so the chevron re-renders without waiting on a parent tick.
+    let mut speakers_open_sig = use_signal(|| speakers_open);
+    if speakers_open_sig() != speakers_open {
+        speakers_open_sig.set(speakers_open);
+    }
     rsx! {
         div {
             key: "ch-group-{name}",
@@ -2613,6 +2620,36 @@ fn ChannelRailItem(
                         span { class: "{unread_badge_class(channel.unread_mentions)}",
                             if unread > 99 { "99+" } else { "{unread}" }
                         }
+                    }
+                }
+                if speaker_count > 0 {
+                    button {
+                        r#type: "button",
+                        class: "messages-rail-item-action messages-rail-speakers-toggle",
+                        title: if speakers_open_sig() {
+                            "Hide session contacts"
+                        } else {
+                            "Show session contacts"
+                        },
+                        onclick: {
+                            let toggle_name = name.clone();
+                            move |event: MouseEvent| {
+                                event.prevent_default();
+                                event.stop_propagation();
+                                let open = crate::channel_speakers::toggle_expanded(&toggle_name);
+                                speakers_open_sig.set(open);
+                                on_changed.call(());
+                            }
+                        },
+                        Icon {
+                            name: if speakers_open_sig() {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            },
+                            size: 12
+                        }
+                        span { class: "messages-rail-speakers-count", "{speaker_count}" }
                     }
                 }
                 button {
@@ -2676,54 +2713,56 @@ fn ChannelRailItem(
                     }
                 }
             }
-            for speaker in speakers.iter() {
-                {
-                    let sp_name = speaker.name.clone();
-                    let sp_key = speaker
-                        .pubkey
-                        .as_ref()
-                        .map(|k| k.trim().to_ascii_lowercase())
-                        .filter(|k| is_hex_pubkey(k));
-                    let can_dm = sp_key.is_some();
-                    let seed = sp_key
-                        .clone()
-                        .unwrap_or_else(|| format!("name:{}", sp_name));
-                    let title = if can_dm {
-                        format!("Open DM with {sp_name}")
-                    } else {
-                        format!(
-                            "{sp_name} — channel traffic has no public key. DM after you Add their contact card (or they share meshcore://contact/add)."
-                        )
-                    };
-                    let speaker_class = if can_dm {
-                        "messages-rail-speaker"
-                    } else {
-                        "messages-rail-speaker messages-rail-speaker-nokey"
-                    };
-                    rsx! {
-                        button {
-                            key: "sp-{name}-{sp_name}-{seed}",
-                            r#type: "button",
-                            class: "{speaker_class}",
-                            title: "{title}",
-                            onclick: move |_| {
-                                if let Some(pk) = sp_key.clone() {
-                                    on_select_dm.call(pk);
-                                } else {
-                                    crate::toast::push(
-                                        crate::toast::ToastKind::Warn,
-                                        format!(
-                                            "No public key for {sp_name} yet. Channel posts are name-only — Add their contact card (meshcore://contact/add) to DM."
-                                        ),
-                                    );
+            if speakers_open_sig() {
+                for speaker in speakers.iter() {
+                    {
+                        let sp_name = speaker.name.clone();
+                        let sp_key = speaker
+                            .pubkey
+                            .as_ref()
+                            .map(|k| k.trim().to_ascii_lowercase())
+                            .filter(|k| is_hex_pubkey(k));
+                        let can_dm = sp_key.is_some();
+                        let seed = sp_key
+                            .clone()
+                            .unwrap_or_else(|| format!("name:{}", sp_name));
+                        let title = if can_dm {
+                            format!("Open DM with {sp_name}")
+                        } else {
+                            format!(
+                                "{sp_name} — channel traffic has no public key. DM after you Add their contact card (or they share meshcore://contact/add)."
+                            )
+                        };
+                        let speaker_class = if can_dm {
+                            "messages-rail-speaker"
+                        } else {
+                            "messages-rail-speaker messages-rail-speaker-nokey"
+                        };
+                        rsx! {
+                            button {
+                                key: "sp-{name}-{sp_name}-{seed}",
+                                r#type: "button",
+                                class: "{speaker_class}",
+                                title: "{title}",
+                                onclick: move |_| {
+                                    if let Some(pk) = sp_key.clone() {
+                                        on_select_dm.call(pk);
+                                    } else {
+                                        crate::toast::push(
+                                            crate::toast::ToastKind::Warn,
+                                            format!(
+                                                "No public key for {sp_name} yet. Channel posts are name-only — Add their contact card (meshcore://contact/add) to DM."
+                                            ),
+                                        );
+                                    }
+                                },
+                                ConversationAvatar {
+                                    label: sp_name.clone(),
+                                    seed: seed.clone(),
+                                    compact: true,
                                 }
-                            },
-                            ConversationAvatar {
-                                label: sp_name.clone(),
-                                seed: seed.clone(),
-                                compact: true,
+                                span { class: "messages-rail-speaker-label", "{sp_name}" }
                             }
-                            span { class: "messages-rail-speaker-label", "{sp_name}" }
                         }
                     }
                 }

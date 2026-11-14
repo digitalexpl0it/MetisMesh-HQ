@@ -2900,6 +2900,33 @@ option {
   font-variant-numeric: tabular-nums;
 }
 
+/* Floating jump chip when live traffic arrives while scrolled up. */
+.messages-jump-latest {
+  position: absolute;
+  left: 50%;
+  bottom: 0.7rem;
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  transform: translateX(-50%);
+  padding: 0.4rem 0.85rem;
+  border-radius: 999px;
+  border: 1px solid rgba(61, 214, 140, 0.45);
+  background: rgba(16, 20, 24, 0.94);
+  color: #3dd68c;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+}
+
+.messages-jump-latest:hover {
+  background: rgba(22, 28, 34, 0.98);
+  border-color: rgba(61, 214, 140, 0.7);
+}
+
 .channel-unread-badge-mention {
   border-color: rgba(251, 191, 36, 0.45);
   background: rgba(251, 191, 36, 0.18);
@@ -3426,6 +3453,19 @@ html.hq-col-resize body {
   gap: 0.08rem;
   width: 100%;
   min-width: 0;
+}
+
+.messages-rail-speakers-toggle {
+  gap: 0.15rem;
+  min-width: 1.7rem;
+  color: #a1a1aa;
+}
+
+.messages-rail-speakers-count {
+  font-size: 0.65rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
 
 .messages-rail-speaker {
@@ -4067,6 +4107,19 @@ html.hq-col-resize body {
   color: #86efac;
 }
 
+.message-action-btn.message-action-btn-favorite {
+  color: #fbbf24;
+}
+
+.message-action-btn.message-action-btn-favorite-on {
+  color: #fcd34d;
+  background: rgba(251, 191, 36, 0.16);
+}
+
+.message-action-btn.message-action-btn-favorite-on svg {
+  fill: currentColor;
+}
+
 .message-action-btn.message-action-btn-block {
   color: #fca5a5;
 }
@@ -4085,6 +4138,14 @@ html.hq-col-resize body {
 
 .message-action-btn.message-action-btn-ping:hover {
   background: rgba(74, 222, 128, 0.22);
+}
+
+.message-action-btn.message-action-btn-favorite:hover {
+  background: rgba(251, 191, 36, 0.22);
+}
+
+.message-action-btn.message-action-btn-favorite-on:hover {
+  background: rgba(251, 191, 36, 0.3);
 }
 
 .message-action-btn.message-action-btn-block:hover {

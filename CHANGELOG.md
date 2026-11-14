@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.1.21 — 2026-11-13
+
+Package version `0.1.21` (Cargo / About). Windows Details may show `0.1.21.0`.
+
+### Messages
+
+- Smart live scroll: when near the bottom, new channel/DM traffic auto-scrolls to the newest message; when scrolled up, position is preserved and a “New message(s)” jump chip appears
+- Open thread loads enough rows to cover unread (up to 200); live catch-up appends by id after the last loaded row so a connect drain cannot skip the middle and jump/drop half the pane
+- Channel rail session contacts stay collapsed by default; expand the chevron (with count) to show who posted this session
+- Message action Favorite uses amber highlight (filled when already pinned) like Reply/Quote/Block
+
+### Radio
+
+- Reconnect soft-error on connect queue drain seeds live `need_msg_drain` (same handoff as budget pause) so companion unread is not treated as empty (P3)
+- Contact sync watermark is strictly per-radio: no live inherit from legacy global; one-shot migrate onto radios that already existed; remove pool-wide `list_nodes` seed-to-1; clear watermark when forgetting a radio (P3)
+
 ## 0.1.20 — 2026-11-12
 
 Package version `0.1.20` (Cargo / About). Windows Details may show `0.1.20.0`.

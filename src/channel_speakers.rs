@@ -35,8 +35,7 @@ fn same_speaker(a: &ChannelSpeaker, name: &str, pubkey: Option<&str>) -> bool {
     a.name.eq_ignore_ascii_case(name)
 }
 
-/// Record a live channel sender under `channel` (most recent first).
-pub fn note(channel: &str, name: &str, pubkey: Option<&str>) {
+fn note_into(map: &mut HashMap<String, Vec<ChannelSpeaker>>, channel: &str, name: &str, pubkey: Option<&str>) {
     let channel = channel.trim();
     let name = name.trim();
     if channel.is_empty() || name.is_empty() {
@@ -46,8 +45,7 @@ pub fn note(channel: &str, name: &str, pubkey: Option<&str>) {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| s.to_ascii_lowercase());
-    let mut guard = speakers().lock().unwrap_or_else(|err| err.into_inner());
-    let list = guard.entry(channel_key(channel)).or_default();
+    let list = map.entry(channel_key(channel)).or_default();
     if let Some(idx) = list
         .iter()
         .position(|s| same_speaker(s, name, pubkey.as_deref()))
@@ -73,60 +71,61 @@ pub fn note(channel: &str, name: &str, pubkey: Option<&str>) {
     }
 }
 
-/// Speakers for a channel this session (most recent first).
-pub fn list(channel: &str) -> Vec<ChannelSpeaker> {
+fn list_from(map: &HashMap<String, Vec<ChannelSpeaker>>, channel: &str) -> Vec<ChannelSpeaker> {
     let channel = channel.trim();
     if channel.is_empty() {
         return Vec::new();
     }
-    speakers()
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
-        .get(&channel_key(channel))
+    map.get(&channel_key(channel))
         .cloned()
         .unwrap_or_default()
 }
 
-/// Whether the rail shows speakers under this channel (default: collapsed).
-pub fn is_expanded(channel: &str) -> bool {
+fn is_expanded_in(set: &HashSet<String>, channel: &str) -> bool {
     let channel = channel.trim();
     if channel.is_empty() {
         return false;
     }
-    expanded()
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
-        .contains(&channel_key(channel))
+    set.contains(&channel_key(channel))
 }
 
-/// Toggle rail expand for session contacts under a channel. Returns the new open state.
-pub fn toggle_expanded(channel: &str) -> bool {
+fn toggle_expanded_in(set: &mut HashSet<String>, channel: &str) -> bool {
     let channel = channel.trim();
     if channel.is_empty() {
         return false;
     }
     let key = channel_key(channel);
-    let mut guard = expanded().lock().unwrap_or_else(|err| err.into_inner());
-    if guard.contains(&key) {
-        guard.remove(&key);
+    if set.contains(&key) {
+        set.remove(&key);
         false
     } else {
-        guard.insert(key);
+        set.insert(key);
         true
     }
 }
 
-/// Drop every session speaker (tests / explicit reset).
-#[cfg(test)]
-pub fn clear_all() {
-    speakers()
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
-        .clear();
-    expanded()
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
-        .clear();
+/// Record a live channel sender under `channel` (most recent first).
+pub fn note(channel: &str, name: &str, pubkey: Option<&str>) {
+    let mut guard = speakers().lock().unwrap_or_else(|err| err.into_inner());
+    note_into(&mut guard, channel, name, pubkey);
+}
+
+/// Speakers for a channel this session (most recent first).
+pub fn list(channel: &str) -> Vec<ChannelSpeaker> {
+    let guard = speakers().lock().unwrap_or_else(|err| err.into_inner());
+    list_from(&guard, channel)
+}
+
+/// Whether the rail shows speakers under this channel (default: collapsed).
+pub fn is_expanded(channel: &str) -> bool {
+    let guard = expanded().lock().unwrap_or_else(|err| err.into_inner());
+    is_expanded_in(&guard, channel)
+}
+
+/// Toggle rail expand for session contacts under a channel. Returns the new open state.
+pub fn toggle_expanded(channel: &str) -> bool {
+    let mut guard = expanded().lock().unwrap_or_else(|err| err.into_inner());
+    toggle_expanded_in(&mut guard, channel)
 }
 
 #[cfg(test)]
@@ -135,26 +134,26 @@ mod tests {
 
     #[test]
     fn notes_move_to_front_and_upgrade_key() {
-        clear_all();
-        note("Public", "Ada", None);
-        note("Public", "Bob", Some("aabb"));
-        note("Public", "Ada", Some("ccdd"));
-        let rows = list("Public");
+        // Local map — never touch the process-global speakers (avoids Windows
+        // parallel-test races that flaked CI on main while the tag job passed).
+        let mut map = HashMap::new();
+        note_into(&mut map, "Public", "Ada", None);
+        note_into(&mut map, "Public", "Bob", Some("aabb"));
+        note_into(&mut map, "Public", "Ada", Some("ccdd"));
+        let rows = list_from(&map, "Public");
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].name, "Ada");
         assert_eq!(rows[0].pubkey.as_deref(), Some("ccdd"));
         assert_eq!(rows[1].name, "Bob");
-        clear_all();
     }
 
     #[test]
     fn rail_speakers_collapsed_by_default() {
-        clear_all();
-        assert!(!is_expanded("Public"));
-        assert!(toggle_expanded("Public"));
-        assert!(is_expanded("Public"));
-        assert!(!toggle_expanded("Public"));
-        assert!(!is_expanded("Public"));
-        clear_all();
+        let mut set = HashSet::new();
+        assert!(!is_expanded_in(&set, "Public"));
+        assert!(toggle_expanded_in(&mut set, "Public"));
+        assert!(is_expanded_in(&set, "Public"));
+        assert!(!toggle_expanded_in(&mut set, "Public"));
+        assert!(!is_expanded_in(&set, "Public"));
     }
 }

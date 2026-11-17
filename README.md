@@ -19,6 +19,7 @@ Churches, neighborhoods, and volunteer groups run this on a regular computer sit
 - **Infrastructure** — claim and admin-verify repeaters, rooms, and sensors; probe and remote CLI through the primary companion
 - **Tracker** — whitelist of devices expected to share GPS; trails and stale styling on the map
 - **CLI** — companion and remote device console for operators
+- **Guides** — offline survival / reference pack marketplace (bundled sample + public-domain packs pulled from Ready.gov / Project Gutenberg with checksums; FTS search + reader + export MD/PDF); packs stay under `data/guides/`, not in `metis.db`
 - **Local API / Integrations** — opt-in read-only JSON API (bearer token, loopback by default) for Home Assistant and local apps; opt-in **Webhooks** (Settings → Services → Webhooks) POST matching live mesh RX (and HQ channel TX) to per-connection URLs with Detection / Payload / Test POST, rate limit, timeout, and optional HMAC
 - **Firmware locker** — mirror community firmware while online; flash over USB on the HQ machine when the internet is gone (Ready-for-outage, checksums, export/import pack). Optional **LAN flash locker** (Settings → Flasher): HTTPS + room PIN so other laptops download synced builds and flash via Web Serial (ESP SLIP / nRF DFU zip), plus OTAFIX UF2 downloads, Enter DFU, Custom local files, and Repeater/Room setup CLI
 - **Backup** — passphrase-encrypted HQ archive (SQLite + channel secrets + Integration extras such as `webhook.hmac`); restore with confirm

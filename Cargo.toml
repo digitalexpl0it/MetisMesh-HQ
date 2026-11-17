@@ -31,6 +31,7 @@ rcgen = "0.13"
 regex = "1"
 rustls-pemfile = "2"
 rfd = "0.17"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }

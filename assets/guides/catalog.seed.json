@@ -1,0 +1,188 @@
+{
+  "version": 1,
+  "updated_at": 0,
+  "remote_url": "https://raw.githubusercontent.com/digitalexpl0it/MetisMesh-HQ/main/assets/guides/catalog.seed.json",
+  "packs": [
+    {
+      "id": "hq-basics",
+      "name": "HQ Basics (sample)",
+      "version": "1.1.0",
+      "source": "Metis Mesh HQ",
+      "license": "MIT",
+      "description": "Short offline reference articles for water, shelter, first aid, radio etiquette, and chemical shelter-in-place notes. Bundled with HQ for offline install. Community reference only — not medical advice.",
+      "format": "hq-native",
+      "bundled": "hq-basics",
+      "tags": ["sample", "first-aid", "water", "radio", "shelter"],
+      "categories": ["water", "medical", "radio", "shelter", "preparedness"]
+    },
+    {
+      "id": "fema-are-you-ready",
+      "name": "FEMA Are You Ready?",
+      "version": "2020-09",
+      "source": "Ready.gov / FEMA",
+      "license": "US Government work (public domain)",
+      "description": "Are You Ready? An In-Depth Guide to Citizen Preparedness (FEMA P-2064). Downloaded from Ready.gov — not hosted by Metis Mesh HQ. Not an endorsement by FEMA.",
+      "format": "hq-native",
+      "tags": ["fema", "preparedness", "family", "hazards"],
+      "categories": ["preparedness", "hazards"],
+      "files": [
+        {
+          "id": "are-you-ready",
+          "title": "Are You Ready? Guide (PDF)",
+          "url": "https://www.ready.gov/sites/default/files/2021-11/are-you-ready-guide.pdf",
+          "sha256": "3873f8ae7528389adacab72259c37b9ae3c507bd3ae23783122e06586560040c",
+          "size_bytes": 4233522,
+          "path": "attachments/are-you-ready-guide.pdf"
+        }
+      ]
+    },
+    {
+      "id": "ready-water-outage",
+      "name": "Ready.gov water & outage sheets",
+      "version": "2024-03",
+      "source": "Ready.gov / FEMA",
+      "license": "US Government work (public domain)",
+      "description": "Emergency supply kit checklist (water/food storage), flood, and power-outage hazard sheets from Ready.gov. Direct EPA disinfection PDFs often block automated downloads; these USG sheets cover household water and outage actions. Not medical advice; not a FEMA endorsement.",
+      "format": "hq-native",
+      "tags": ["water", "power", "flood", "kit", "ready.gov"],
+      "categories": ["water", "hazards", "preparedness"],
+      "files": [
+        {
+          "id": "supply-kit",
+          "title": "Emergency supply kit checklist (PDF)",
+          "url": "https://www.ready.gov/sites/default/files/2020-03/ready_emergency-supply-kit-checklist.pdf",
+          "sha256": "375f8acfeec361ecf2ee2e032178bd112ad3001035ccf5fd4e848aa9440f939c",
+          "size_bytes": 152185,
+          "path": "attachments/emergency-supply-kit-checklist.pdf"
+        },
+        {
+          "id": "flood",
+          "title": "Flood hazard info sheet (PDF)",
+          "url": "https://www.ready.gov/sites/default/files/2024-03/ready.gov_flood_hazard-info-sheet.pdf",
+          "sha256": "24caeb55976d2e0aca2926e0757a8af1285557ff86839e42017312b0313c3365",
+          "size_bytes": 447657,
+          "path": "attachments/flood-hazard-info-sheet.pdf"
+        },
+        {
+          "id": "power-outage",
+          "title": "Power outage hazard info sheet (PDF)",
+          "url": "https://www.ready.gov/sites/default/files/2024-03/ready.gov_power-outage_hazard-info-sheet.pdf",
+          "sha256": "d98a6ca01ba91c8b5a6d4772ce46dec7ecc8481eab5778373b5d1b54e49f4697",
+          "size_bytes": 317550,
+          "path": "attachments/power-outage-hazard-info-sheet.pdf"
+        }
+      ]
+    },
+    {
+      "id": "ready-hazard-sheets",
+      "name": "Ready.gov hazard info sheets",
+      "version": "2024-03",
+      "source": "Ready.gov / FEMA",
+      "license": "US Government work (public domain)",
+      "description": "Two-sided Ready.gov hazard information sheets (earthquake, extreme heat, winter storm, wildfire, tornado, hurricane) plus the full suite PDF (includes chemical and other hazards). Community reference only — not a FEMA endorsement.",
+      "format": "hq-native",
+      "tags": ["hazards", "ready.gov", "shelter", "weather"],
+      "categories": ["hazards", "shelter", "preparedness"],
+      "files": [
+        {
+          "id": "earthquake",
+          "title": "Earthquake hazard info sheet (PDF)",
+          "url": "https://www.ready.gov/sites/default/files/2024-03/ready.gov_earthquake_hazard-info-sheet.pdf",
+          "sha256": "08a970a1439b329c11cc197a976a8e77fa7ef8dd506d753dd81e750539a4b2af",
+          "size_bytes": 370865,
+          "path": "attachments/earthquake-hazard-info-sheet.pdf"
+        },
+        {
+          "id": "extreme-heat",
+          "title": "Extreme heat hazard info sheet (PDF)",
+          "url": "https://www.ready.gov/sites/default/files/2024-03/ready.gov_extreme-heat_hazard-info-sheet.pdf",
+          "sha256": "bd7562cdd637a9037d33580e3f74c9e6c5a6dcd923352f4c48fc0da7fe131137",
+          "size_bytes": 417238,
+          "path": "attachments/extreme-heat-hazard-info-sheet.pdf"
+        },
+        {
+          "id": "winter-storm",
+          "title": "Winter storm hazard info sheet (PDF)",
+          "url": "https://www.ready.gov/sites/default/files/2024-03/ready.gov_winter-storm_hazard-info-sheet.pdf",
+          "sha256": "503b0d44f7ff4337551e96371fed686b34f6d3f5e4bc032a2c8b703e0e3ccb61",
+          "size_bytes": 355037,
+          "path": "attachments/winter-storm-hazard-info-sheet.pdf"
+        },
+        {
+          "id": "wildfire",
+          "title": "Wildfire hazard info sheet (PDF)",
+          "url": "https://www.ready.gov/sites/default/files/2024-03/ready.gov_wildfire_hazard-info-sheet.pdf",
+          "sha256": "5f1a733b469ad6f45584642a93152cf699d257d2db8c5f77ed78db17231412dc",
+          "size_bytes": 455659,
+          "path": "attachments/wildfire-hazard-info-sheet.pdf"
+        },
+        {
+          "id": "tornado",
+          "title": "Tornado hazard info sheet (PDF)",
+          "url": "https://www.ready.gov/sites/default/files/2024-03/ready.gov_tornado_hazard-info-sheet.pdf",
+          "sha256": "571700b8e6bce2e5d83847184c4a27aba26fac72d7d86fca556ff84cef63784a",
+          "size_bytes": 515808,
+          "path": "attachments/tornado-hazard-info-sheet.pdf"
+        },
+        {
+          "id": "hurricane",
+          "title": "Hurricane hazard info sheet (PDF)",
+          "url": "https://www.ready.gov/sites/default/files/2024-03/ready.gov_hurricane_hazard-info-sheet.pdf",
+          "sha256": "8c1ce13ca829752e92b149a6e02a66bc238843464046ea0d7a2ae5961d472e8a",
+          "size_bytes": 350589,
+          "path": "attachments/hurricane-hazard-info-sheet.pdf"
+        },
+        {
+          "id": "full-suite",
+          "title": "Full suite of hazard info sheets (PDF)",
+          "url": "https://www.ready.gov/sites/default/files/2025-02/fema_full-suite-hazard-info-sheets.pdf",
+          "sha256": "079108e88643fcc37bbcb4e46ce4aa1336b0f59acb4847c271c0ce930f0c79c2",
+          "size_bytes": 4376542,
+          "path": "attachments/full-suite-hazard-info-sheets.pdf"
+        }
+      ]
+    },
+    {
+      "id": "pd-woodcraft-camping",
+      "name": "Woodcraft and Camping (Nessmuk)",
+      "version": "pg34607-html",
+      "source": "Project Gutenberg / George Washington Sears",
+      "license": "Public domain (Project Gutenberg)",
+      "description": "Classic field craft book Woodcraft and Camping by George Washington Sears (“Nessmuk”). HTML edition with original illustrations from Project Gutenberg — historical reference only; techniques may be outdated or unsafe by modern standards.",
+      "format": "hq-native",
+      "tags": ["camping", "woodcraft", "public-domain", "gutenberg"],
+      "categories": ["fieldcraft", "shelter"],
+      "files": [
+        {
+          "id": "woodcraft",
+          "title": "Woodcraft and Camping",
+          "url": "https://www.gutenberg.org/cache/epub/34607/pg34607-images.html",
+          "sha256": "413015021362fe3186ce0d2a8c6393d864904577610890ca835e5b3fe3f44f6d",
+          "size_bytes": 276854,
+          "path": "articles/woodcraft.html"
+        }
+      ]
+    },
+    {
+      "id": "pd-knots-ropework",
+      "name": "Knots, Splices and Rope Work",
+      "version": "pg13510-html",
+      "source": "Project Gutenberg / A. Hyatt Verrill",
+      "license": "Public domain (Project Gutenberg)",
+      "description": "Illustrated practical treatise on useful knots, splices, and rope work (A. Hyatt Verrill). HTML edition from Project Gutenberg — historical reference for campers and boaters.",
+      "format": "hq-native",
+      "tags": ["knots", "rope", "public-domain", "gutenberg"],
+      "categories": ["knots", "fieldcraft"],
+      "files": [
+        {
+          "id": "knots",
+          "title": "Knots, Splices and Rope Work",
+          "url": "https://www.gutenberg.org/cache/epub/13510/pg13510-images.html",
+          "sha256": "bc5d6b57c6e93119621c38ba8ccaa19fa896aac46ee026c1e7aaf7dd7882cf39",
+          "size_bytes": 148206,
+          "path": "articles/knots.html"
+        }
+      ]
+    }
+  ]
+}

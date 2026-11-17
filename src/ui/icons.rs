@@ -52,6 +52,8 @@ pub enum IconName {
     Broadcast,
     /// Pencil — edit row / group.
     Pencil,
+    /// Open book — Survival Guides.
+    Book,
 }
 
 #[component]
@@ -249,6 +251,11 @@ fn icon_paths(name: IconName) -> &'static [&'static str] {
         IconName::Pencil => &[
             "M12 20h9",
             "M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z",
+        ],
+        // Book — Guides.
+        IconName::Book => &[
+            "M4 19.5A2.5 2.5 0 0 1 6.5 17H20",
+            "M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z",
         ],
     }
 }

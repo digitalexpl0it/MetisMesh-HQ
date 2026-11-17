@@ -16,6 +16,7 @@ mod contact_qr;
 mod db;
 mod deps;
 mod firmware;
+mod guides;
 mod log_file;
 mod map_tiles;
 mod mesh_regions;
@@ -329,6 +330,38 @@ fn serve_metis_protocol(
             .header(header::CACHE_CONTROL, "public, max-age=86400")
             .body(Cow::Borrowed(body))
             .unwrap_or_else(|_| Response::new(Cow::Borrowed(body)));
+    }
+
+    // Survival guide pack assets (images next to HTML articles). Path:
+    // /guides/packs/{pack_id}/articles/images/….png — no `..`, pack must be installed.
+    let guides_rel = path
+        .strip_prefix("/guides/packs/")
+        .or_else(|| {
+            path.rsplit_once("/guides/packs/")
+                .map(|(_, rest)| rest.trim_start_matches('/'))
+        })
+        .map(|s| s.split(['?', '#']).next().unwrap_or(s))
+        .filter(|s| !s.is_empty());
+    if let Some(rest) = guides_rel {
+        let mut parts = rest.splitn(2, '/');
+        let pack_id = parts.next().unwrap_or("");
+        let rel = parts.next().unwrap_or("");
+        if !pack_id.is_empty() && !rel.is_empty() {
+            if let Some((body, ctype)) = guides::read_pack_asset(pack_id, rel) {
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, ctype)
+                    .header(header::CONTENT_LENGTH, body.len().to_string())
+                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                    .header(header::CACHE_CONTROL, "public, max-age=86400")
+                    .body(Cow::Owned(body))
+                    .unwrap_or_else(|_| Response::new(Cow::Borrowed(b"" as &[u8])));
+            }
+        }
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Cow::Borrowed(b"guide asset not found" as &[u8]))
+            .unwrap_or_else(|_| Response::new(Cow::Borrowed(b"guide asset not found" as &[u8])));
     }
 
     // Bundled outline GeoJSON (tiny style JSON references these URLs).

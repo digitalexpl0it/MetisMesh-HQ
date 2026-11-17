@@ -63,6 +63,10 @@ const TOPICS: &[HelpTopic] = &[
         label: "CLI & Flasher",
     },
     HelpTopic {
+        id: "help-guides",
+        label: "Guides",
+    },
+    HelpTopic {
         id: "help-backup",
         label: "Backup",
     },
@@ -669,6 +673,40 @@ pub fn HelpPage() -> Element {
                         }
                         pre { class: "help-pre",
                             {"# mosquitto.conf (minimal LAN example)\nlistener 1883\nallow_anonymous true\n# Or set a user/password and enter them in HQ Settings.\n\n# HA → Settings → Devices & services → MQTT\n# Discovery prefix: homeassistant  (must match HQ)"}
+                        }
+                    }
+
+                    section { id: "help-guides", class: "help-section",
+                        h3 { class: "help-section-title",
+                            Icon { name: IconName::Book, size: 16 }
+                            "Guides"
+                        }
+                        ul { class: "help-bullets",
+                            li {
+                                strong { "Guides" }
+                                " — offline survival and reference packs under "
+                                code { "data/guides/" }
+                                " (separate from "
+                                code { "metis.db" }
+                                "). Install from Marketplace while online; search and read with no internet."
+                            }
+                            li {
+                                "Bundled sample pack "
+                                strong { "HQ Basics" }
+                                " installs without a download. Public-domain packs (Ready.gov / FEMA, Project Gutenberg, and similar) download "
+                                strong { "directly from upstream HTTPS" }
+                                " with sha256 checks — HQ does not host those files."
+                            }
+                            li {
+                                "Reader shows Markdown/HTML with local images only; PDFs open in your system viewer. Export an article as "
+                                strong { "Markdown" }
+                                " or a simple "
+                                strong { "PDF" }
+                                ". Packs never enroll devices or send mesh traffic."
+                            }
+                            li { class: "help-muted",
+                                "Community reference only — not medical or legal advice, and not FEMA, NWS, or law enforcement."
+                            }
                         }
                     }
 

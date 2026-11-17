@@ -1,6 +1,7 @@
 mod broadcast_page;
 mod cli_page;
 mod emoji_catalog;
+mod guides_page;
 mod help_page;
 mod icons;
 mod infra_page;
@@ -39,6 +40,7 @@ use crate::signup::Enrollment;
 
 use broadcast_page::BroadcastPage;
 use cli_page::CliPage;
+use guides_page::GuidesPage;
 use help_page::HelpPage;
 use icons::{Icon, IconName};
 use infra_page::InfraPage;
@@ -94,6 +96,7 @@ enum Page {
     Messages,
     Broadcast,
     Cli,
+    Guides,
     Settings,
     Help,
     About,
@@ -283,6 +286,21 @@ const NAV_SEARCH_INDEX: &[NavSearchEntry] = &[
             "get radio",
             "firmware commands",
             "terminal",
+        ],
+    },
+    NavSearchEntry {
+        page: Page::Guides,
+        title: "Guides",
+        icon: IconName::Book,
+        topics: &[
+            "survival",
+            "guides",
+            "first aid",
+            "offline",
+            "marketplace",
+            "water",
+            "reference",
+            "PDF",
         ],
     },
     NavSearchEntry {
@@ -763,6 +781,13 @@ pub fn App() -> Element {
                                         active: page() == Page::Cli,
                                         onclick: move |_| page.set(Page::Cli),
                                     }
+                                    NavButton {
+                                        icon: IconName::Book,
+                                        label: "Guides".to_string(),
+                                        expanded,
+                                        active: page() == Page::Guides,
+                                        onclick: move |_| page.set(Page::Guides),
+                                    }
                                     div { class: "mt-auto" }
                                     NavButton {
                                         icon: IconName::Settings,
@@ -835,6 +860,7 @@ pub fn App() -> Element {
                             Page::Messages => rsx! { MessagesPage { key: "{messages_root_epoch()}" } },
                             Page::Broadcast => rsx! { BroadcastPage { radio: radio.clone() } },
                             Page::Cli => rsx! { CliPage { radio: radio.clone() } },
+                            Page::Guides => rsx! { GuidesPage {} },
                             Page::Settings => rsx! {
                                 SettingsPage {
                                     radio: radio.clone(),

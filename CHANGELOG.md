@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Guides
+
+- New **Guides** page: offline survival / reference packs under `data/guides/` (separate from `metis.db`)
+- Marketplace installs bundled sample **HQ Basics** or remote HQ-native zip packs (sha256 / size checks); Sync catalog when online
+- Catalog can list upstream **`files[]`** (PDF / text): install downloads from the source URL, verifies sha256, synthesizes a local pack (no HQ hosting)
+- Fixed **categories** vocabulary with Category + Pack dropdown filters on Guides and Marketplace
+- Seed packs: FEMA *Are You Ready?*, Ready.gov water/outage + hazard sheets, Project Gutenberg *Woodcraft* and *Knots*; HQ Basics expanded (water filter, shelter, chemical SIP); `scripts/hash-guide-urls.sh` refreshes digests
+- Guide downloads use a UA without “Metis” plus Ready.gov Referer (fixes CDN 403); Marketplace shows striped progress + toasts; reader **Find in article** highlights matches
+- FTS search across installed articles; full-viewport reader with sanitized Markdown/HTML and local images
+- Export article as Markdown or simple PDF; Help + `docs/guides-pack-format.md` for pack authors
+- No AI, no Kiwix `.zim` in this version (catalog may list zim stubs as unavailable)
+
 ## 0.1.24 — 2026-11-14
 
 Package version `0.1.24` (Cargo / About). Windows Details may show `0.1.24.0`.

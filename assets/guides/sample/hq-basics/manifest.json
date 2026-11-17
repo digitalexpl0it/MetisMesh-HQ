@@ -1,0 +1,54 @@
+{
+  "id": "hq-basics",
+  "name": "HQ Basics (sample)",
+  "version": "1.1.0",
+  "source": "Metis Mesh HQ",
+  "license": "MIT",
+  "description": "Short offline reference articles shipped with Metis Mesh HQ.",
+  "categories": ["water", "medical", "radio", "shelter", "preparedness"],
+  "articles": [
+    {
+      "id": "water",
+      "title": "Safe drinking water",
+      "path": "articles/water.md",
+      "tags": ["water", "purify", "boil"],
+      "summary": "Boil, filter, and store water when utilities fail."
+    },
+    {
+      "id": "water-filter",
+      "title": "Water filtering basics",
+      "path": "articles/water-filter.md",
+      "tags": ["water", "filter", "purify"],
+      "summary": "Particle filtering before boil or disinfection; what filters do and do not remove."
+    },
+    {
+      "id": "shelter",
+      "title": "Shelter: stay or go",
+      "path": "articles/shelter.md",
+      "tags": ["shelter", "evacuate", "outage"],
+      "summary": "Stay-vs-go decisions, stay-in-place room choice, and a simple go-bag."
+    },
+    {
+      "id": "first-aid",
+      "title": "Basic first aid priorities",
+      "path": "articles/first-aid.md",
+      "tags": ["first-aid", "bleeding", "cpr"],
+      "summary": "Scene safety, bleeding control, and when to get help."
+    },
+    {
+      "id": "radio",
+      "title": "Mesh radio etiquette",
+      "path": "articles/radio.md",
+      "tags": ["radio", "mesh", "etiquette"],
+      "summary": "Keep mesh traffic short, clear, and useful in an outage."
+    },
+    {
+      "id": "chemical-sip",
+      "title": "Chemical emergency — shelter in place",
+      "path": "articles/chemical-sip.md",
+      "tags": ["chemical", "shelter", "sip"],
+      "summary": "Shelter-in-place basics; use only issued respirator gear with its manual."
+    }
+  ],
+  "attachments": []
+}

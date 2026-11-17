@@ -127,6 +127,7 @@ pub fn TextInput(
     #[props(default = "text".to_string())] kind: String,
     #[props(default)] maxlength: Option<u32>,
     #[props(default)] autofocus: bool,
+    #[props(default)] onkeydown: EventHandler<KeyboardEvent>,
     oninput: EventHandler<FormEvent>,
 ) -> Element {
     let is_password = kind.eq_ignore_ascii_case("password");
@@ -141,6 +142,7 @@ pub fn TextInput(
             autocomplete: "off",
             spellcheck: !is_password,
             oninput: move |event| oninput.call(event),
+            onkeydown: move |event| onkeydown.call(event),
         }
     }
 }
@@ -488,6 +490,9 @@ pub fn SlideDownPanel(
     /// Pinned under the scrollable body (Save / Close actions).
     #[props(default)]
     footer: Option<Element>,
+    /// Optional controls left of the close button (e.g. font size).
+    #[props(default)]
+    header_actions: Option<Element>,
 ) -> Element {
     let shell_class = if open {
         "slide-down-shell slide-down-shell-open"
@@ -532,12 +537,17 @@ pub fn SlideDownPanel(
                             p { class: "mt-1 text-sm text-muted-foreground", "{subtitle}" }
                         }
                     }
-                    button {
-                        class: "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer",
-                        r#type: "button",
-                        title: "Close",
-                        onclick: move |_| on_close.call(()),
-                        Icon { name: IconName::Close, size: 16 }
+                    div { class: "flex shrink-0 items-center gap-1",
+                        if let Some(actions) = header_actions {
+                            {actions}
+                        }
+                        button {
+                            class: "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer",
+                            r#type: "button",
+                            title: "Close",
+                            onclick: move |_| on_close.call(()),
+                            Icon { name: IconName::Close, size: 16 }
+                        }
                     }
                 }
                 div {

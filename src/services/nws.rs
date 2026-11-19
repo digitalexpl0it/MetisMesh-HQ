@@ -1,5 +1,7 @@
 //! NOAA / NWS active alerts (weather + IPAWS-style emergencies including Amber).
 
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
 use crate::signup::{fit_mesh, mesh_frames};
@@ -51,13 +53,64 @@ struct AlertProps {
     headline: Option<String>,
     description: Option<String>,
     instruction: Option<String>,
+    /// CAP GeoJSON uses a map (`{"SAME":["TOR"],…}`); older samples used a list.
     #[serde(rename = "eventCode", default)]
-    event_code: Option<Vec<EventCodeEntry>>,
+    event_code: Option<EventCodeField>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum EventCodeField {
+    Map(HashMap<String, Vec<String>>),
+    /// Rare: map of single strings instead of arrays.
+    MapOne(HashMap<String, String>),
+    List(Vec<EventCodeEntry>),
 }
 
 #[derive(Debug, Deserialize)]
 struct EventCodeEntry {
     value: Option<String>,
+}
+
+fn same_codes_from_event_code(field: Option<&EventCodeField>) -> Vec<String> {
+    let Some(field) = field else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    match field {
+        EventCodeField::Map(map) => {
+            if let Some(values) = map
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("SAME"))
+                .map(|(_, v)| v)
+            {
+                out.extend(values.iter().cloned());
+            } else {
+                for values in map.values() {
+                    out.extend(values.iter().cloned());
+                }
+            }
+        }
+        EventCodeField::MapOne(map) => {
+            if let Some(value) = map
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("SAME"))
+                .map(|(_, v)| v)
+            {
+                out.push(value.clone());
+            } else {
+                out.extend(map.values().cloned());
+            }
+        }
+        EventCodeField::List(list) => {
+            for entry in list {
+                if let Some(v) = entry.value.as_ref() {
+                    out.push(v.clone());
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Blocking HTTP for active weather alerts at lat/lon.
@@ -106,17 +159,10 @@ fn fetch_alerts_url(url: &str) -> Result<Vec<NwsAlert>, String> {
             .chars()
             .take(24)
             .collect::<String>();
-        let code = props
-            .event_code
-            .as_ref()
-            .and_then(|codes| {
-                codes.iter().find_map(|c| {
-                    c.value
-                        .as_deref()
-                        .filter(|v| v.len() == 3 && v.chars().all(|ch| ch.is_ascii_alphabetic()))
-                        .map(|v| v.to_ascii_uppercase())
-                })
-            })
+        let code = same_codes_from_event_code(props.event_code.as_ref())
+            .into_iter()
+            .find(|v| v.len() == 3 && v.chars().all(|ch| ch.is_ascii_alphabetic()))
+            .map(|v| v.to_ascii_uppercase())
             .unwrap_or_default();
         let url = alert_url_from_id(&id);
         out.push(NwsAlert {
@@ -299,6 +345,25 @@ fn urlencode(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_event_code_map_shape() {
+        let body = r#"{
+          "features": [{
+            "id": "https://api.weather.gov/alerts/urn:oid:1",
+            "properties": {
+              "id": "urn:oid:1",
+              "event": "Tornado Warning",
+              "severity": "Extreme",
+              "areaDesc": "Test County",
+              "eventCode": { "SAME": ["TOR"], "NationalWeatherService": ["TO.W"] }
+            }
+          }]
+        }"#;
+        let parsed: AlertsResponse = serde_json::from_str(body).unwrap();
+        let codes = same_codes_from_event_code(parsed.features[0].properties.as_ref().unwrap().event_code.as_ref());
+        assert_eq!(codes, vec!["TOR"]);
+    }
 
     #[test]
     fn formats_nws_without_link() {

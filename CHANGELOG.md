@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.26 — 2026-11-18
+
+Package version `0.1.26` (Cargo / About). Windows Details may show `0.1.26.0`.
+
+### Messages
+
+- Channel/DM bubbles show hop count (`direct` / `N hops`) and message size (`N bytes`) pills on the footer (UTF-8 body text, matching MeshCore compose — not the full RF frame)
+- Fix inflated hop pills (e.g. “133 hops”): companion `path_len` is an encoded Packet path byte — use hash count (`path_len & 0x3F`); heal older DB rows on display
+- Live RX: raise companion `get_msg` timeout (900ms → 3s) and ignore a single empty drain after a timeout so queued frames are not stuck until reconnect
+
+### Services
+
+- NWS alert parse: accept CAP GeoJSON `eventCode` as a map (`SAME` / NWS codes), not only a list — stops silent `nws poll` debug failures
+
 ## 0.1.25 — 2026-11-18
 
 Package version `0.1.25` (Cargo / About). Windows Details may show `0.1.25.0`.

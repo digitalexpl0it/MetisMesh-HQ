@@ -5549,33 +5549,11 @@ fn MessagesPage() -> Element {
                                                     }
                                                 }
                                             }
-                                            div { class: "message-meta-foot",
-                                                if outgoing {
-                                                    {
-                                                        let (label, icon, pill) = match message.delivery.as_str() {
-                                                            "queued" => ("Queued", IconName::Clock, "message-meta-pill message-meta-pill-ok"),
-                                                            "sending" => ("Sending…", IconName::Clock, "message-meta-pill message-meta-pill-ok"),
-                                                            "failed" => ("Not sent", IconName::Ban, "message-meta-pill message-meta-pill-bad"),
-                                                            _ => ("Sent", IconName::Check, "message-meta-pill message-meta-pill-ok"),
-                                                        };
-                                                        rsx! {
-                                                            span { class: "{pill}",
-                                                                Icon { name: icon, size: 11 }
-                                                                "{label}"
-                                                            }
-                                                        }
-                                                    }
-                                                } else {
-                                                    span { class: "message-meta-pill",
-                                                        Icon { name: IconName::Signal, size: 11 }
-                                                        if let Some(hops) = message.hop_count {
-                                                            "{hops} hops"
-                                                        } else {
-                                                            "hops —"
-                                                        }
-                                                    }
-                                                    span { class: "message-meta-pill", "Received" }
-                                                }
+                                            MessageMetaFoot {
+                                                outgoing,
+                                                delivery: message.delivery.clone(),
+                                                hop_count: crate::path::display_hop_count(message.hop_count),
+                                                text: message.text.clone(),
                                             }
                                         }
                                         if show_new {
@@ -6593,39 +6571,12 @@ fn MessagesPage() -> Element {
                                                 }
                                             }
                                             }
-                                            div { class: "message-meta-foot",
-                                                if outgoing {
-                                                    {
-                                                        let (label, icon, pill) = match message.delivery.as_str() {
-                                                            "queued" => ("Queued", IconName::Clock, "message-meta-pill message-meta-pill-ok"),
-                                                            "sending" => ("Sending…", IconName::Clock, "message-meta-pill message-meta-pill-ok"),
-                                                            "failed" => ("Not sent", IconName::Ban, "message-meta-pill message-meta-pill-bad"),
-                                                            _ => ("Sent", IconName::Check, "message-meta-pill message-meta-pill-ok"),
-                                                        };
-                                                        rsx! {
-                                                            span {
-                                                                class: "{pill}",
-                                                                title: if message.delivery == "failed" {
-                                                                    "The companion did not accept this message. Check the status bar, then send it again."
-                                                                } else {
-                                                                    ""
-                                                                },
-                                                                Icon { name: icon, size: 11 }
-                                                                "{label}"
-                                                            }
-                                                        }
-                                                    }
-                                                } else {
-                                                    span { class: "message-meta-pill",
-                                                        Icon { name: IconName::Signal, size: 11 }
-                                                        if let Some(hops) = message.hop_count {
-                                                            "{hops} hops"
-                                                        } else {
-                                                            "hops —"
-                                                        }
-                                                    }
-                                                    span { class: "message-meta-pill", "Received" }
-                                                }
+                                            MessageMetaFoot {
+                                                outgoing,
+                                                delivery: message.delivery.clone(),
+                                                hop_count: crate::path::display_hop_count(message.hop_count),
+                                                text: bubble_text.clone(),
+                                                failed_hint: true,
                                             }
                                         }
                                     }
@@ -7698,6 +7649,82 @@ fn MessagesPage() -> Element {
                 }
             }
         }
+        }
+    }
+}
+
+/// UTF-8 size of the chat text (message body), not the full radio frame.
+fn message_meta_bytes_label(text: &str) -> String {
+    format!("{} bytes", text.len())
+}
+
+/// MeshCore path hop count for the bubble foot (`direct` / `N hops`).
+fn message_meta_hops_label(hops: Option<i64>) -> (String, String) {
+    match hops {
+        None => (
+            "hops —".into(),
+            "Hop count unknown for this frame".into(),
+        ),
+        Some(0) => (
+            "direct".into(),
+            "Direct — zero hops (no repeaters in path)".into(),
+        ),
+        Some(1) => ("1 hop".into(), "1 hop in path".into()),
+        Some(n) => (format!("{n} hops"), format!("{n} hops in path")),
+    }
+}
+
+/// Shared channel/DM bubble footer: delivery or hops, plus byte count.
+#[component]
+fn MessageMetaFoot(
+    outgoing: bool,
+    delivery: String,
+    hop_count: Option<i64>,
+    text: String,
+    #[props(default = false)] failed_hint: bool,
+) -> Element {
+    let bytes = message_meta_bytes_label(&text);
+    let (hops_label, hops_title) = message_meta_hops_label(hop_count);
+    let bytes_title = format!(
+        "UTF-8 byte length (MeshCore limit {MESH_TEXT_MAX_BYTES})"
+    );
+    rsx! {
+        div { class: "message-meta-foot",
+            if outgoing {
+                {
+                    let (label, icon, pill) = match delivery.as_str() {
+                        "queued" => ("Queued", IconName::Clock, "message-meta-pill message-meta-pill-ok"),
+                        "sending" => ("Sending…", IconName::Clock, "message-meta-pill message-meta-pill-ok"),
+                        "failed" => ("Not sent", IconName::Ban, "message-meta-pill message-meta-pill-bad"),
+                        _ => ("Sent", IconName::Check, "message-meta-pill message-meta-pill-ok"),
+                    };
+                    rsx! {
+                        span {
+                            class: "{pill}",
+                            title: if failed_hint && delivery == "failed" {
+                                "The companion did not accept this message. Check the status bar, then send it again."
+                            } else {
+                                ""
+                            },
+                            Icon { name: icon, size: 11 }
+                            "{label}"
+                        }
+                    }
+                }
+            } else {
+                span {
+                    class: "message-meta-pill",
+                    title: "{hops_title}",
+                    Icon { name: IconName::Signal, size: 11 }
+                    "{hops_label}"
+                }
+                span { class: "message-meta-pill", "Received" }
+            }
+            span {
+                class: "message-meta-pill",
+                title: "{bytes_title}",
+                "{bytes}"
+            }
         }
     }
 }

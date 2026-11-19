@@ -40,13 +40,38 @@ pub fn dedupe_key(kind: &str, sender: &str, timestamp: u32, text: &str) -> Strin
     hex::encode(hasher.finalize())
 }
 
-/// Companion message `path_len`. `0xFF` means the frame did not include a hop count.
+/// Companion RX `path_len` is the **encoded** Packet path byte (not a raw hop
+/// count): low 6 bits = hash count, high 2 bits = hash size code.
+/// `0xFF` means the frame arrived direct (companion protocol receive semantics).
 pub fn hop_count_from_path_len(path_len: u8) -> Option<u8> {
     if path_len == 0xFF {
-        None
-    } else {
-        Some(path_len)
+        return Some(0);
     }
+    let (hops, hash_size) = decode_encoded_path_len(path_len);
+    if hash_size >= 4 {
+        return None; // reserved hash size
+    }
+    Some(hops as u8)
+}
+
+/// Normalize a DB `hop_count` for display. Older builds stored the raw encoded
+/// path byte (e.g. 133 → looked like “133 hops”); decode those on read.
+pub fn display_hop_count(stored: Option<i64>) -> Option<i64> {
+    let Some(n) = stored else {
+        return None;
+    };
+    if !(0..=255).contains(&n) {
+        return None;
+    }
+    let b = n as u8;
+    if b == 0xFF {
+        return Some(0);
+    }
+    // Decoded hop counts are 0..=63. Values with size bits set were mis-stored.
+    if b > 63 {
+        return hop_count_from_path_len(b).map(i64::from);
+    }
+    Some(n)
 }
 
 /// Advert-path `path_len` packs hop count in bits 0–5 and hash size in bits 6–7.
@@ -251,6 +276,17 @@ mod tests {
         assert_eq!(path, vec![0xAB]);
         frame[5] = 0x41;
         assert!(parse_advert_path(&frame).is_none());
+    }
+
+    #[test]
+    fn companion_path_len_is_encoded_not_raw_hops() {
+        // 133 = 0x85 → hash_count 5, hash_size 3 (not “133 hops”).
+        assert_eq!(hop_count_from_path_len(133), Some(5));
+        assert_eq!(hop_count_from_path_len(0x45), Some(5));
+        assert_eq!(hop_count_from_path_len(2), Some(2));
+        assert_eq!(hop_count_from_path_len(0xFF), Some(0));
+        assert_eq!(display_hop_count(Some(133)), Some(5));
+        assert_eq!(display_hop_count(Some(5)), Some(5));
     }
 
 }

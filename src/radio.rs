@@ -3689,11 +3689,14 @@ enum MsgDrainResult {
     Cleared,
     /// Command lock busy — retry soon (do not clear MessagesWaiting).
     Busy,
-    /// Fetched some frames but hit budget / error before empty.
+    /// Fetched some frames but hit budget before empty.
     MorePending,
+    /// `get_msg` timed out / soft-failed — next empty NoMore may be stale.
+    TimedOut,
 }
 
 /// Whether the session should keep retrying the companion message queue.
+#[cfg(test)]
 fn need_msg_drain_after(result: MsgDrainResult) -> bool {
     !matches!(result, MsgDrainResult::Cleared)
 }
@@ -3792,6 +3795,9 @@ async fn drain_pending_messages(
     };
     log_radio_lock_wait(lock_kind, lock_started.elapsed(), true);
     let mut fetched = 0u32;
+    // Match connect-drain / BLE notify lag (0.5–2s+). A 900ms live timeout
+    // left frames queued until reconnect emptied them with a 4s budget (#2).
+    const LIVE_GET_MSG_TIMEOUT: Duration = Duration::from_secs(3);
     const BUDGET: u32 = 24;
     loop {
         if fetched >= BUDGET {
@@ -3804,7 +3810,7 @@ async fn drain_pending_messages(
         match get_msg_listening_first(
             &commands,
             meshcore.dispatcher(),
-            Duration::from_millis(900),
+            LIVE_GET_MSG_TIMEOUT,
         )
         .await
         {
@@ -3821,7 +3827,7 @@ async fn drain_pending_messages(
             }
             Err(err) => {
                 hq_log!(warn, "radio {radio}: get_msg: {err}");
-                return MsgDrainResult::MorePending;
+                return MsgDrainResult::TimedOut;
             }
         }
     }
@@ -4824,6 +4830,8 @@ async fn run_session(
     // periodically (MeshCore docs: do not rely on 0x83 alone — it coalesces).
     // O6: unfinished connect drain continues here (same get_msg + event-loop insert).
     let mut need_msg_drain = need_msg_drain_after_connect(connect_msg_drain);
+    // After TimedOut, the next Cleared may be a late NoMore — force one more pass.
+    let mut drain_after_timeout = false;
     let mut last_msg_poll = Instant::now();
     const MSG_POLL_EVERY: Duration = Duration::from_secs(2);
     loop {
@@ -5351,11 +5359,33 @@ async fn run_session(
                         // NoMoreMessages, or further arrivals may not re-signal.
                         hq_log!(info, "radio {radio}: MessagesWaiting");
                         let result = drain_pending_messages(&meshcore, radio, true).await;
-                        need_msg_drain = need_msg_drain_after(result);
                         match result {
-                            MsgDrainResult::Busy => set_receiving_busy_hint(status, true),
-                            MsgDrainResult::Cleared => set_receiving_busy_hint(status, false),
-                            MsgDrainResult::MorePending => {}
+                            MsgDrainResult::Busy => {
+                                need_msg_drain = true;
+                                set_receiving_busy_hint(status, true);
+                            }
+                            MsgDrainResult::Cleared => {
+                                if drain_after_timeout {
+                                    drain_after_timeout = false;
+                                    need_msg_drain = true;
+                                    hq_log!(
+                                        info,
+                                        "radio {radio}: empty drain after timeout — one more pass"
+                                    );
+                                    set_receiving_busy_hint(status, true);
+                                } else {
+                                    need_msg_drain = false;
+                                    set_receiving_busy_hint(status, false);
+                                }
+                            }
+                            MsgDrainResult::MorePending => {
+                                need_msg_drain = true;
+                            }
+                            MsgDrainResult::TimedOut => {
+                                drain_after_timeout = true;
+                                need_msg_drain = true;
+                                set_receiving_busy_hint(status, true);
+                            }
                         }
                     }
                     Some(event) => {
@@ -5411,14 +5441,31 @@ async fn run_session(
                     let from_waiting = need_msg_drain;
                     match drain_pending_messages(&meshcore, radio, from_waiting).await {
                         MsgDrainResult::Cleared => {
-                            need_msg_drain = false;
-                            last_msg_poll = Instant::now();
-                            set_receiving_busy_hint(status, false);
+                            if drain_after_timeout {
+                                drain_after_timeout = false;
+                                need_msg_drain = true;
+                                last_msg_poll = Instant::now();
+                                set_receiving_busy_hint(status, true);
+                                hq_log!(
+                                    info,
+                                    "radio {radio}: empty drain after timeout — one more pass"
+                                );
+                            } else {
+                                need_msg_drain = false;
+                                last_msg_poll = Instant::now();
+                                set_receiving_busy_hint(status, false);
+                            }
                         }
                         MsgDrainResult::MorePending => {
                             need_msg_drain = true;
                             last_msg_poll = Instant::now();
                             // Still draining across ticks — soft status, not an alarm.
+                            set_receiving_busy_hint(status, true);
+                        }
+                        MsgDrainResult::TimedOut => {
+                            drain_after_timeout = true;
+                            need_msg_drain = true;
+                            last_msg_poll = Instant::now();
                             set_receiving_busy_hint(status, true);
                         }
                         MsgDrainResult::Busy => {
@@ -7752,6 +7799,7 @@ mod tests {
     fn need_msg_drain_after_busy_or_more_keeps_retry() {
         assert!(need_msg_drain_after(MsgDrainResult::Busy));
         assert!(need_msg_drain_after(MsgDrainResult::MorePending));
+        assert!(need_msg_drain_after(MsgDrainResult::TimedOut));
     }
 
     #[test]

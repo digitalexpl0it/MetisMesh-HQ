@@ -3946,7 +3946,20 @@ async fn transmit_channel_message(
         return Err(msg.into());
     }
     let advert_name = db.hq_advert_name().unwrap_or_else(|_| "hq".into());
+    // History / OTA plaintext is `Name: body`. Companion CMD text is body only —
+    // firmware always prepends `_prefs.node_name + ": "` (MeshCore app does the same).
     let wire = prefix_channel_sender(&advert_name, text);
+    let to_radio = {
+        let (parsed, body) = channel_sender_and_body(&wire);
+        if parsed
+            .as_ref()
+            .is_some_and(|n| n.eq_ignore_ascii_case(advert_name.trim()))
+        {
+            body
+        } else {
+            text.to_string()
+        }
+    };
     if wire.len() > 160 {
         let msg = "Mesh text is limited to 160 bytes after adding the device name.";
         push_send_note(status, msg);
@@ -3955,7 +3968,7 @@ async fn transmit_channel_message(
     }
     let timestamp = unix_now() as u32;
     let origin = if bot_activity { "bot" } else { "local" };
-    match send_channel_text(meshcore, slot, &wire, timestamp).await {
+    match send_channel_text(meshcore, slot, &to_radio, timestamp).await {
         Ok(()) => {
             let raw = json!({
                 "channel": slot,

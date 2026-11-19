@@ -68,6 +68,26 @@ pub fn push_pending(
     });
 }
 
+/// True when decrypted OTA body matches the pending history wire.
+///
+/// Companion firmware always prepends `node_name: ` to the CMD text field.
+/// HQ history/`pending.wire` is the single-prefixed `Name: body` that should
+/// appear on air. Also accept a legacy double-prefix (`Name: Name: body`) from
+/// older HQ builds that sent an already-prefixed string to the companion.
+pub fn ota_body_matches_wire(ota: &str, pending_wire: &str) -> bool {
+    if ota == pending_wire {
+        return true;
+    }
+    // Legacy double-prefix only when the same Name is repeated.
+    if let Some((name, _)) = pending_wire.split_once(": ") {
+        let doubled = format!("{name}: {pending_wire}");
+        if ota == doubled {
+            return true;
+        }
+    }
+    false
+}
+
 /// Try to attribute a LogData frame to a pending channel send.
 /// Oldest matching pending wins (exact wire text + channel hash + MAC).
 pub fn correlate_log_data(
@@ -106,7 +126,7 @@ pub fn correlate_log_data(
         let Some(body) = try_decrypt_group_text(&pend.secret, payload) else {
             continue;
         };
-        if body == pend.wire {
+        if ota_body_matches_wire(&body, &pend.wire) {
             matched_idx = Some(idx);
             break;
         }
@@ -206,5 +226,19 @@ mod tests {
         assert_eq!(m.hops.len(), 2);
         assert_eq!(m.hops[0].hash, vec![0x01, 0x02]);
         assert_eq!(m.hops[1].hash, vec![0x03, 0x04]);
+    }
+
+    #[test]
+    fn legacy_double_prefix_still_matches() {
+        let secret = secret();
+        let mut pending = VecDeque::new();
+        push_pending(&mut pending, 3, 0, "HQ: hello".into(), secret);
+        // Older HQ sent already-prefixed text; companion prepended again.
+        let payload = encrypt_group_text(&secret, 1, "HQ: HQ: hello").unwrap();
+        let log = flood_log(vec![0xab], 1, payload);
+        let m = correlate_log_data(&mut pending, &log).expect("double-prefix match");
+        assert_eq!(m.message_id, 3);
+        assert!(ota_body_matches_wire("HQ: HQ: hello", "HQ: hello"));
+        assert!(!ota_body_matches_wire("Other: HQ: hello", "HQ: hello"));
     }
 }

@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use base64::Engine;
 
@@ -21,6 +21,11 @@ const DEFAULT_LOGO_NAME: &str = "__default.png";
 pub fn init(data_dir: &Path) {
     let dir = data_dir.join("brand");
     let _ = fs::create_dir_all(&dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+    }
     let _ = BRAND_DIR.set(dir);
 }
 
@@ -154,15 +159,23 @@ pub fn read_brand_file(name: &str) -> Option<(Vec<u8>, &'static str)> {
     Some((bytes, content_type(&name)))
 }
 
-/// Open a file picker, copy into `data/brand/`, and store the setting.
-pub fn pick_and_install_logo(db: &Db) -> Result<String, String> {
-    let source = rfd::FileDialog::new()
-        .set_title("Choose brand logo")
-        .add_filter("Images", &["png", "jpg", "jpeg", "webp", "gif", "svg"])
-        .pick_file()
-        .ok_or_else(|| "Logo upload cancelled.".to_string())?;
-
-    let meta = fs::metadata(&source).map_err(|err| err.to_string())?;
+/// Copy a picked image into `data/brand/` and store the setting.
+///
+/// Call this after an **async** file dialog. Do not call sync `rfd::FileDialog`
+/// from a Dioxus `onclick` — on Linux the xdg-portal backend uses
+/// `pollster::block_on`, which aborts inside the Tokio/UI runtime (and nested
+/// native dialogs are unsafe on Windows WebView2 too).
+pub fn install_logo_from_path(db: &Db, source: &Path) -> Result<String, String> {
+    let meta = fs::metadata(source).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::PermissionDenied {
+            format!(
+                "Cannot read logo ({err}). Check permissions on {}.",
+                source.display()
+            )
+        } else {
+            err.to_string()
+        }
+    })?;
     if !meta.is_file() {
         return Err("Choose an image file.".into());
     }
@@ -179,6 +192,16 @@ pub fn pick_and_install_logo(db: &Db) -> Result<String, String> {
 
     let dir = brand_dir();
     fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    // Probe writability early (e.g. brand/ left owned by root from a past run).
+    let probe = dir.join(".write-test");
+    if let Err(err) = fs::write(&probe, b"ok") {
+        return Err(format!(
+            "Cannot write brand logo to {} ({err}). Fix folder ownership (must be writable by your user) and try again.",
+            dir.display()
+        ));
+    }
+    let _ = fs::remove_file(&probe);
+
     // Drop previous logos so the folder does not accumulate.
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
@@ -189,13 +212,32 @@ pub fn pick_and_install_logo(db: &Db) -> Result<String, String> {
         }
     }
     let dest = dir.join(&dest_name);
-    fs::copy(&source, &dest).map_err(|err| err.to_string())?;
+    fs::copy(source, &dest).map_err(|err| {
+        format!(
+            "Could not save logo to {} ({err}).",
+            dest.display()
+        )
+    })?;
 
     db.set_setting(SETTING_FILE, &dest_name)
         .map_err(|err| err.to_string())?;
     db.set_setting(SETTING_REV, &unix_now().to_string())
         .map_err(|err| err.to_string())?;
     Ok(dest_name)
+}
+
+/// Async file picker + install. Safe to `spawn` from Dioxus desktop UI.
+pub async fn pick_and_install_logo(db: Arc<Db>) -> Result<String, String> {
+    let handle = rfd::AsyncFileDialog::new()
+        .set_title("Choose brand logo")
+        .add_filter("Images", &["png", "jpg", "jpeg", "webp", "gif", "svg"])
+        .pick_file()
+        .await
+        .ok_or_else(|| "Logo upload cancelled.".to_string())?;
+    let path = handle.path().to_path_buf();
+    tokio::task::spawn_blocking(move || install_logo_from_path(&db, &path))
+        .await
+        .map_err(|err| format!("Logo install task failed: {err}"))?
 }
 
 /// Remove a custom upload so the bundled EmergHQ mark shows again.
@@ -231,5 +273,28 @@ mod tests {
         );
         assert_eq!(sanitize_filename("../evil.svg"), None);
         assert_eq!(sanitize_filename("notes.txt"), None);
+    }
+
+    #[test]
+    fn install_logo_from_path_copies_and_sets() {
+        let root = std::env::temp_dir().join(format!(
+            "metis-brand-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        init(&root);
+        let src = root.join("upload.png");
+        fs::write(&src, DEFAULT_LOGO_PNG).unwrap();
+        let db_path = root.join("t.db");
+        let db = Db::open(&db_path).expect("db");
+        let name = install_logo_from_path(&db, &src).expect("install");
+        assert_eq!(name, "upload.png");
+        assert!(brand_dir().join(&name).is_file());
+        assert_eq!(db.setting(SETTING_FILE).unwrap().as_deref(), Some("upload.png"));
+        assert!(custom_logo_url(&db).is_some());
+        clear_logo(&db).unwrap();
+        assert!(custom_logo_url(&db).is_none());
+        let _ = fs::remove_dir_all(&root);
     }
 }

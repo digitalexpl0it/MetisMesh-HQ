@@ -96,7 +96,15 @@ impl Secrets {
         entry
             .set_password(&hex::encode(secret))
             .map_err(|err| err.to_string())?;
-        Ok(SecretStoreKind::Keyring)
+        // keyring 3 mock / broken backends report success but a new Entry cannot
+        // read the value back — force file fallback so secrets stay stable.
+        match self.load_keyring(name)? {
+            Some(stored) if stored == *secret => Ok(SecretStoreKind::Keyring),
+            _ => {
+                let _ = entry.delete_credential();
+                Err("keyring did not persist the secret".into())
+            }
+        }
     }
 
     fn load_keyring(&self, name: &str) -> Result<Option<[u8; 16]>, String> {
@@ -209,6 +217,36 @@ mod tests {
             SecretStoreKind::File
         );
         assert_eq!(secrets.load("METIS-INFO").unwrap(), Some(value));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Production `Secrets::new` must persist across loads (keyring or file).
+    /// Without keyring backends this used to "succeed" on a mock store and
+    /// regenerate a new secret on every `ensure_named_channel_secret`.
+    #[test]
+    fn production_store_persists_across_new_handle() {
+        let dir = std::env::temp_dir().join(format!(
+            "metis-secrets-prod-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let value = Secrets::generate();
+        let name = "METIS-INFO-persist-test";
+        {
+            let secrets = Secrets::new(&dir);
+            let kind = secrets.store(name, &value).expect("store");
+            assert!(
+                matches!(kind, SecretStoreKind::Keyring | SecretStoreKind::File),
+                "unexpected store kind {kind:?}"
+            );
+        }
+        let secrets = Secrets::new(&dir);
+        assert_eq!(
+            secrets.load(name).expect("load"),
+            Some(value),
+            "secret must survive a new Secrets handle (file fallback if keyring is mock)"
+        );
+        let _ = secrets.forget(name);
         let _ = fs::remove_dir_all(&dir);
     }
 }

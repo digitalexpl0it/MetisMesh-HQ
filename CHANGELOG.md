@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.1.25 — 2026-11-18
+
+Package version `0.1.25` (Cargo / About). Windows Details may show `0.1.25.0`.
+
+### Security / radio
+
+- Fix private channel secrets regenerating on every approve/reconnect ([#5](https://github.com/digitalexpl0it/MetisMesh-HQ/issues/5)): enable keyring v3 platform backends; verify keyring writes round-trip or fall back to `0600` `channel-secrets` under the data dir
+
+### Settings
+
+- Fix brand logo upload crashing HQ on Linux/Windows: use async `rfd` dialog (sync portal/`pollster` on the UI thread aborted the app); clearer errors if `data/brand/` is not writable
+
 ### Guides
 
 - New **Guides** page: offline survival / reference packs under `data/guides/` (separate from `metis.db`)

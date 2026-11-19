@@ -13755,10 +13755,14 @@ fn SettingsPage(
                     Button {
                         kind: ButtonKind::Ghost,
                         onclick: move |_| {
-                            match crate::brand::pick_and_install_logo(&state().db) {
-                                Ok(_) => status_note("Brand logo saved."),
-                                Err(err) => status_note(err),
-                            }
+                            let db = state().db.clone();
+                            spawn(async move {
+                                match crate::brand::pick_and_install_logo(db).await {
+                                    Ok(_) => status_note("Brand logo saved."),
+                                    Err(err) if err == "Logo upload cancelled." => {}
+                                    Err(err) => status_note(err),
+                                }
+                            });
                         },
                         Icon { name: IconName::Check, size: 14 }
                         "Upload logo"

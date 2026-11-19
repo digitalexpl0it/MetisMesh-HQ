@@ -156,6 +156,18 @@ pub struct MessageRow {
     pub snr: Option<f64>,
 }
 
+/// One overheard repeater hash attributed to an outbound channel message.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeardRepeaterRow {
+    pub message_id: i64,
+    pub hash_hex: String,
+    pub hash_size: i64,
+    pub snr: Option<f64>,
+    pub rssi: Option<i64>,
+    /// Best-effort display name when the hash uniquely matches a known node.
+    pub label: Option<String>,
+}
+
 /// Latest stored mesh path for a node (map Trace highlight).
 #[derive(Debug, Clone)]
 pub struct NodePathRow {
@@ -472,6 +484,20 @@ impl Db {
                 PRIMARY KEY (pubkey, radio_id)
             );
             CREATE INDEX IF NOT EXISTS node_radios_radio ON node_radios(radio_id);",
+        );
+        let _ = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS message_heard_repeaters (
+                message_id INTEGER NOT NULL,
+                hash_hex TEXT NOT NULL,
+                hash_size INTEGER NOT NULL,
+                snr REAL,
+                rssi INTEGER,
+                first_heard_at INTEGER NOT NULL,
+                last_heard_at INTEGER NOT NULL,
+                PRIMARY KEY (message_id, hash_hex)
+            );
+            CREATE INDEX IF NOT EXISTS message_heard_repeaters_msg
+                ON message_heard_repeaters(message_id);",
         );
         let _ = conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS rf_samples (
@@ -1955,6 +1981,11 @@ impl Db {
         }
 
         if deleted > 0 {
+            let _ = conn.execute(
+                "DELETE FROM message_heard_repeaters
+                 WHERE message_id NOT IN (SELECT id FROM messages)",
+                [],
+            );
             conn.execute(
                 "DELETE FROM paths WHERE message_id IS NOT NULL AND message_id NOT IN (SELECT id FROM messages)",
                 [],
@@ -3254,12 +3285,139 @@ impl Db {
         Ok(())
     }
 
+    /// Upsert overheard repeater hashes for an outbound channel message.
+    /// Keeps the strongest SNR seen for each hash.
+    pub fn record_heard_repeaters(
+        &self,
+        message_id: i64,
+        hops: &[(Vec<u8>, u8)],
+        snr: f32,
+        rssi: i16,
+    ) -> Result<()> {
+        if message_id <= 0 || hops.is_empty() {
+            return Ok(());
+        }
+        let now = unix_now();
+        let snr_f = f64::from(snr);
+        let rssi_i = i64::from(rssi);
+        let conn = self.lock();
+        for (hash, hash_size) in hops {
+            if hash.is_empty() {
+                continue;
+            }
+            let hex = hex::encode(hash);
+            let size = i64::from(*hash_size);
+            conn.execute(
+                "INSERT INTO message_heard_repeaters (
+                    message_id, hash_hex, hash_size, snr, rssi, first_heard_at, last_heard_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+                 ON CONFLICT(message_id, hash_hex) DO UPDATE SET
+                    hash_size = excluded.hash_size,
+                    snr = CASE
+                        WHEN message_heard_repeaters.snr IS NULL THEN excluded.snr
+                        WHEN excluded.snr IS NULL THEN message_heard_repeaters.snr
+                        WHEN excluded.snr > message_heard_repeaters.snr THEN excluded.snr
+                        ELSE message_heard_repeaters.snr
+                    END,
+                    rssi = CASE
+                        WHEN message_heard_repeaters.rssi IS NULL THEN excluded.rssi
+                        WHEN excluded.rssi IS NULL THEN message_heard_repeaters.rssi
+                        WHEN excluded.rssi > message_heard_repeaters.rssi THEN excluded.rssi
+                        ELSE message_heard_repeaters.rssi
+                    END,
+                    last_heard_at = excluded.last_heard_at",
+                params![message_id, hex, size, snr_f, rssi_i, now],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Heard repeater rows for many messages (channel thread), oldest hash first.
+    pub fn heard_repeaters_for_messages(
+        &self,
+        message_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, Vec<HeardRepeaterRow>>> {
+        let mut out: std::collections::HashMap<i64, Vec<HeardRepeaterRow>> =
+            std::collections::HashMap::new();
+        let ids: Vec<i64> = message_ids.iter().copied().filter(|id| *id > 0).collect();
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        let conn = self.lock();
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT message_id, hash_hex, hash_size, snr, rssi
+             FROM message_heard_repeaters
+             WHERE message_id IN ({placeholders})
+             ORDER BY message_id ASC, first_heard_at ASC, hash_hex ASC"
+        ))?;
+        let params_vec: Vec<&dyn rusqlite::types::ToSql> = ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::types::ToSql)
+            .collect();
+        let mut raw: Vec<HeardRepeaterRow> = Vec::new();
+        {
+            let rows = stmt.query_map(params_vec.as_slice(), |row| {
+                Ok(HeardRepeaterRow {
+                    message_id: row.get(0)?,
+                    hash_hex: row.get(1)?,
+                    hash_size: row.get(2)?,
+                    snr: row.get(3)?,
+                    rssi: row.get(4)?,
+                    label: None,
+                })
+            })?;
+            for row in rows {
+                raw.push(row?);
+            }
+        }
+        drop(stmt);
+        // Pubkeys are stored as hex TEXT — resolve unique names by prefix.
+        let nodes: Vec<(String, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT pubkey, name FROM nodes WHERE trim(COALESCE(name, '')) != ''",
+            )?;
+            let mapped = stmt
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            mapped
+        };
+        for mut row in raw {
+            let hash = row.hash_hex.to_ascii_lowercase();
+            let mut hits: Vec<&str> = nodes
+                .iter()
+                .filter(|(pk, _)| pk.to_ascii_lowercase().starts_with(&hash))
+                .map(|(_, name)| name.as_str())
+                .collect();
+            hits.sort();
+            hits.dedup();
+            if hits.len() == 1 {
+                row.label = Some(hits[0].to_string());
+            }
+            out.entry(row.message_id).or_default().push(row);
+        }
+        Ok(out)
+    }
+
+    fn delete_heard_for_messages(conn: &Connection, ids: &[i64]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut stmt =
+            conn.prepare("DELETE FROM message_heard_repeaters WHERE message_id = ?1")?;
+        for id in ids {
+            stmt.execute(params![id])?;
+        }
+        Ok(())
+    }
+
     /// Delete one local message by id (HQ only — not a mesh retract).
     pub fn delete_message(&self, id: i64) -> Result<()> {
         if id <= 0 {
             return Err(Error::Msg("Message id required.".into()));
         }
         let conn = self.lock();
+        Self::delete_heard_for_messages(&conn, &[id])?;
         let deleted = conn.execute("DELETE FROM messages WHERE id = ?1", params![id])?;
         if deleted == 0 {
             return Err(Error::Msg("Message not found.".into()));
@@ -3278,6 +3436,7 @@ impl Db {
         }
         let conn = self.lock();
         let tx = conn.unchecked_transaction()?;
+        Self::delete_heard_for_messages(&tx, &ids)?;
         let mut deleted: u64 = 0;
         {
             let mut stmt = tx.prepare("DELETE FROM messages WHERE id = ?1")?;
@@ -3307,6 +3466,11 @@ impl Db {
             params![slot],
         )? as u64;
         if deleted > 0 {
+            let _ = conn.execute(
+                "DELETE FROM message_heard_repeaters
+                 WHERE message_id NOT IN (SELECT id FROM messages)",
+                [],
+            );
             Self::cleanup_orphan_paths(&conn)?;
         }
         drop(conn);
@@ -7044,6 +7208,17 @@ CREATE TABLE IF NOT EXISTS paths (
 );
 CREATE INDEX IF NOT EXISTS paths_message ON paths(message_id);
 CREATE INDEX IF NOT EXISTS paths_node ON paths(node_pubkey);
+CREATE TABLE IF NOT EXISTS message_heard_repeaters (
+    message_id INTEGER NOT NULL,
+    hash_hex TEXT NOT NULL,
+    hash_size INTEGER NOT NULL,
+    snr REAL,
+    rssi INTEGER,
+    first_heard_at INTEGER NOT NULL,
+    last_heard_at INTEGER NOT NULL,
+    PRIMARY KEY (message_id, hash_hex)
+);
+CREATE INDEX IF NOT EXISTS message_heard_repeaters_msg ON message_heard_repeaters(message_id);
 CREATE TABLE IF NOT EXISTS positions (
     id INTEGER PRIMARY KEY,
     pubkey TEXT NOT NULL,
@@ -7294,6 +7469,43 @@ mod tests {
             .unwrap();
         assert!(first.is_some());
         assert!(second.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn heard_repeaters_upsert_keeps_max_snr() {
+        let (db, _, dir) = test_db();
+        let id = db
+            .insert_message(
+                "channel",
+                "tx",
+                None,
+                "HQ",
+                Some(0),
+                Some(0),
+                99,
+                "HQ: hi",
+                "HQ: hi",
+                None,
+                None,
+                &json!({}),
+                "sent",
+                None,
+                "local",
+            )
+            .unwrap()
+            .expect("inserted");
+        db.record_heard_repeaters(id, &[(vec![0xaa], 1)], 3.0, -90)
+            .unwrap();
+        db.record_heard_repeaters(id, &[(vec![0xaa], 1), (vec![0xbb], 1)], 8.5, -70)
+            .unwrap();
+        let map = db.heard_repeaters_for_messages(&[id]).unwrap();
+        let rows = map.get(&id).expect("rows");
+        assert_eq!(rows.len(), 2);
+        let aa = rows.iter().find(|r| r.hash_hex == "aa").unwrap();
+        assert_eq!(aa.snr, Some(8.5));
+        db.delete_message(id).unwrap();
+        assert!(db.heard_repeaters_for_messages(&[id]).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

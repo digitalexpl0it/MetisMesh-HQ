@@ -5713,6 +5713,17 @@ fn MessagesPage() -> Element {
                 (messages, has_older)
             }
         };
+        let heard_by_id = {
+            let ids: Vec<i64> = messages
+                .iter()
+                .filter(|m| m.direction == "tx")
+                .map(|m| m.id)
+                .collect();
+            state()
+                .db
+                .heard_repeaters_for_messages(&ids)
+                .unwrap_or_default()
+        };
         let emergency = channel.role == "emergency";
         let _latest_id = messages.last().map(|message| message.id);
         let needs_session = read_session()
@@ -6282,6 +6293,10 @@ fn MessagesPage() -> Element {
                         for message in messages {
                             {
                                 let outgoing = message.direction == "tx";
+                                let heard = heard_by_id
+                                    .get(&message.id)
+                                    .cloned()
+                                    .unwrap_or_default();
                                 let show_new_banner = banner_after_id == Some(message.id);
                                 let new_count = new_count;
                                 let (parsed_name, body) = channel_sender_and_body(&message.text);
@@ -6577,6 +6592,7 @@ fn MessagesPage() -> Element {
                                                 hop_count: crate::path::display_hop_count(message.hop_count),
                                                 text: bubble_text.clone(),
                                                 failed_hint: true,
+                                                heard,
                                             }
                                         }
                                     }
@@ -7674,7 +7690,20 @@ fn message_meta_hops_label(hops: Option<i64>) -> (String, String) {
     }
 }
 
+fn heard_repeater_label(row: &crate::db::HeardRepeaterRow) -> String {
+    if let Some(name) = row.label.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        return name.to_string();
+    }
+    let hex = row.hash_hex.trim();
+    if hex.len() <= 8 {
+        hex.to_string()
+    } else {
+        format!("{}…", &hex[..8.min(hex.len())])
+    }
+}
+
 /// Shared channel/DM bubble footer: delivery or hops, plus byte count.
+/// Outgoing channel bubbles may also show overheard repeater echoes (`heard`).
 #[component]
 fn MessageMetaFoot(
     outgoing: bool,
@@ -7682,48 +7711,84 @@ fn MessageMetaFoot(
     hop_count: Option<i64>,
     text: String,
     #[props(default = false)] failed_hint: bool,
+    #[props(default = Vec::new())] heard: Vec<crate::db::HeardRepeaterRow>,
 ) -> Element {
+    let mut heard_open = use_signal(|| false);
     let bytes = message_meta_bytes_label(&text);
     let (hops_label, hops_title) = message_meta_hops_label(hop_count);
     let bytes_title = format!(
         "UTF-8 byte length (MeshCore limit {MESH_TEXT_MAX_BYTES})"
     );
+    let heard_n = heard.len();
+    let heard_title =
+        "Repeaters overheard re-flooding this message (not end-to-end delivery proof)";
     rsx! {
-        div { class: "message-meta-foot",
-            if outgoing {
-                {
-                    let (label, icon, pill) = match delivery.as_str() {
-                        "queued" => ("Queued", IconName::Clock, "message-meta-pill message-meta-pill-ok"),
-                        "sending" => ("Sending…", IconName::Clock, "message-meta-pill message-meta-pill-ok"),
-                        "failed" => ("Not sent", IconName::Ban, "message-meta-pill message-meta-pill-bad"),
-                        _ => ("Sent", IconName::Check, "message-meta-pill message-meta-pill-ok"),
-                    };
-                    rsx! {
-                        span {
-                            class: "{pill}",
-                            title: if failed_hint && delivery == "failed" {
-                                "The companion did not accept this message. Check the status bar, then send it again."
-                            } else {
-                                ""
-                            },
-                            Icon { name: icon, size: 11 }
-                            "{label}"
+        div { class: "message-meta-wrap",
+            div { class: "message-meta-foot",
+                if outgoing {
+                    {
+                        let (label, icon, pill) = match delivery.as_str() {
+                            "queued" => ("Queued", IconName::Clock, "message-meta-pill message-meta-pill-ok"),
+                            "sending" => ("Sending…", IconName::Clock, "message-meta-pill message-meta-pill-ok"),
+                            "failed" => ("Not sent", IconName::Ban, "message-meta-pill message-meta-pill-bad"),
+                            _ => ("Sent", IconName::Check, "message-meta-pill message-meta-pill-ok"),
+                        };
+                        rsx! {
+                            span {
+                                class: "{pill}",
+                                title: if failed_hint && delivery == "failed" {
+                                    "The companion did not accept this message. Check the status bar, then send it again."
+                                } else {
+                                    ""
+                                },
+                                Icon { name: icon, size: 11 }
+                                "{label}"
+                            }
+                        }
+                    }
+                    if heard_n > 0 {
+                        button {
+                            r#type: "button",
+                            class: "message-meta-pill message-meta-pill-heard",
+                            title: "{heard_title}",
+                            onclick: move |_| heard_open.set(!heard_open()),
+                            Icon { name: IconName::Signal, size: 11 }
+                            if heard_n == 1 { "1 heard" } else { "{heard_n} heard" }
+                        }
+                    }
+                } else {
+                    span {
+                        class: "message-meta-pill",
+                        title: "{hops_title}",
+                        Icon { name: IconName::Signal, size: 11 }
+                        "{hops_label}"
+                    }
+                    span { class: "message-meta-pill", "Received" }
+                }
+                span {
+                    class: "message-meta-pill",
+                    title: "{bytes_title}",
+                    "{bytes}"
+                }
+            }
+            if outgoing && heard_open() && heard_n > 0 {
+                ul { class: "message-heard-list",
+                    for row in heard.iter() {
+                        {
+                            let label = heard_repeater_label(row);
+                            let snr = row
+                                .snr
+                                .map(|v| format!("{v:+.1} dB"))
+                                .unwrap_or_else(|| "—".into());
+                            rsx! {
+                                li {
+                                    span { class: "message-heard-name", title: "{row.hash_hex}", "{label}" }
+                                    span { class: "message-heard-snr", "{snr}" }
+                                }
+                            }
                         }
                     }
                 }
-            } else {
-                span {
-                    class: "message-meta-pill",
-                    title: "{hops_title}",
-                    Icon { name: IconName::Signal, size: 11 }
-                    "{hops_label}"
-                }
-                span { class: "message-meta-pill", "Received" }
-            }
-            span {
-                class: "message-meta-pill",
-                title: "{bytes_title}",
-                "{bytes}"
             }
         }
     }

@@ -531,10 +531,6 @@ pub fn radio_params_from_mhz(freq_mhz: Option<f64>, bw_khz: Option<f64>, sf: Opt
     }
 }
 
-pub fn upload_enabled(db: &Db) -> bool {
-    setting_bool(db, "svc_map_upload_enabled", false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -19,6 +19,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 
+use crate::channel_echo::{self, PendingChannelEcho};
 use crate::contact_qr;
 use crate::db::{
     contact_snapshot, is_broadcast_pubkey, unix_now, BroadcastGroupKind, Db, InfraStatusSample,
@@ -585,10 +586,13 @@ struct PoolShared {
     idle: Arc<Mutex<RadioStatus>>,
     next_token: AtomicU64,
     ble_scan_busy: AtomicBool,
-    /// CLI RX log tab is open — session should subscribe `LogData` (unless map upload already does).
+    /// CLI RX log tab is open — filters which LogData lines enter the CLI ring
+    /// (LogData itself is always subscribed for heard-repeater correlation).
     rx_log_wanted: AtomicBool,
     rx_log: Mutex<VecDeque<RxLogLine>>,
     rx_log_seq: AtomicU64,
+    /// Recent channel TX waiting for GRP_TXT self-echoes (~30s window).
+    pending_channel_echoes: Mutex<VecDeque<PendingChannelEcho>>,
 }
 
 /// The slot the header and Settings describe: primary, else a companion, else any.
@@ -1604,6 +1608,7 @@ pub fn spawn_radio(db: Arc<Db>, secrets: Arc<Secrets>) -> RadioHandle {
         rx_log_wanted: AtomicBool::new(false),
         rx_log: Mutex::new(VecDeque::new()),
         rx_log_seq: AtomicU64::new(0),
+        pending_channel_echoes: Mutex::new(VecDeque::new()),
     });
     let _ = RADIO_POOL.set(pool.clone());
     let pool_thread = pool.clone();
@@ -2932,6 +2937,62 @@ pub(crate) fn format_rx_log_line(log: &LogData) -> String {
     parts.join(" · ")
 }
 
+/// Channel secret for a mesh slot (keyring/file, or Public built-in).
+fn channel_secret_for_slot(db: &Db, secrets: &Secrets, slot: u8) -> Option<[u8; 16]> {
+    let name = db.active_channel_on_slot(i64::from(slot)).ok().flatten()?;
+    if let Ok(Some(secret)) = secrets.load(&name) {
+        return Some(secret);
+    }
+    if name.eq_ignore_ascii_case("Public") {
+        return Some(contact_qr::public_channel_secret());
+    }
+    None
+}
+
+fn register_channel_echo_pending(
+    pool: &PoolShared,
+    message_id: i64,
+    slot: u8,
+    wire: &str,
+) {
+    let Some(secret) = channel_secret_for_slot(&pool.db, &pool.secrets, slot) else {
+        hq_log!(
+            debug,
+            "channel echo: no secret for slot {slot} — skipping heard-repeater listen"
+        );
+        return;
+    };
+    let mut pending = pool
+        .pending_channel_echoes
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    channel_echo::push_pending(&mut pending, message_id, slot, wire.to_string(), secret);
+}
+
+fn correlate_channel_echo(pool: &PoolShared, log: &LogData) {
+    let matched = {
+        let mut pending = pool
+            .pending_channel_echoes
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        channel_echo::correlate_log_data(&mut pending, log)
+    };
+    let Some(matched) = matched else {
+        return;
+    };
+    let hops: Vec<(Vec<u8>, u8)> = matched
+        .hops
+        .into_iter()
+        .map(|h| (h.hash, h.hash_size))
+        .collect();
+    if let Err(err) =
+        pool.db
+            .record_heard_repeaters(matched.message_id, &hops, matched.snr, matched.rssi)
+    {
+        hq_log!(warn, "channel echo store: {err}");
+    }
+}
+
 fn push_rx_log_line(pool: &PoolShared, log: &LogData) {
     if !pool.rx_log_wanted.load(Ordering::SeqCst) {
         return;
@@ -3930,6 +3991,9 @@ async fn transmit_channel_message(
                     let _ = db.audit("channel_send", "", &format!("slot {slot}"));
                     push_send_note(status, String::new());
                     write_status(status, "connected", connected_detail(status, connected_name));
+                    if let Some(pool) = RADIO_POOL.get() {
+                        register_channel_echo_pending(pool, id, slot, &wire);
+                    }
                     Some(id)
                 }
                 Err(err) => {
@@ -4778,24 +4842,18 @@ async fn run_session(
     }
     let event_tx_late = event_tx.clone();
     drop(event_tx);
-    // LogData: every overheard frame. Only while map upload and/or CLI RX log wants it —
-    // otherwise BLE floods with noise. Held separately so we can unsubscribe mid-session.
-    let mut logdata_sub: Option<Subscription> = None;
-    {
-        let need_logdata = crate::services::map_upload::upload_enabled(db)
-            || ctx.pool.rx_log_wanted.load(Ordering::SeqCst);
-        if need_logdata {
-            let event_tx = event_tx_late.clone();
-            logdata_sub = Some(
-                meshcore
-                    .subscribe(EventType::LogData, HashMap::new(), move |event| {
-                        let _ = event_tx.send(event);
-                    })
-                    .await,
-            );
-            hq_log!(info, "LogData subscribed (map upload / RX log)");
-        }
-    }
+    // LogData: every overheard frame — always on for channel heard-repeater
+    // correlation (CLI RX log / map upload still filter what they consume).
+    let mut logdata_sub: Option<Subscription> = {
+        let event_tx = event_tx_late.clone();
+        let sub = meshcore
+            .subscribe(EventType::LogData, HashMap::new(), move |event| {
+                let _ = event_tx.send(event);
+            })
+            .await;
+        hq_log!(info, "LogData subscribed (heard repeats / map / RX log)");
+        Some(sub)
+    };
     // Do NOT use meshcore-rs start_auto_message_fetching(): it spawns tasks that
     // hold the command mutex across get_msg and starve channel sends / CLI.
     // Live RX uses MessagesWaiting + tick drain with lock yield between batches (O5).
@@ -5396,8 +5454,10 @@ async fn run_session(
                             need_contact_retry = true;
                             contact_retry_at = Instant::now();
                         }
-                        // Map uploader + optional CLI RX log from LogData.
+                        // LogData: heard-repeater correlation on every radio;
+                        // CLI RX log + map upload only on the primary.
                         if let EventPayload::LogData(ref log) = event.payload {
+                            correlate_channel_echo(&ctx.pool, log);
                             if ctx.is_primary() {
                                 push_rx_log_line(&ctx.pool, log);
                                 let guard = status.lock().unwrap_or_else(|err| err.into_inner());
@@ -5480,11 +5540,8 @@ async fn run_session(
                         }
                     }
                 }
-                // Mid-session LogData: subscribe while map upload or CLI RX log wants it;
-                // unsubscribe when neither needs the flood of every overheard frame.
-                let need_logdata = crate::services::map_upload::upload_enabled(db)
-                    || ctx.pool.rx_log_wanted.load(Ordering::SeqCst);
-                if need_logdata && logdata_sub.is_none() {
+                // Keep LogData subscribed for the whole session (heard repeats).
+                if logdata_sub.is_none() {
                     let event_tx = event_tx_late.clone();
                     logdata_sub = Some(
                         meshcore
@@ -5493,12 +5550,7 @@ async fn run_session(
                             })
                             .await,
                     );
-                    hq_log!(info, "LogData subscribed (map upload / RX log)");
-                } else if !need_logdata {
-                    if let Some(sub) = logdata_sub.take() {
-                        sub.unsubscribe().await;
-                        hq_log!(info, "LogData unsubscribed");
-                    }
+                    hq_log!(info, "LogData re-subscribed (heard repeats)");
                 }
                 let primary = ctx.is_primary();
                 if primary {

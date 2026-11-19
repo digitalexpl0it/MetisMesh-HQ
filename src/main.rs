@@ -10,6 +10,8 @@ mod app_update;
 mod backup;
 mod ble_pair;
 mod brand;
+mod channel_crypto;
+mod channel_echo;
 mod channel_speakers;
 mod contact_export;
 mod contact_qr;

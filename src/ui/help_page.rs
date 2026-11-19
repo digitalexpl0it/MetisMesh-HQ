@@ -693,9 +693,9 @@ pub fn HelpPage() -> Element {
                             li {
                                 "Bundled sample pack "
                                 strong { "HQ Basics" }
-                                " installs without a download. Public-domain packs (Ready.gov / FEMA, Project Gutenberg, and similar) download "
-                                strong { "directly from upstream HTTPS" }
-                                " with sha256 checks — HQ does not host those files."
+                                " installs without a download. Seeded Marketplace packs (Ready.gov / FEMA sheets, Gutenberg fieldcraft/knots, unrestricted Army FMs, USDA canning, Nuclear War Survival Skills) download "
+                                strong { "directly from canonical HTTPS hosts" }
+                                " with sha256 checks — HQ does not host those files. Filter by category on Guides and Marketplace."
                             }
                             li {
                                 "Reader shows Markdown/HTML with local images only; PDFs open in your system viewer. Export an article as "

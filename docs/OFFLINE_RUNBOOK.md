@@ -12,7 +12,8 @@ One page for church / community volunteers running **Metis Mesh HQ** when the WA
 3. **Settings → Flasher → Manage firmware**: select the boards and roles you actually own → **Save & sync**. Sync also pulls OTAFIX bootloader / erase images for selected nRF boards when the catalog lists them. For owned repeaters/companions you may reflash later, use Settings → Data → **Node identity kits** (USB) to save encrypted `.metisnode` files before any erase.
 4. Wait until the Flasher page says **Ready for outage**. Optionally **Check integrity**, then **Export pack** to a `MetisMeshHQ-firmware-*.zip` on a USB stick.
 5. Optional: enable the **LAN flash locker** (Settings → Flasher) while you still have LAN peers who need to flash from another laptop — they use the room PIN over HTTPS (self-signed cert). Web Serial needs Chrome/Edge; OTAFIX remains UF2 drag-drop.
-6. Leave the laptop plugged into a UPS or wall power; disable sleep while HQ is the desk radio.
+6. Optional: open **Guides → Marketplace** and install the reference packs you want offline (Ready.gov / FEMA sheets, Army FMs, USDA canning, etc.). Downloads need the internet once; reading does not.
+7. Leave the laptop plugged into a UPS or wall power; disable sleep while HQ is the desk radio.
 
 ## First hour offline
 

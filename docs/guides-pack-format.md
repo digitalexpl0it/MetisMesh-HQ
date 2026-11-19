@@ -111,7 +111,7 @@ Unknown ids are ignored when normalizing. Free-form `tags` remain for FTS keywor
 
 ## Catalog entry
 
-Marketplace rows live in `assets/guides/catalog.seed.json` (bundled) and may be refreshed from `remote_url` when online. Each pack may set:
+Marketplace rows live in `assets/guides/catalog.seed.json` (bundled) and may be refreshed from `remote_url` when online. App updates **merge** new seed packs into an existing on-disk catalog and prune retired seed ids. Each pack may set:
 
 | Field | Meaning |
 |---|---|

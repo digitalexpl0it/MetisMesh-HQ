@@ -1,7 +1,5 @@
 # Changelog
 
-## Unreleased
-
 ## 0.1.25 — 2026-11-18
 
 Package version `0.1.25` (Cargo / About). Windows Details may show `0.1.25.0`.

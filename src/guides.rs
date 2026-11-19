@@ -22,6 +22,8 @@ const USER_AGENT: &str =
 const MAX_DOWNLOAD_BYTES: u64 = 80 * 1024 * 1024;
 const DOWNLOAD_ATTEMPTS: u32 = 3;
 const SEED_CATALOG: &str = include_str!("../assets/guides/catalog.seed.json");
+/// Former seed packs dropped from Marketplace (uninstalled rows are pruned on load/sync).
+const RETIRED_SEED_PACK_IDS: &[&str] = &["pd-shelters-shacks"];
 
 const BUNDLED_HQ_BASICS_MANIFEST: &str =
     include_str!("../assets/guides/sample/hq-basics/manifest.json");
@@ -444,8 +446,76 @@ pub fn load_catalog() -> GuidesCatalog {
         let _ = save_catalog(&seed);
         seed
     };
+    // App updates ship new seed rows; keep on-disk install state but add missing packs.
+    if merge_bundled_seed(&mut catalog) {
+        let _ = save_catalog(&catalog);
+    }
     refresh_installed_flags(&mut catalog);
     catalog
+}
+
+/// Ensure every bundled seed pack id exists in `catalog`. Does not overwrite installed
+/// rows. Refreshes metadata for uninstalled packs that already exist so URL/hash updates
+/// in the seed land without a wipe. Drops uninstalled [`RETIRED_SEED_PACK_IDS`].
+fn merge_bundled_seed(catalog: &mut GuidesCatalog) -> bool {
+    let seed = parse_seed();
+    let mut changed = false;
+    if catalog.remote_url.trim().is_empty() && !seed.remote_url.trim().is_empty() {
+        catalog.remote_url = seed.remote_url.clone();
+        changed = true;
+    }
+    let before = catalog.packs.len();
+    catalog.packs.retain(|p| {
+        if !RETIRED_SEED_PACK_IDS.contains(&p.id.as_str()) {
+            return true;
+        }
+        let installed = p.status == "installed" || p.installed_version.is_some();
+        // Still retire even if marked installed — content was removed from the allowlist.
+        if installed {
+            let _ = remove_pack_files_only(&p.id);
+        }
+        false
+    });
+    if catalog.packs.len() != before {
+        changed = true;
+    }
+    for sp in &seed.packs {
+        match catalog.packs.iter_mut().find(|p| p.id == sp.id) {
+            None => {
+                catalog.packs.push(sp.clone());
+                changed = true;
+            }
+            Some(existing) => {
+                let installed = existing.status == "installed"
+                    || existing.installed_version.is_some();
+                if installed {
+                    continue;
+                }
+                let status = existing.status.clone();
+                let installed_version = existing.installed_version.clone();
+                if existing.name != sp.name
+                    || existing.version != sp.version
+                    || existing.description != sp.description
+                    || existing.files != sp.files
+                    || existing.download_url != sp.download_url
+                    || existing.sha256 != sp.sha256
+                    || existing.size_bytes != sp.size_bytes
+                    || existing.bundled != sp.bundled
+                    || existing.tags != sp.tags
+                    || existing.categories != sp.categories
+                    || existing.source != sp.source
+                    || existing.license != sp.license
+                    || existing.format != sp.format
+                {
+                    *existing = sp.clone();
+                    existing.status = status;
+                    existing.installed_version = installed_version;
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
 }
 
 pub fn save_catalog(catalog: &GuidesCatalog) -> Result<(), String> {
@@ -541,6 +611,8 @@ pub fn sync_catalog() -> Result<GuidesCatalog, String> {
             pack.status = st.clone();
         }
     }
+    // Remote GitHub seed may lag a local build; never drop newer bundled packs.
+    let _ = merge_bundled_seed(&mut local);
     refresh_installed_flags(&mut local);
     save_catalog(&local)?;
     set_job(job_idle(
@@ -691,7 +763,7 @@ pub fn install_pack(pack_id: &str) -> Result<(), String> {
     result
 }
 
-pub fn remove_pack(pack_id: &str) -> Result<(), String> {
+fn remove_pack_files_only(pack_id: &str) -> Result<(), String> {
     let id = pack_id.trim();
     if id.is_empty() {
         return Err("Missing pack id.".into());
@@ -701,6 +773,15 @@ pub fn remove_pack(pack_id: &str) -> Result<(), String> {
         fs::remove_dir_all(&dest).map_err(|e| e.to_string())?;
     }
     purge_pack_from_index(id)?;
+    Ok(())
+}
+
+pub fn remove_pack(pack_id: &str) -> Result<(), String> {
+    let id = pack_id.trim();
+    if id.is_empty() {
+        return Err("Missing pack id.".into());
+    }
+    remove_pack_files_only(id)?;
     let mut catalog = load_catalog();
     if let Some(row) = catalog.packs.iter_mut().find(|p| p.id == id) {
         row.installed_version = None;
@@ -3065,6 +3146,57 @@ mod tests {
     }
 
     #[test]
+    fn merge_bundled_seed_adds_missing_packs() {
+        let seed = parse_seed();
+        let mut local = GuidesCatalog {
+            version: 1,
+            updated_at: 0,
+            remote_url: seed.remote_url.clone(),
+            packs: seed
+                .packs
+                .iter()
+                .filter(|p| p.id == "hq-basics" || p.id == "fema-are-you-ready")
+                .cloned()
+                .collect(),
+        };
+        assert!(merge_bundled_seed(&mut local));
+        assert_eq!(local.packs.len(), seed.packs.len());
+        assert!(local.packs.iter().any(|p| p.id == "us-fm-survival"));
+        assert!(!local.packs.iter().any(|p| p.id == "pd-shelters-shacks"));
+        // Second pass is a no-op.
+        assert!(!merge_bundled_seed(&mut local));
+    }
+
+    #[test]
+    fn merge_bundled_seed_retires_dropped_packs() {
+        let mut local = GuidesCatalog {
+            version: 1,
+            updated_at: 0,
+            remote_url: String::new(),
+            packs: vec![CatalogPack {
+                id: "pd-shelters-shacks".into(),
+                name: "gone".into(),
+                version: "1".into(),
+                source: String::new(),
+                license: String::new(),
+                description: String::new(),
+                format: "hq-native".into(),
+                download_url: None,
+                sha256: None,
+                size_bytes: None,
+                files: vec![],
+                bundled: None,
+                tags: vec![],
+                categories: vec!["shelter".into()],
+                installed_version: None,
+                status: "available".into(),
+            }],
+        };
+        assert!(merge_bundled_seed(&mut local));
+        assert!(!local.packs.iter().any(|p| p.id == "pd-shelters-shacks"));
+    }
+
+    #[test]
     fn catalog_seed_lists_remote_packs() {
         let seed: GuidesCatalog = serde_json::from_str(SEED_CATALOG).unwrap();
         assert!(seed.packs.iter().any(|p| p.id == "fema-are-you-ready"));
@@ -3072,6 +3204,20 @@ mod tests {
         assert!(seed.packs.iter().any(|p| p.id == "ready-hazard-sheets"));
         assert!(seed.packs.iter().any(|p| p.id == "pd-woodcraft-camping"));
         assert!(seed.packs.iter().any(|p| p.id == "pd-knots-ropework"));
+        for id in [
+            "us-fm-survival",
+            "us-fm-first-aid",
+            "us-fm-land-nav",
+            "us-fm-hygiene",
+            "usda-home-canning",
+            "pd-nuclear-war-survival",
+        ] {
+            assert!(
+                seed.packs.iter().any(|p| p.id == id),
+                "missing first-wave manual pack `{id}`"
+            );
+        }
+        assert!(!seed.packs.iter().any(|p| p.id == "pd-shelters-shacks"));
         assert!(!seed.packs.iter().any(|p| p.id == "offline-survival-stub"));
         assert!(
             seed.packs.iter().all(|p| !p.categories.is_empty()),
@@ -3090,6 +3236,37 @@ mod tests {
                     is_known_guide_category(cat),
                     "pack {} has unknown category `{cat}`",
                     pack.id
+                );
+            }
+            for file in &pack.files {
+                assert_eq!(
+                    file.sha256.len(),
+                    64,
+                    "pack {} file {} sha256 must be 64 hex chars",
+                    pack.id,
+                    file.id
+                );
+                assert!(
+                    file.sha256.chars().all(|c| c.is_ascii_hexdigit()),
+                    "pack {} file {} sha256 must be hex",
+                    pack.id,
+                    file.id
+                );
+                assert!(
+                    file.url.starts_with("https://"),
+                    "pack {} file {} must use https URL",
+                    pack.id,
+                    file.id
+                );
+                let lower = file.url.to_ascii_lowercase();
+                assert!(
+                    !lower.contains("trueprepper.com")
+                        && !lower.contains("ardbark.com")
+                        && !lower.contains("collapsesurvivalsite.com")
+                        && !lower.contains("wp-content"),
+                    "pack {} file {} must not use aggregator/wp-content mirrors",
+                    pack.id,
+                    file.id
                 );
             }
         }

@@ -9,6 +9,8 @@
 - Catalog can list upstream **`files[]`** (PDF / text): install downloads from the source URL, verifies sha256, synthesizes a local pack (no HQ hosting)
 - Fixed **categories** vocabulary with Category + Pack dropdown filters on Guides and Marketplace
 - Seed packs: FEMA *Are You Ready?*, Ready.gov water/outage + hazard sheets, Project Gutenberg *Woodcraft* and *Knots*; HQ Basics expanded (water filter, shelter, chemical SIP); `scripts/hash-guide-urls.sh` refreshes digests
+- First-wave remote manuals (canonical URLs + sha256): FM 21-76 Survival, FM 4-25.11 First Aid, FM 3-25.26 Land Nav, FM 21-10 Hygiene, USDA home canning (NCHFP), *Nuclear War Survival Skills* — discovery blogs not used as scrape hosts
+- Catalog load/sync merges new bundled seed packs into an existing on-disk catalog (so Marketplace shows packs added in an app update); retired seed ids (e.g. Beard *Shelters, Shacks, and Shanties*) are pruned
 - Guide downloads use a UA without “Metis” plus Ready.gov Referer (fixes CDN 403); Marketplace shows striped progress + toasts; reader **Find in article** highlights matches
 - FTS search across installed articles; full-viewport reader with sanitized Markdown/HTML and local images
 - Export article as Markdown or simple PDF; Help + `docs/guides-pack-format.md` for pack authors

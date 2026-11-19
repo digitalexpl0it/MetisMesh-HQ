@@ -156,7 +156,7 @@
         {
           "id": "woodcraft",
           "title": "Woodcraft and Camping",
-          "url": "https://www.gutenberg.org/cache/epub/34607/pg34607-images.html",
+          "url": "https://gutenberg.pglaf.org/cache/epub/34607/pg34607-images.html",
           "sha256": "413015021362fe3186ce0d2a8c6393d864904577610890ca835e5b3fe3f44f6d",
           "size_bytes": 276854,
           "path": "articles/woodcraft.html"
@@ -177,10 +177,192 @@
         {
           "id": "knots",
           "title": "Knots, Splices and Rope Work",
-          "url": "https://www.gutenberg.org/cache/epub/13510/pg13510-images.html",
+          "url": "https://gutenberg.pglaf.org/cache/epub/13510/pg13510-images.html",
           "sha256": "bc5d6b57c6e93119621c38ba8ccaa19fa896aac46ee026c1e7aaf7dd7882cf39",
           "size_bytes": 148206,
           "path": "articles/knots.html"
+        }
+      ]
+    },
+    {
+      "id": "us-fm-survival",
+      "name": "FM 21-76 Survival (1992)",
+      "version": "1992-06",
+      "source": "U.S. Army (public release archive)",
+      "license": "US Government work (public domain) — approved for public release; distribution unlimited",
+      "description": "U.S. Army Field Manual FM 21-76 Survival (June 1992). Unrestricted public-release edition. Community reference only — not medical advice; not a DoD or FEMA endorsement.",
+      "format": "hq-native",
+      "tags": ["survival", "field-manual", "army", "fieldcraft"],
+      "categories": ["fieldcraft", "preparedness"],
+      "files": [
+        {
+          "id": "fm-21-76",
+          "title": "FM 21-76 Survival (PDF)",
+          "url": "https://www.bits.de/NRANEU/others/amd-us-archive/FM21-76%2892%29.pdf",
+          "sha256": "0a79b47f18a44206ea7830ea9dff740350786d2c0096e52f49a7291a3496469e",
+          "size_bytes": 52401363,
+          "path": "attachments/fm-21-76-survival-1992.pdf"
+        }
+      ]
+    },
+    {
+      "id": "us-fm-first-aid",
+      "name": "FM 4-25.11 First Aid",
+      "version": "2002-12",
+      "source": "U.S. Army / Internet Archive (AHEC)",
+      "license": "US Government work (public domain) — approved for public release; distribution unlimited",
+      "description": "U.S. Army Field Manual FM 4-25.11 First Aid (23 December 2002). Unrestricted public FM. Community reference only — not medical advice; not a DoD or FEMA endorsement.",
+      "format": "hq-native",
+      "tags": ["first-aid", "field-manual", "army", "medical"],
+      "categories": ["medical"],
+      "files": [
+        {
+          "id": "fm-4-25-11",
+          "title": "FM 4-25.11 First Aid (PDF)",
+          "url": "https://archive.org/download/FM4-25.11/FM4-25.11.pdf",
+          "sha256": "f4b7d1e5f3597d81bb185b727bfca3c21377b2e63fd652b1ae7642e635a812f6",
+          "size_bytes": 2455031,
+          "path": "attachments/fm-4-25-11-first-aid.pdf"
+        }
+      ]
+    },
+    {
+      "id": "us-fm-land-nav",
+      "name": "FM 3-25.26 Map Reading and Land Navigation",
+      "version": "2001-07",
+      "source": "U.S. Army / Internet Archive",
+      "license": "US Government work (public domain) — approved for public release; distribution unlimited",
+      "description": "U.S. Army Field Manual FM 3-25.26 Map Reading and Land Navigation (20 July 2001). Community reference only — not a DoD or FEMA endorsement.",
+      "format": "hq-native",
+      "tags": ["land-navigation", "maps", "field-manual", "army"],
+      "categories": ["fieldcraft"],
+      "files": [
+        {
+          "id": "fm-3-25-26",
+          "title": "FM 3-25.26 Map Reading and Land Navigation (PDF)",
+          "url": "https://archive.org/download/FM3-25x26/FM3-25x26.pdf",
+          "sha256": "bf92a942048931c59f2b48b366acd9b5f8f40120b0866d702dec799a4e8be24c",
+          "size_bytes": 8167056,
+          "path": "attachments/fm-3-25-26-land-navigation.pdf"
+        }
+      ]
+    },
+    {
+      "id": "us-fm-hygiene",
+      "name": "FM 21-10 Field Hygiene and Sanitation",
+      "version": "2000-06",
+      "source": "U.S. Army / U.S. Marine Corps / Internet Archive",
+      "license": "US Government work (public domain) — approved for public release; distribution unlimited",
+      "description": "FM 21-10 / MCRP 4-11.1D Field Hygiene and Sanitation (21 June 2000). Preventive medicine and field sanitation reference. Community reference only — not medical advice; not a DoD or FEMA endorsement.",
+      "format": "hq-native",
+      "tags": ["hygiene", "sanitation", "water", "field-manual", "army"],
+      "categories": ["medical", "water"],
+      "files": [
+        {
+          "id": "fm-21-10",
+          "title": "FM 21-10 Field Hygiene and Sanitation (PDF)",
+          "url": "https://archive.org/download/FM21-10_2000/FM21-10_2000.pdf",
+          "sha256": "ad5eab029ef51085cffc213ef89284e9089aadd82445ec594bca24b750ed9b63",
+          "size_bytes": 2913453,
+          "path": "attachments/fm-21-10-field-hygiene.pdf"
+        }
+      ]
+    },
+    {
+      "id": "usda-home-canning",
+      "name": "USDA Complete Guide to Home Canning",
+      "version": "2015-rev",
+      "source": "USDA / National Center for Home Food Preservation (UGA)",
+      "license": "US Government work (public domain)",
+      "description": "USDA Complete Guide to Home Canning (Agriculture Information Bulletin No. 539, 2015 revision) as eight NCHFP PDFs (introduction + guides 1–7). Follow USDA procedures for low-acid foods. Community reference only — not medical advice; not a USDA or FEMA endorsement.",
+      "format": "hq-native",
+      "tags": ["canning", "food", "usda", "preparedness"],
+      "categories": ["preparedness"],
+      "files": [
+        {
+          "id": "intro",
+          "title": "Introduction — Complete Guide to Home Canning (PDF)",
+          "url": "https://nchfp.uga.edu/papers/guide/INTRO_HomeCanrev0715.pdf",
+          "sha256": "c1683833cb4546858445c787f02bb4027710760bbff08c7e1b54889bf5521568",
+          "size_bytes": 467339,
+          "path": "attachments/usda-canning-intro.pdf"
+        },
+        {
+          "id": "guide-01",
+          "title": "Guide 1 — Principles of Home Canning (PDF)",
+          "url": "https://nchfp.uga.edu/papers/guide/GUIDE01_HomeCan_rev0715.pdf",
+          "sha256": "60d1e1a74a9fe61c19e6f5312a76d291905a8ca51b28d0def04c677294416d86",
+          "size_bytes": 3794234,
+          "path": "attachments/usda-canning-guide-01.pdf"
+        },
+        {
+          "id": "guide-02",
+          "title": "Guide 2 — Fruit and Fruit Products (PDF)",
+          "url": "https://nchfp.uga.edu/papers/guide/GUIDE02_HomeCan_rev0715.pdf",
+          "sha256": "5f6918678e1410b72f9f87d652ebab2f5f5d39f3806db676399e5c785be0b58e",
+          "size_bytes": 1098841,
+          "path": "attachments/usda-canning-guide-02.pdf"
+        },
+        {
+          "id": "guide-03",
+          "title": "Guide 3 — Tomatoes and Tomato Products (PDF)",
+          "url": "https://nchfp.uga.edu/papers/guide/GUIDE03_HomeCan_rev0715.pdf",
+          "sha256": "6f8d166be89c7260964bfa4746fae72e79164f19a712672b0c1aa3bb902d18ff",
+          "size_bytes": 976490,
+          "path": "attachments/usda-canning-guide-03.pdf"
+        },
+        {
+          "id": "guide-04",
+          "title": "Guide 4 — Vegetables and Vegetable Products (PDF)",
+          "url": "https://nchfp.uga.edu/papers/guide/GUIDE04_HomeCan_rev0715.pdf",
+          "sha256": "bb1d6ccce65146b5caad8bdaf766424c702119a90aa834b25269816da165641f",
+          "size_bytes": 2013613,
+          "path": "attachments/usda-canning-guide-04.pdf"
+        },
+        {
+          "id": "guide-05",
+          "title": "Guide 5 — Poultry, Red Meats, and Seafood (PDF)",
+          "url": "https://nchfp.uga.edu/papers/guide/GUIDE05_HomeCan_rev0715.pdf",
+          "sha256": "bffe17ee5a99d5b3393894b811508cbe797d30685b1b91d13496d7a768b589b7",
+          "size_bytes": 1356485,
+          "path": "attachments/usda-canning-guide-05.pdf"
+        },
+        {
+          "id": "guide-06",
+          "title": "Guide 6 — Fermented Foods and Pickled Vegetables (PDF)",
+          "url": "https://nchfp.uga.edu/papers/guide/GUIDE06_HomeCan_rev0715.pdf",
+          "sha256": "fa4be9f7ac718801178f4f04efa169d74b8c64757d35aa29aa8226fbdaeee4bf",
+          "size_bytes": 3173534,
+          "path": "attachments/usda-canning-guide-06.pdf"
+        },
+        {
+          "id": "guide-07",
+          "title": "Guide 7 — Jams and Jellies (PDF)",
+          "url": "https://nchfp.uga.edu/papers/guide/GUIDE07_HomeCan_rev0715.pdf",
+          "sha256": "6023faf9ea45f8e20078c54c5d273a7717ce17c66eba57a18f363ba54021e411",
+          "size_bytes": 1300368,
+          "path": "attachments/usda-canning-guide-07.pdf"
+        }
+      ]
+    },
+    {
+      "id": "pd-nuclear-war-survival",
+      "name": "Nuclear War Survival Skills",
+      "version": "oism-nwss",
+      "source": "Cresson H. Kearny / Oak Ridge National Laboratory lineage (OISM)",
+      "license": "Public domain (U.S. Government-sponsored research lineage)",
+      "description": "Nuclear War Survival Skills (Kearny / DOE–ORNL lineage) from the Oregon Institute of Science and Medicine host. Fallout shelter and related civil-defense reference. Community reference only — not medical advice; not a DoD or FEMA endorsement.",
+      "format": "hq-native",
+      "tags": ["nuclear", "fallout", "shelter", "civil-defense"],
+      "categories": ["hazards", "shelter"],
+      "files": [
+        {
+          "id": "nwss",
+          "title": "Nuclear War Survival Skills (PDF)",
+          "url": "https://www.oism.org/nwss/nwss.pdf",
+          "sha256": "bc5fc754411dba9531c040d7177cf33706533d2771dfb82d1b92c9a8e99e9f7d",
+          "size_bytes": 73531186,
+          "path": "attachments/nuclear-war-survival-skills.pdf"
         }
       ]
     }

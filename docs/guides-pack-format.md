@@ -19,6 +19,8 @@ some.pdf        # optional; listed under attachments, not full-text indexed
 
 Catalog rows may list upstream HTTPS files. On **Install**, HQ downloads each file, verifies `sha256`, and synthesizes `manifest.json` plus `articles/about.md` locally. Binaries are **not** committed to the Metis Mesh HQ repo.
 
+**Discovery vs catalog URLs.** Prepper blog “free PDF” lists are fine for finding titles. Seeded `files[].url` values must be **canonical** HTTPS hosts (agency / USDA / Gutenberg / stamped public-release archives such as Internet Archive or bits.de). Do not point the catalog at aggregator `wp-content` mirrors when a better host exists. Skip DIY gas-mask PDFs, improvised-munitions / weapons how-tos, distribution-restricted field manuals, and copyrighted commercial books even if a blog hosts a free download.
+
 ```json
 {
   "id": "fema-are-you-ready",

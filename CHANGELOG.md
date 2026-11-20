@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.27 — 2026-11-19
+
+Package version `0.1.27` (Cargo / About). Windows Details may show `0.1.27.0`.
+
+### Messages
+
+- Channel messages you send from HQ show **Heard** repeater pills when the companion overhears flood echoes (LogData path hashes matched to known GPS nodes) — MeshCore-style “who repeated this”
+
+### Map
+
+- **Live Stream** toolbar toggle: session-only RAM timeline of overheard packet paths (always collected while a companion is up; cleared on exit; cap 512 / 30 minutes)
+- Compact panel with clock, scrubber, Play/Pause replay, **Live only**, and Clear; hop-by-hop shoot + larger sonar (faded tail, line dissolves on hop arrival)
+- Skips paths that cannot place at least two map points; one in-flight animation with at most one pending
+
 ## 0.1.26 — 2026-11-18
 
 Package version `0.1.26` (Cargo / About). Windows Details may show `0.1.26.0`.

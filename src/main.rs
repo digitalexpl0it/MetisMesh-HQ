@@ -19,6 +19,7 @@ mod db;
 mod deps;
 mod firmware;
 mod guides;
+mod live_stream;
 mod log_file;
 mod map_tiles;
 mod mesh_regions;

@@ -21,6 +21,7 @@ use tokio::sync::watch;
 
 use crate::channel_echo::{self, PendingChannelEcho};
 use crate::contact_qr;
+use crate::live_stream;
 use crate::db::{
     contact_snapshot, is_broadcast_pubkey, unix_now, BroadcastGroupKind, Db, InfraStatusSample,
     RadioRole,
@@ -56,6 +57,8 @@ pub struct RxLogLine {
     pub at: i64,
     pub text: String,
 }
+
+pub use crate::live_stream::LiveStreamEvent;
 
 /// Result of an operator / passive advert-path fetch (`CMD_GET_ADVERT_PATH`).
 #[derive(Debug, Clone)]
@@ -593,6 +596,9 @@ struct PoolShared {
     rx_log_seq: AtomicU64,
     /// Recent channel TX waiting for GRP_TXT self-echoes (~30s window).
     pending_channel_echoes: Mutex<VecDeque<PendingChannelEcho>>,
+    /// Session-only Live Stream packet timeline (Map viewer); cleared on process exit.
+    live_stream: Mutex<VecDeque<LiveStreamEvent>>,
+    live_stream_seq: AtomicU64,
 }
 
 /// The slot the header and Settings describe: primary, else a companion, else any.
@@ -1474,6 +1480,29 @@ impl RadioHandle {
         self.pool.rx_log_seq.fetch_add(1, Ordering::SeqCst);
     }
 
+    /// Snapshot of the session Live Stream ring (`seq` is the latest event id).
+    pub fn live_stream_snapshot(&self) -> (u64, Vec<LiveStreamEvent>) {
+        let seq = self.pool.live_stream_seq.load(Ordering::SeqCst);
+        let events = self
+            .pool
+            .live_stream
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .iter()
+            .cloned()
+            .collect();
+        (seq, events)
+    }
+
+    pub fn clear_live_stream(&self) {
+        self.pool
+            .live_stream
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clear();
+        self.pool.live_stream_seq.fetch_add(1, Ordering::SeqCst);
+    }
+
     pub fn reboot(&self) {
         self.pool.reboot_primary();
     }
@@ -1609,6 +1638,8 @@ pub fn spawn_radio(db: Arc<Db>, secrets: Arc<Secrets>) -> RadioHandle {
         rx_log: Mutex::new(VecDeque::new()),
         rx_log_seq: AtomicU64::new(0),
         pending_channel_echoes: Mutex::new(VecDeque::new()),
+        live_stream: Mutex::new(VecDeque::new()),
+        live_stream_seq: AtomicU64::new(0),
     });
     let _ = RADIO_POOL.set(pool.clone());
     let pool_thread = pool.clone();
@@ -2969,7 +3000,8 @@ fn register_channel_echo_pending(
     channel_echo::push_pending(&mut pending, message_id, slot, wire.to_string(), secret);
 }
 
-fn correlate_channel_echo(pool: &PoolShared, log: &LogData) {
+/// Returns true when this LogData was attributed to a recent HQ channel TX.
+fn correlate_channel_echo(pool: &PoolShared, log: &LogData) -> bool {
     let matched = {
         let mut pending = pool
             .pending_channel_echoes
@@ -2978,7 +3010,7 @@ fn correlate_channel_echo(pool: &PoolShared, log: &LogData) {
         channel_echo::correlate_log_data(&mut pending, log)
     };
     let Some(matched) = matched else {
-        return;
+        return false;
     };
     let hops: Vec<(Vec<u8>, u8)> = matched
         .hops
@@ -2991,6 +3023,35 @@ fn correlate_channel_echo(pool: &PoolShared, log: &LogData) {
     {
         hq_log!(warn, "channel echo store: {err}");
     }
+    true
+}
+
+fn push_live_stream_event(pool: &PoolShared, log: &LogData, own_channel_echo: bool) {
+    let Ok(nodes) = pool.db.known_nodes_for_paths() else {
+        return;
+    };
+    let prepend_hq = if own_channel_echo {
+        pool.db
+            .hq_position()
+            .ok()
+            .flatten()
+            .map(|(_, lat, lon)| (lon, lat))
+    } else {
+        None
+    };
+    let seq = pool
+        .live_stream_seq
+        .fetch_add(1, Ordering::SeqCst)
+        .wrapping_add(1);
+    let at = unix_now();
+    let Some(event) = live_stream::event_from_log(log, &nodes, prepend_hq, seq, at) else {
+        return;
+    };
+    let mut ring = pool
+        .live_stream
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    live_stream::push_event(&mut ring, event);
 }
 
 fn push_rx_log_line(pool: &PoolShared, log: &LogData) {
@@ -5470,7 +5531,9 @@ async fn run_session(
                         // LogData: heard-repeater correlation on every radio;
                         // CLI RX log + map upload only on the primary.
                         if let EventPayload::LogData(ref log) = event.payload {
-                            correlate_channel_echo(&ctx.pool, log);
+                            let own_echo = correlate_channel_echo(&ctx.pool, log);
+                            // Live Stream ring: every radio contributes; always on.
+                            push_live_stream_event(&ctx.pool, log, own_echo);
                             if ctx.is_primary() {
                                 push_rx_log_line(&ctx.pool, log);
                                 let guard = status.lock().unwrap_or_else(|err| err.into_inner());

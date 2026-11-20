@@ -302,6 +302,29 @@ pub async fn map_pulse_at(lng: f64, lat: f64, color: Option<&str>, kind: &str) {
     let _ = document::eval(&js).await;
 }
 
+/// Live Stream hop-by-hop shoot + sonar along pre-resolved waypoints.
+pub async fn map_play_path_stream_fx(waypoints: &[(f64, f64)], color: Option<&str>) {
+    let waypoints_json = {
+        let mut parts = Vec::with_capacity(waypoints.len());
+        for (lng, lat) in waypoints {
+            parts.push(format!("[{lng},{lat}]"));
+        }
+        format!("[{}]", parts.join(","))
+    };
+    let js = format!(
+        r#"(() => {{
+  if (!window.MetisMap || !window.MetisMap.playPathStreamFx) return false;
+  return window.MetisMap.playPathStreamFx({id}, {waypoints}, {color});
+}})()"#,
+        id = escape_js_string(MAP_ID),
+        waypoints = waypoints_json,
+        color = color
+            .map(escape_js_string)
+            .unwrap_or_else(|| "null".into()),
+    );
+    let _ = document::eval(&js).await;
+}
+
 /// Growing ping beam from HQ/companion coords to a pin, then sonar on arrival.
 /// `waypoints` are optional mid-hop `[lng, lat]` pins when repeaters resolve.
 pub async fn map_play_ping_fx(

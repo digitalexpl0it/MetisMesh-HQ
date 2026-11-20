@@ -1449,6 +1449,81 @@ option {
   background: #ffffff14;
 }
 
+.map-live-stream-panel {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  left: 0;
+  z-index: 40;
+  width: min(18.5rem, 92vw);
+  padding: 0.6rem 0.7rem;
+  border-radius: 0.55rem;
+  border: 1px solid #ffffff1f;
+  background: #12171c;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.map-live-stream-panel__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.map-live-stream-panel__clock {
+  font-size: 0.95rem;
+  font-variant-numeric: tabular-nums;
+  color: #f4f4f5;
+  font-weight: 600;
+}
+
+.map-live-stream-panel__note {
+  font-size: 0.7rem;
+  color: #9aa3af;
+  white-space: nowrap;
+}
+
+.map-live-stream-panel__scrub {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.65rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #9aa3af;
+}
+
+.map-live-stream-panel__scrub input[type="range"] {
+  width: 100%;
+  accent-color: #3dd68c;
+}
+
+.map-live-stream-panel__scrub input[type="range"]:disabled {
+  opacity: 0.45;
+}
+
+.map-live-stream-panel__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.map-live-stream-panel__live-only {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  color: #e4e4e7;
+  cursor: pointer;
+}
+
+.map-live-stream-panel__live-only input {
+  accent-color: #3dd68c;
+}
+
 .map-chip {
   border: 1px solid #ffffff24;
   background: #151a20;
@@ -5258,6 +5333,11 @@ html.hq-col-resize body {
   pointer-events: none;
 }
 
+.metis-sonar--lg {
+  width: 42px;
+  height: 42px;
+}
+
 .metis-sonar__ring {
   position: absolute;
   inset: 0;
@@ -5266,6 +5346,11 @@ html.hq-col-resize body {
   box-sizing: border-box;
   opacity: 0;
   animation: metis-sonar-wave 1.15s ease-out forwards;
+}
+
+.metis-sonar--lg .metis-sonar__ring {
+  animation-name: metis-sonar-wave-lg;
+  border-width: 2px;
 }
 
 .metis-sonar__ring--delay {
@@ -5296,6 +5381,17 @@ html.hq-col-resize body {
   }
 }
 
+@keyframes metis-sonar-wave-lg {
+  0% {
+    transform: scale(0.85);
+    opacity: 0.95;
+  }
+  100% {
+    transform: scale(2.55);
+    opacity: 0;
+  }
+}
+
 @keyframes metis-sonar-warp-core {
   0% {
     transform: scale(0.2);
@@ -5313,6 +5409,7 @@ html.hq-col-resize body {
 
 @media (prefers-reduced-motion: reduce) {
   .metis-sonar__ring,
+  .metis-sonar--lg .metis-sonar__ring,
   .metis-sonar--warp .metis-sonar__core {
     animation: none;
     opacity: 0;

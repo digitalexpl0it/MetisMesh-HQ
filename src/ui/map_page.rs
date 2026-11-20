@@ -18,8 +18,8 @@ use super::map_host::{
     map_fit_bounds, map_fly_to, map_get_camera, map_init, map_pulse_at, map_set_geojson,
     map_camera_from_global, map_clear_region_draft, map_is_moving, map_place_region_draft,
     map_region_draft_seq, map_set_nodes, map_set_style, map_set_temp_pin, map_set_visibility,
-    map_play_ping_fx, map_set_ping_result, map_snapshot_region_draft, map_take_advert_path,
-    map_take_favorite_toggle, map_take_ping, map_take_selection, map_zoom_by,
+    map_play_path_stream_fx, map_play_ping_fx, map_set_ping_result, map_snapshot_region_draft,
+    map_take_advert_path, map_take_favorite_toggle, map_take_ping, map_take_selection, map_zoom_by,
     region_draft_from_placement, save_basemap, save_camera, BasemapKind, MapCamera,
     RegionDraftConfirm, MAP_CONTAINER_ID,
 };
@@ -1397,6 +1397,16 @@ fn waypoint_layers() -> Value {
     }])
 }
 
+fn live_stream_path_color(kind: &str) -> &'static str {
+    match kind {
+        "channel" | "ch-data" => "rgba(52, 211, 153, 0.95)",
+        "dm" | "anon" => "rgba(96, 165, 250, 0.95)",
+        "advert" => "rgba(251, 191, 36, 0.95)",
+        "ack" | "resp" | "req" => "rgba(167, 139, 250, 0.95)",
+        _ => "rgba(148, 163, 184, 0.95)",
+    }
+}
+
 fn default_camera() -> (MapCamera, bool) {
     // Returns (camera, skip_fit_bounds).
     if let Some(cam) = load_saved_camera() {
@@ -1455,6 +1465,18 @@ pub fn MapPage() -> Element {
     let mut trace_focus = use_signal(String::new);
     let mut trace_busy = use_signal(|| false);
     let mut trace_note = use_signal(String::new);
+    // Live Stream viewer (collection always runs in the radio pool).
+    let mut live_stream_on = use_signal(|| false);
+    let mut live_only = use_signal(|| true);
+    let mut live_replay_playing = use_signal(|| false);
+    // Scrubber position as event `at` unix seconds (0 = tip / unset).
+    let mut live_scrub_at = use_signal(|| 0i64);
+    let mut live_scrub_min = use_signal(|| 0i64);
+    let mut live_scrub_max = use_signal(|| 0i64);
+    // When set, poll loop adopts this as last_played_seq before replay play.
+    let mut live_replay_from_seq = use_signal(|| None::<u64>);
+    let mut live_clock = use_signal(|| "Live".to_string());
+    let mut live_buffer_note = use_signal(|| "No packet paths yet".to_string());
     let mut favorites = use_signal(load_favorites);
     let mut tick = use_signal(|| 0u32);
     let mut ready = use_signal(|| false);
@@ -1696,6 +1718,11 @@ pub fn MapPage() -> Element {
             // Last known lat/lon for tracked movers — pulse on real position change.
             let mut last_tracked_pos: HashMap<String, (f64, f64)> = HashMap::new();
             let mut tracked_pos_seeded = false;
+            // Live Stream viewer state (collection is always-on in the radio pool).
+            let mut live_seeded = false;
+            let mut live_last_played_seq: u64 = 0;
+            let mut live_fx_busy_until = std::time::Instant::now();
+            let mut live_pending: Option<crate::live_stream::LiveStreamEvent> = None;
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                 if let Some(key) = map_take_favorite_toggle().await {
@@ -1935,6 +1962,133 @@ pub fn MapPage() -> Element {
                         }
                     }
                 }
+                // Live Stream: play hop paths from the session ring (FX only).
+                if live_stream_on() {
+                    let (_tip_seq, events) = state().radio.live_stream_snapshot();
+                    if events.is_empty() {
+                        live_seeded = false;
+                        live_pending = None;
+                        live_scrub_min.set(0);
+                        live_scrub_max.set(0);
+                        live_buffer_note.set("No packet paths yet".into());
+                        live_clock.set(if live_only() {
+                            "Live".into()
+                        } else {
+                            "—".into()
+                        });
+                    } else {
+                        let oldest = events.first().map(|e| e.at).unwrap_or(0);
+                        let newest = events.last().map(|e| e.at).unwrap_or(0);
+                        live_scrub_min.set(oldest);
+                        live_scrub_max.set(newest);
+                        live_buffer_note.set(format!(
+                            "{} path{}",
+                            events.len(),
+                            if events.len() == 1 { "" } else { "s" }
+                        ));
+                        if !live_seeded {
+                            live_last_played_seq =
+                                events.last().map(|e| e.seq).unwrap_or(0);
+                            live_seeded = true;
+                            live_scrub_at.set(newest);
+                            live_pending = None;
+                        }
+                        let only = live_only();
+                        if only {
+                            live_scrub_at.set(newest);
+                            live_clock.set("Live".into());
+                            if live_replay_playing() {
+                                live_replay_playing.set(false);
+                            }
+                            let fresh: Vec<_> = events
+                                .iter()
+                                .filter(|e| e.seq > live_last_played_seq)
+                                .cloned()
+                                .collect();
+                            let now = std::time::Instant::now();
+                            if now >= live_fx_busy_until {
+                                let next = live_pending.take().or_else(|| fresh.last().cloned());
+                                if let Some(ev) = next {
+                                    live_last_played_seq = ev.seq;
+                                    live_clock.set(crate::timefmt::format_clock(
+                                        &state().db,
+                                        ev.at,
+                                    ));
+                                    let wps: Vec<(f64, f64)> =
+                                        ev.hops.iter().map(|h| (h.lon, h.lat)).collect();
+                                    map_play_path_stream_fx(
+                                        &wps,
+                                        Some(live_stream_path_color(&ev.kind)),
+                                    )
+                                    .await;
+                                    live_fx_busy_until = std::time::Instant::now()
+                                        + std::time::Duration::from_millis(1_900);
+                                }
+                            } else if let Some(latest) = fresh.last() {
+                                // Cap: keep at most one pending; drop older.
+                                live_pending = Some(latest.clone());
+                                live_last_played_seq = latest.seq;
+                            }
+                        } else {
+                            // Replay: scrubber drives clock; play advances sequentially.
+                            let scrub = {
+                                let mut at = live_scrub_at();
+                                if at < oldest {
+                                    at = oldest;
+                                    live_scrub_at.set(at);
+                                } else if at > newest {
+                                    at = newest;
+                                    live_scrub_at.set(at);
+                                }
+                                at
+                            };
+                            if let Some(ev) = events
+                                .iter()
+                                .rev()
+                                .find(|e| e.at <= scrub)
+                                .or_else(|| events.first())
+                            {
+                                live_clock.set(crate::timefmt::format_clock(
+                                    &state().db,
+                                    ev.at,
+                                ));
+                            }
+                            if live_replay_playing() {
+                                if let Some(from) = live_replay_from_seq() {
+                                    live_last_played_seq = from;
+                                    live_replay_from_seq.set(None);
+                                }
+                                let now = std::time::Instant::now();
+                                if now >= live_fx_busy_until {
+                                    if let Some(ev) =
+                                        events.iter().find(|e| e.seq > live_last_played_seq)
+                                    {
+                                        live_last_played_seq = ev.seq;
+                                        live_scrub_at.set(ev.at);
+                                        live_clock.set(crate::timefmt::format_clock(
+                                            &state().db,
+                                            ev.at,
+                                        ));
+                                        let wps: Vec<(f64, f64)> =
+                                            ev.hops.iter().map(|h| (h.lon, h.lat)).collect();
+                                        map_play_path_stream_fx(
+                                            &wps,
+                                            Some(live_stream_path_color(&ev.kind)),
+                                        )
+                                        .await;
+                                        live_fx_busy_until = std::time::Instant::now()
+                                            + std::time::Duration::from_millis(1_900);
+                                    } else {
+                                        live_replay_playing.set(false);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    live_seeded = false;
+                    live_pending = None;
+                }
                 // Region draft: only when placing and JS seq advanced (mouseup).
                 if draft_placed() {
                     let seq = map_region_draft_seq().await;
@@ -2053,6 +2207,147 @@ pub fn MapPage() -> Element {
                             },
                             Icon { name: IconName::Track, size: 14 }
                             "Tracker"
+                        }
+                    }
+                    div { class: "map-menu",
+                        span {
+                            title: "Animate overheard mesh paths (session buffer; clears when HQ exits)",
+                            Button {
+                                kind: if live_stream_on() {
+                                    ButtonKind::Primary
+                                } else {
+                                    ButtonKind::Ghost
+                                },
+                                onclick: move |_| {
+                                    let next = !live_stream_on();
+                                    live_stream_on.set(next);
+                                    if next {
+                                        live_only.set(true);
+                                        live_replay_playing.set(false);
+                                        live_scrub_at.set(0);
+                                        live_clock.set("Live".into());
+                                    } else {
+                                        live_replay_playing.set(false);
+                                    }
+                                },
+                                Icon { name: IconName::Signal, size: 14 }
+                                "Live Stream"
+                            }
+                        }
+                        if live_stream_on() {
+                            div { class: "map-live-stream-panel",
+                                div { class: "map-live-stream-panel__head",
+                                    span { class: "map-live-stream-panel__clock", "{live_clock()}" }
+                                    span { class: "map-live-stream-panel__note", "{live_buffer_note()}" }
+                                }
+                                label {
+                                    class: "map-live-stream-panel__scrub",
+                                    title: if live_only() {
+                                        "Unlock Live only to scrub replay"
+                                    } else {
+                                        "Scrub through session buffer"
+                                    },
+                                    "Time"
+                                    input {
+                                        r#type: "range",
+                                        min: "{live_scrub_min()}",
+                                        max: "{live_scrub_max().max(live_scrub_min())}",
+                                        value: "{live_scrub_at()}",
+                                        disabled: live_only() || live_scrub_max() <= live_scrub_min(),
+                                        oninput: move |event: FormEvent| {
+                                            if live_only() {
+                                                return;
+                                            }
+                                            if let Ok(at) = event.value().parse::<i64>() {
+                                                live_scrub_at.set(at);
+                                                live_replay_playing.set(false);
+                                                let (_, events) =
+                                                    state().radio.live_stream_snapshot();
+                                                if let Some(ev) = events
+                                                    .iter()
+                                                    .rev()
+                                                    .find(|e| e.at <= at)
+                                                    .or_else(|| events.first())
+                                                {
+                                                    live_clock.set(
+                                                        crate::timefmt::format_clock(
+                                                            &state().db,
+                                                            ev.at,
+                                                        ),
+                                                    );
+                                                }
+                                            }
+                                        },
+                                    }
+                                }
+                                div { class: "map-live-stream-panel__row",
+                                    Button {
+                                        kind: ButtonKind::Ghost,
+                                        disabled: live_only()
+                                            || live_scrub_max() <= live_scrub_min(),
+                                        onclick: move |_| {
+                                            if live_only() {
+                                                return;
+                                            }
+                                            if live_replay_playing() {
+                                                live_replay_playing.set(false);
+                                                return;
+                                            }
+                                            let scrub = live_scrub_at();
+                                            let (_, events) =
+                                                state().radio.live_stream_snapshot();
+                                            let anchor = events
+                                                .iter()
+                                                .rev()
+                                                .find(|e| e.at <= scrub)
+                                                .map(|e| e.seq.saturating_sub(1))
+                                                .or_else(|| {
+                                                    events.first().map(|e| e.seq.saturating_sub(1))
+                                                })
+                                                .unwrap_or(0);
+                                            live_replay_from_seq.set(Some(anchor));
+                                            live_replay_playing.set(true);
+                                        },
+                                        if live_replay_playing() { "Pause" } else { "Play" }
+                                    }
+                                    span {
+                                        title: "Clear session path buffer",
+                                        Button {
+                                            kind: ButtonKind::Ghost,
+                                            onclick: move |_| {
+                                                state().radio.clear_live_stream();
+                                                live_replay_playing.set(false);
+                                                live_scrub_at.set(0);
+                                                live_scrub_min.set(0);
+                                                live_scrub_max.set(0);
+                                                live_buffer_note.set("No packet paths yet".into());
+                                                live_clock.set(if live_only() {
+                                                    "Live".into()
+                                                } else {
+                                                    "—".into()
+                                                });
+                                            },
+                                            "Clear"
+                                        }
+                                    }
+                                    label { class: "map-live-stream-panel__live-only",
+                                        input {
+                                            r#type: "checkbox",
+                                            checked: live_only(),
+                                            oninput: move |_| {
+                                                let next = !live_only();
+                                                live_only.set(next);
+                                                if next {
+                                                    live_replay_playing.set(false);
+                                                    live_scrub_at.set(live_scrub_max());
+                                                    live_clock.set("Live".into());
+                                                }
+                                            },
+                                        }
+                                        "Live only"
+                                    }
+                                }
+                            }
                         }
                     }
                     span {

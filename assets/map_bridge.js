@@ -1088,6 +1088,7 @@
       if (this.seenPubkeys) delete this.seenPubkeys[mapId];
       if (this.sonarMarkers) delete this.sonarMarkers[mapId];
       this.clearPingBeam(mapId);
+      this.clearPathStream(mapId);
       if (!map) return;
       this.loseWebGl(map);
       try {
@@ -1630,10 +1631,18 @@
         typeof color === "string" && color
           ? color
           : "rgba(255, 255, 255, 0.9)";
-      var mode = kind === "arrive" || kind === "move" ? kind : "message";
+      var mode =
+        kind === "arrive" || kind === "move" || kind === "stream"
+          ? kind
+          : "message";
       var root = document.createElement("div");
-      root.className =
-        mode === "arrive" ? "metis-sonar metis-sonar--warp" : "metis-sonar";
+      if (mode === "arrive") {
+        root.className = "metis-sonar metis-sonar--warp";
+      } else if (mode === "stream") {
+        root.className = "metis-sonar metis-sonar--lg";
+      } else {
+        root.className = "metis-sonar";
+      }
       root.style.setProperty("--metis-sonar-color", c);
       if (mode === "arrive") {
         var core = document.createElement("div");
@@ -1658,7 +1667,7 @@
       if (!this.sonarMarkers[mapId]) this.sonarMarkers[mapId] = [];
       this.sonarMarkers[mapId].push(marker);
       var self = this;
-      var lifetime = mode === "arrive" ? 1300 : 1200;
+      var lifetime = mode === "arrive" ? 1300 : mode === "stream" ? 1400 : 1200;
       setTimeout(function () {
         try {
           marker.remove();
@@ -1722,6 +1731,259 @@
         }
       }
       delete this.pingBeams[mapId];
+    },
+
+    clearPathStream: function (mapId) {
+      if (!this.pathStreams) this.pathStreams = {};
+      var job = this.pathStreams[mapId];
+      if (job) {
+        if (job.raf) {
+          try {
+            cancelAnimationFrame(job.raf);
+          } catch (_) {}
+        }
+        if (job.onMove && job.map) {
+          try {
+            job.map.off("move", job.onMove);
+            job.map.off("resize", job.onMove);
+          } catch (_) {}
+        }
+        if (job.canvas && job.canvas.parentNode) {
+          try {
+            job.canvas.parentNode.removeChild(job.canvas);
+          } catch (_) {}
+        }
+      }
+      delete this.pathStreams[mapId];
+    },
+
+    /**
+     * Live Stream: hop-by-hop shoot along waypoints with sonar at each node.
+     * waypoints: [{lng,lat}, ...] or [[lng,lat], ...] — need ≥2 points.
+     */
+    playPathStreamFx: function (mapId, waypoints, color) {
+      var self = this;
+      var tint =
+        typeof color === "string" && color
+          ? color
+          : "rgba(52, 211, 153, 0.95)";
+      var raw = Array.isArray(waypoints) ? waypoints : [];
+      var pts = [];
+      for (var i = 0; i < raw.length; i++) {
+        var wp = raw[i];
+        var lng;
+        var lat;
+        if (Array.isArray(wp) && wp.length >= 2) {
+          lng = wp[0];
+          lat = wp[1];
+        } else if (wp && isFinite(wp.lng) && isFinite(wp.lat)) {
+          lng = wp.lng;
+          lat = wp.lat;
+        } else {
+          continue;
+        }
+        if (!isFinite(lng) || !isFinite(lat)) continue;
+        if (
+          pts.length &&
+          pts[pts.length - 1][0] === lng &&
+          pts[pts.length - 1][1] === lat
+        ) {
+          continue;
+        }
+        pts.push([lng, lat]);
+      }
+      if (pts.length < 2) return false;
+      if (this.prefersReducedMotion()) {
+        for (var ri = 0; ri < pts.length; ri++) {
+          this.pulseAt(mapId, pts[ri][0], pts[ri][1], tint, "stream");
+        }
+        return true;
+      }
+      var map = this.maps[mapId];
+      if (!map) return false;
+
+      this.clearPathStream(mapId);
+      this.pulseAt(mapId, pts[0][0], pts[0][1], tint, "stream");
+
+      var segs = [];
+      for (var si = 0; si < pts.length - 1; si++) {
+        var a0 = pts[si];
+        var a1 = pts[si + 1];
+        var sdx = a1[0] - a0[0];
+        var sdy = a1[1] - a0[1];
+        var slen = Math.sqrt(sdx * sdx + sdy * sdy) || 1e-9;
+        segs.push({ a: a0, b: a1, len: slen });
+      }
+      var host = map.getCanvasContainer();
+      var canvas = document.createElement("canvas");
+      canvas.className = "metis-path-stream-canvas";
+      canvas.style.cssText =
+        "position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:2;";
+      host.appendChild(canvas);
+
+      function syncSize() {
+        var gl = map.getCanvas();
+        var dpr = window.devicePixelRatio || 1;
+        var w = gl.clientWidth;
+        var h = gl.clientHeight;
+        canvas.width = Math.max(1, Math.floor(w * dpr));
+        canvas.height = Math.max(1, Math.floor(h * dpr));
+        canvas.style.width = w + "px";
+        canvas.style.height = h + "px";
+        return dpr;
+      }
+
+      function rgbaWithAlpha(base, alpha) {
+        var m = String(base).match(
+          /rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*[\d.]+)?\s*\)/i
+        );
+        if (m) {
+          return (
+            "rgba(" +
+            m[1] +
+            "," +
+            m[2] +
+            "," +
+            m[3] +
+            "," +
+            Math.max(0, Math.min(1, alpha)) +
+            ")"
+          );
+        }
+        return "rgba(52, 211, 153," + Math.max(0, Math.min(1, alpha)) + ")";
+      }
+
+      function travelMs(seg) {
+        return Math.min(900, Math.max(280, 220 + seg.len * 9000));
+      }
+
+      var FADE_MS = 260;
+      var hopIdx = 0;
+      var phase = "travel"; // travel | fade
+      var phaseT0 = performance.now();
+      var drawFrom = segs[0].a;
+      var drawTip = segs[0].a;
+      var drawAlpha = 1;
+      var job = { raf: 0, canvas: canvas, map: map, onMove: null };
+      this.pathStreams[mapId] = job;
+
+      function strokeBeam(ctx, fromPx, tipPx, alpha) {
+        if (alpha <= 0.01) return;
+        var dx = tipPx.x - fromPx.x;
+        var dy = tipPx.y - fromPx.y;
+        if (dx * dx + dy * dy < 0.25) {
+          ctx.beginPath();
+          ctx.arc(tipPx.x, tipPx.y, 4.5, 0, Math.PI * 2);
+          ctx.fillStyle = rgbaWithAlpha(tint, 0.9 * alpha);
+          ctx.fill();
+          return;
+        }
+        // Tail fades out behind the tip (transparent at origin → solid at tip).
+        var glow = ctx.createLinearGradient(
+          fromPx.x,
+          fromPx.y,
+          tipPx.x,
+          tipPx.y
+        );
+        glow.addColorStop(0, rgbaWithAlpha(tint, 0));
+        glow.addColorStop(0.4, rgbaWithAlpha(tint, 0.18 * alpha));
+        glow.addColorStop(1, rgbaWithAlpha(tint, 0.4 * alpha));
+        var core = ctx.createLinearGradient(
+          fromPx.x,
+          fromPx.y,
+          tipPx.x,
+          tipPx.y
+        );
+        core.addColorStop(0, rgbaWithAlpha(tint, 0));
+        core.addColorStop(0.35, rgbaWithAlpha(tint, 0.25 * alpha));
+        core.addColorStop(1, rgbaWithAlpha(tint, 0.95 * alpha));
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(fromPx.x, fromPx.y);
+        ctx.lineTo(tipPx.x, tipPx.y);
+        ctx.strokeStyle = glow;
+        ctx.lineWidth = 8;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(fromPx.x, fromPx.y);
+        ctx.lineTo(tipPx.x, tipPx.y);
+        ctx.strokeStyle = core;
+        ctx.lineWidth = 2.6;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(tipPx.x, tipPx.y, 4.5, 0, Math.PI * 2);
+        ctx.fillStyle = rgbaWithAlpha(tint, 0.92 * alpha);
+        ctx.fill();
+      }
+
+      function draw() {
+        if (!self.pathStreams || self.pathStreams[mapId] !== job) return;
+        var dpr = syncSize();
+        var ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        var fromPx = map.project(drawFrom);
+        var tipPx = map.project(drawTip);
+        strokeBeam(ctx, fromPx, tipPx, drawAlpha);
+      }
+
+      job.onMove = function () {
+        draw();
+      };
+      map.on("move", job.onMove);
+      map.on("resize", job.onMove);
+
+      function frame(now) {
+        if (!self.pathStreams || self.pathStreams[mapId] !== job) return;
+        var seg = segs[hopIdx];
+        if (!seg) {
+          self.clearPathStream(mapId);
+          return;
+        }
+        if (phase === "travel") {
+          var td = travelMs(seg);
+          var u = Math.min(1, (now - phaseT0) / td);
+          var e = 1 - Math.pow(1 - u, 2.2);
+          drawFrom = seg.a;
+          drawTip = [
+            seg.a[0] + (seg.b[0] - seg.a[0]) * e,
+            seg.a[1] + (seg.b[1] - seg.a[1]) * e,
+          ];
+          drawAlpha = 1;
+          if (u >= 1) {
+            drawTip = seg.b;
+            self.pulseAt(mapId, seg.b[0], seg.b[1], tint, "stream");
+            phase = "fade";
+            phaseT0 = now;
+          }
+        } else {
+          var f = Math.min(1, (now - phaseT0) / FADE_MS);
+          drawFrom = seg.a;
+          drawTip = seg.b;
+          drawAlpha = 1 - f;
+          if (f >= 1) {
+            hopIdx += 1;
+            if (hopIdx >= segs.length) {
+              draw();
+              self.clearPathStream(mapId);
+              return;
+            }
+            phase = "travel";
+            phaseT0 = now;
+            drawFrom = segs[hopIdx].a;
+            drawTip = segs[hopIdx].a;
+            drawAlpha = 1;
+          }
+        }
+        draw();
+        job.raf = requestAnimationFrame(frame);
+      }
+      job.raf = requestAnimationFrame(frame);
+      return true;
     },
 
     /**

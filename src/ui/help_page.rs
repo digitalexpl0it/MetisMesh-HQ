@@ -418,7 +418,9 @@ pub fn HelpPage() -> Element {
                                 strong { "Advert path" }
                                 " / "
                                 strong { "Ping" }
-                                " live on DM bubbles, contact menus, and Map (not channel chat). Advert path only reads this companion’s local advert-path cache — it does not pull a route over the air. Ping needs a unicast route (direct or hop bytes) first."
+                                " live on DM bubbles, contact menus, and Map (not channel chat). Advert path only reads this companion’s local advert-path cache — it does not pull a route over the air. Ping needs a unicast route (direct or hop bytes) first. Channel messages you send from HQ may show "
+                                strong { "Heard" }
+                                " repeater pills when the companion overhears flood echoes and can match path hashes to known nodes."
                             }
                             li {
                                 strong { "Inbox" }
@@ -520,7 +522,9 @@ pub fn HelpPage() -> Element {
                                 strong { "Ping" }
                                 " (pin detail) is status over the air when HQ already has a unicast route; beam grows HQ→target (via hop pins when known). "
                                 strong { "Advert path" }
-                                " reads the companion path cache first when Ping is hidden. Trace (tracked/claimed, toolbar) is the map path highlight. Traffic overlay weights overheard edges in the time window (passive)."
+                                " reads the companion path cache first when Ping is hidden. Trace (tracked/claimed, toolbar) is the map path highlight. Traffic overlay weights overheard edges in the time window (passive). "
+                                strong { "Live Stream" }
+                                " (toolbar) animates overheard packet paths hop-by-hop from a session-only RAM buffer (always collected while a companion is connected; cleared when HQ exits). Live only follows the tip; uncheck to scrub/replay."
                             }
                             li {
                                 strong { "Tracker" }
@@ -864,11 +868,11 @@ pub fn HelpPage() -> Element {
                             }
                             li {
                                 strong { "Map" }
-                                " — open Map; confirm local pins / last-heard nodes (self-reported GPS only)."
+                                " — open Map; confirm local pins / last-heard nodes (self-reported GPS only). Optional Live Stream animates overheard paths for this session only (not saved across restarts)."
                             }
                             li {
                                 strong { "Channel" }
-                                " — open Messages → Channels; post a short check-in on your community channel so volunteers know HQ is live. Speakers who post are listed under the channel for this session only (collapsed by default — expand the chevron to see them)."
+                                " — open Messages → Channels; post a short check-in on your community channel so volunteers know HQ is live. Speakers who post are listed under the channel for this session only (collapsed by default — expand the chevron to see them). Your own channel posts may show Heard repeater pills when flood echoes resolve."
                             }
                             li {
                                 strong { "Roster / Contacts" }

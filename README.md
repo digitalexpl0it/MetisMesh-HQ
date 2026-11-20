@@ -10,10 +10,10 @@ Churches, neighborhoods, and volunteer groups run this on a regular computer sit
 
 - **Radio pool** — connect MeshCore companions over Bluetooth, USB serial, or TCP (Wi-Fi / Ethernet, default port 5000); multiple radios with a primary that owns bot and enrollment traffic
 - **Enrollment** — approve join requests, hand out private channel secrets, run the local bot on METIS-INFO (`#weather`, `#quake`, `#amber`, and related commands)
-- **Messages** — Channels / DMs / Contacts rail (Favorites / Saved / Discovered); public and private channels with session speakers; direct threads when a public key is known; unread and @mention tracking; **Follow newest**; local history delete / clear; optional per-channel look; block senders; share via `meshcore://contact/add` and `meshcore://channel/add` chips
+- **Messages** — Channels / DMs / Contacts rail (Favorites / Saved / Discovered); public and private channels with session speakers; direct threads when a public key is known; unread and @mention tracking; **Follow newest**; local history delete / clear; optional per-channel look; block senders; share via `meshcore://contact/add` and `meshcore://channel/add` chips; channel TX bubbles show **Heard** repeater pills when flood echoes resolve
 - **Inbox** — pending signups and held community alerts (weather / Amber / civil) for operator confirm or auto-relay
 - **Roster** — everyone heard on the mesh (enrolled or not); contact QR; clear NEW / prune heard-only
-- **Map** — MapLibre with a local style (optional PMTiles offline packs); live pins, message sonar, tracked movers; operator path **Trace** (tracked/claimed) and passive **Traffic** edges
+- **Map** — MapLibre with a local style (optional PMTiles offline packs); live pins, message sonar, tracked movers; operator path **Trace** (tracked/claimed) and passive **Traffic** edges; **Live Stream** hop-by-hop path FX from a session RAM buffer (collects while radio is up; not persisted)
 - **Overview** — companion status + activity; system chips (including **Webhooks**); **Repeaters** tab when infrastructure is claimed (fleet tiles, detail window 15m–7d, Battery/Queue Chart·Gauge·Numeric)
 - **Weather** — Open-Meteo and local stations (MQTT / Ecowitt); operator Weather page plus mesh bot replies
 - **Infrastructure** — claim and admin-verify repeaters, rooms, and sensors; probe and remote CLI through the primary companion
@@ -91,11 +91,11 @@ Critical UI libraries are probed before the window opens. On Debian/Ubuntu the a
 Releases are created only from version tags (not every `main` push):
 
 ```bash
-git tag v0.1.26
-git push origin v0.1.26
+git tag v0.1.27
+git push origin v0.1.27
 ```
 
-That attaches the Windows `.zip`, Ubuntu `.deb`, Linux `.tar.gz`, and Linux `.AppImage`. If the tag already exists on an older commit, move it after the release commit (`git tag -f v0.1.26` then `git push --force origin v0.1.26`) or use the next patch version.
+That attaches the Windows `.zip`, Ubuntu `.deb`, Linux `.tar.gz`, and Linux `.AppImage`. If the tag already exists on an older commit, move it after the release commit (`git tag -f v0.1.27` then `git push --force origin v0.1.27`) or use the next patch version.
 
 ## Requirements (build from source)
 

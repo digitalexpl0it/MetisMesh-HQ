@@ -198,6 +198,11 @@ function buildShowcase() {
         frame.style.transformOrigin = "40% 100%";
         frame.style.transform = `perspective(1400px) rotateX(${tiltX}deg) rotateY(${tiltY}deg)`;
       }
+      const mirror = el.querySelector(".shot-mirror");
+      if (mirror) {
+        mirror.style.transformOrigin = "40% 0%";
+        mirror.style.transform = `perspective(1400px) rotateY(${tiltY}deg)`;
+      }
       el.classList.toggle("is-active", j === i);
     });
 
@@ -226,9 +231,12 @@ function buildShowcase() {
 
   function onScroll() {
     const section = document.querySelector(".showcase");
+    const sticky = document.querySelector(".showcase__sticky");
     if (!section) return;
     const rect = section.getBoundingClientRect();
-    const stickyH = window.innerHeight * 0.85;
+    const stickyH = sticky
+      ? sticky.getBoundingClientRect().height
+      : window.innerHeight * 0.85;
     const total = section.offsetHeight - stickyH;
     if (total <= 0) {
       setActive(0, 0);
@@ -255,8 +263,25 @@ function buildShowcase() {
     },
     { passive: true }
   );
-  window.addEventListener("resize", onScroll, { passive: true });
+  window.addEventListener(
+    "resize",
+    () => {
+      syncTopbarHeight();
+      onScroll();
+    },
+    { passive: true }
+  );
+  syncTopbarHeight();
   onScroll();
+}
+
+function syncTopbarHeight() {
+  const topbar = document.querySelector(".topbar");
+  if (!topbar) return;
+  const h = Math.ceil(topbar.getBoundingClientRect().height);
+  if (h > 0) {
+    document.documentElement.style.setProperty("--topbar-h", `${h}px`);
+  }
 }
 
 function pickAsset(assets, kind) {
@@ -389,6 +414,7 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
+syncTopbarHeight();
 buildShowcase();
 wireDownloads();
 wireHardware();

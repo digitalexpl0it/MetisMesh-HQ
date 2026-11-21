@@ -12,6 +12,7 @@
   --radius: 0.85rem;
   --max: 72rem;
   --max-wide: min(96rem, 100vw - 2rem);
+  --topbar-h: 3.75rem;
 }
 
 *,
@@ -211,6 +212,8 @@ code {
 .hero__shot .shot-mirror {
   margin-top: 0.25rem;
   height: clamp(3.75rem, 11svh, 5.75rem);
+  /* Match the frame tilt so the reflection spans the full bottom edge */
+  transform: perspective(1400px) rotateY(-7deg);
 }
 
 @media (min-height: 860px) and (min-width: 960px) {
@@ -228,7 +231,8 @@ code {
     min-height: 0;
   }
 
-  .hero__shot .shot-frame {
+  .hero__shot .shot-frame,
+  .hero__shot .shot-mirror {
     transform: none;
   }
 
@@ -345,12 +349,13 @@ code {
   position: relative;
   z-index: 0;
   flex: 0 0 auto;
-  width: 96%;
+  width: 100%;
   height: clamp(3.75rem, 18vw, 7.5rem);
-  margin: 0.15rem auto 0;
+  margin: 0.15rem 0 0;
   overflow: hidden;
   pointer-events: none;
   border-radius: 0 0 calc(var(--radius) * 0.7) calc(var(--radius) * 0.7);
+  transform-origin: 40% 0%;
   -webkit-mask-image: linear-gradient(
     to bottom,
     rgba(0, 0, 0, 0.85) 0%,
@@ -383,8 +388,8 @@ code {
 .shot-mirror::after {
   content: "";
   position: absolute;
-  left: 6%;
-  right: 6%;
+  left: 2%;
+  right: 2%;
   top: 0;
   height: 3px;
   z-index: 2;
@@ -468,12 +473,12 @@ code {
 
 .showcase__sticky {
   position: sticky;
-  top: 3.25rem;
+  top: var(--topbar-h);
   z-index: 5;
   display: grid;
   gap: 1.25rem;
   align-items: center;
-  min-height: calc(100svh - 3.25rem);
+  min-height: calc(100svh - var(--topbar-h));
   max-width: var(--max-wide);
   margin: 0 auto;
   padding: 1rem clamp(0.85rem, 3vw, 2rem) 1.5rem;
@@ -569,7 +574,7 @@ code {
 .shot-stack__item .shot-mirror {
   flex: 0 0 20%;
   height: 20%;
-  width: 96%;
+  width: 100%;
   margin-top: 0.65rem;
 }
 
@@ -578,32 +583,93 @@ code {
 }
 
 @media (max-width: 899px) {
+  :root {
+    --topbar-h: 4.5rem;
+  }
+
   .showcase__sticky {
-    align-content: start;
-    min-height: 0;
-    padding-top: 0.75rem;
+    /* Fill the viewport under the topbar and center the tour block */
+    top: var(--topbar-h);
+    min-height: calc(100svh - var(--topbar-h));
+    max-height: calc(100svh - var(--topbar-h));
+    align-content: center;
+    justify-items: center;
+    gap: 0.85rem;
+    padding: 0.65rem clamp(0.85rem, 4vw, 1.25rem) 1rem;
+    overflow-x: clip;
+    overflow-y: visible;
   }
 
   .showcase__meta {
-    order: 1;
+    order: 0;
+    width: 100%;
+    max-width: 26rem;
+    text-align: center;
+  }
+
+  .showcase__blurb {
+    margin-inline: auto;
+  }
+
+  .showcase__dots {
+    justify-content: center;
+    margin-top: 0.85rem;
+  }
+
+  .showcase__caption {
+    font-size: clamp(1.45rem, 6vw, 2rem);
   }
 
   .showcase__stage {
-    order: 0;
+    order: 1;
+    width: 100%;
+    max-width: min(100%, 26rem);
   }
 
   .shot-stack {
-    aspect-ratio: 16 / 13.4;
-    max-height: min(62svh, 30rem);
+    width: 100%;
+    aspect-ratio: 16 / 12.2;
+    /* Keep frame + mirror fully inside the sticky pane */
+    max-height: min(50svh, 20rem);
+  }
+
+  .shot-stack__item .shot-frame img,
+  .shot-stack__item .shot-frame video {
+    /* Show the full UI — cover was cropping the top of the window */
+    object-fit: contain;
+    object-position: top center;
+    background: #05080c;
+  }
+
+  .shot-stack__item .shot-mirror img,
+  .shot-stack__item .shot-mirror video {
+    object-fit: contain;
+    object-position: top center;
   }
 
   .shot-stack__item .shot-mirror {
-    flex-basis: 24%;
-    height: 24%;
+    flex-basis: 16%;
+    height: 16%;
+    margin-top: 0.3rem;
   }
 
-  .shot-stack__item .shot-frame {
+  .shot-stack__item .shot-frame,
+  .shot-stack__item .shot-mirror {
     transform: none !important;
+  }
+}
+
+@media (max-width: 899px) and (max-height: 720px) {
+  .shot-stack {
+    max-height: min(40svh, 15.5rem);
+  }
+
+  .showcase__sticky {
+    gap: 0.55rem;
+  }
+
+  .showcase__dots {
+    margin-top: 0.55rem;
   }
 }
 
@@ -800,8 +866,10 @@ code {
   }
 
   .hero__shot .shot-frame,
+  .hero__shot .shot-mirror,
   .shot-stack__item,
-  .shot-stack__item .shot-frame {
+  .shot-stack__item .shot-frame,
+  .shot-stack__item .shot-mirror {
     transform: none !important;
   }
 

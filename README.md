@@ -4,7 +4,7 @@ Local emergency headquarters for [MeshCore](https://meshcore.io/) communities.
 
 Churches, neighborhoods, and volunteer groups run this on a regular computer sitting next to a MeshCore companion radio. It keeps working when the internet drops. No cloud account, and it does not call home.
 
-Product site (Cloudflare Pages): [mmhq.digitalexpl0it.com](https://mmhq.digitalexpl0it.com) — attach the custom domain in Cloudflare after the first Pages deploy (`site/` in this repo).
+Product site: [mmhq.digitalexpl0it.com](https://mmhq.digitalexpl0it.com) — static site under `site/`, deployed via Cloudflare (Workers static assets + `wrangler.toml`). See [`site/README.md`](site/README.md).
 
 ![Overview](Screenshots/overview.png)
 
@@ -175,8 +175,9 @@ Desktop window icon uses the mesh-head mark from the brand logo (`assets/app_ico
 | `src/` | App, radio task, SQLite, map tiles, UI |
 | `assets/` | MapLibre, CSS, presets, offline map bits, brand marks |
 | `Screenshots/` | README + marketing product shots / Live Stream clip |
-| `site/` | Dark marketing site for Cloudflare Pages (`mmhq.digitalexpl0it.com`) |
-| `scripts/prepare-site-media.sh` | Copies Screenshots + brand PNGs into `site/media/` for Pages builds |
+| `site/` | Dark marketing site for Cloudflare (`mmhq.digitalexpl0it.com`) |
+| `wrangler.toml` | Cloudflare static-asset deploy (`assets.directory = ./site`) |
+| `scripts/prepare-site-media.sh` | Copies Screenshots + brand PNGs into `site/media/` for Cloudflare builds |
 | profile data dir | Local DB + QR SVGs (`~/.MetisMeshHQ` on Linux; not in git) |
 | `.github/workflows/` | Cross-platform builds |
 

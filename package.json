@@ -1,0 +1,8 @@
+{
+  "name": "metis-mesh-hq-site",
+  "private": true,
+  "description": "Wrangler helper for the static marketing site under site/",
+  "devDependencies": {
+    "wrangler": "^4.45.0"
+  }
+}

@@ -1,6 +1,6 @@
 # Metis Mesh HQ — marketing site
 
-Static dark landing page for Cloudflare Pages (`mmhq.digitalexpl0it.com`).
+Static dark landing page for Cloudflare (`mmhq.digitalexpl0it.com`).
 
 ## Local preview
 
@@ -13,17 +13,26 @@ cd site && python3 -m http.server 8787
 
 Open `http://127.0.0.1:8787`.
 
-## Cloudflare Pages
+## Cloudflare (current dashboard)
 
-1. Cloudflare dashboard → **Workers & Pages** → **Create** → **Pages** → connect the `MetisMesh-HQ` GitHub repo.
-2. Build settings:
-   - **Build command:** `bash scripts/prepare-site-media.sh`
-   - **Build output directory:** `site`
-   - Root / working directory: repository root (default)
-3. Deploy on `main` (or your chosen production branch).
-4. **Custom domains** → add `mmhq.digitalexpl0it.com`.
-   - With Cloudflare already as the domain’s nameservers, Pages will create the DNS record for you.
-   - If the zone is on Cloudflare but you manage records yourself, add a CNAME from `mmhq` to the Pages `*.pages.dev` hostname shown in the project.
+Cloudflare’s UI now folds this into **Workers & Pages → Create application** (Git import). You will **not** see a separate “Build output directory” field — only Build / Deploy / Preview commands. That is expected.
+
+1. **Workers & Pages** → **Create application**.
+2. Import the GitHub repo `digitalexpl0it/MetisMesh-HQ` (Workers + static assets path is fine).
+3. On **Set up your application**, use:
+
+| Field | Value |
+|---|---|
+| Project name | `mmhq` |
+| Build command | `bash scripts/prepare-site-media.sh` |
+| Deploy command | `npx wrangler deploy` |
+| Preview command | leave default / blank |
+
+4. Click **Deploy**.
+
+Repo root has [`wrangler.toml`](../wrangler.toml) with `assets.directory = "./site"`. The build step copies Screenshots + brand PNGs into `site/media/` (gitignored); Wrangler then uploads `site/`.
+
+5. After deploy succeeds: project → **Custom domains** → `mmhq.digitalexpl0it.com` (zone already on Cloudflare nameservers).
 
 ## Amazon Associates
 

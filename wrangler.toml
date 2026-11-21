@@ -1,0 +1,7 @@
+# Marketing site (static assets) for Cloudflare Workers / Pages Git deploy.
+# Dashboard: Create application → Import repo → Build + Deploy commands below.
+name = "mmhq"
+compatibility_date = "2026-11-20"
+
+[assets]
+directory = "./site"

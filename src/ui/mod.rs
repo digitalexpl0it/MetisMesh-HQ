@@ -418,6 +418,8 @@ const NAV_SEARCH_INDEX: &[NavSearchEntry] = &[
             "license",
             "MIT",
             "GitHub",
+            "website",
+            "mmhq",
             "setup wizard",
             "welcome",
             "data folder",
@@ -9321,6 +9323,7 @@ fn AboutPage(on_open_help: EventHandler<()>) -> Element {
     let data_path = crate::data_dir().display().to_string();
     let data_path_copy = data_path.clone();
     let repo = "https://github.com/digitalexpl0it/MetisMesh-HQ";
+    let website = "https://mmhq.digitalexpl0it.com/";
     let update_st = crate::app_update::status();
     let update_available = crate::app_update::banner_visible(&state().db);
     let flavor = crate::app_update::detect_install_flavor();
@@ -9344,6 +9347,13 @@ fn AboutPage(on_open_help: EventHandler<()>) -> Element {
                     onclick: move |_| on_open_help.call(()),
                     Icon { name: IconName::Help, size: 14 }
                     "Open Help"
+                }
+                Button {
+                    kind: ButtonKind::Ghost,
+                    onclick: move |_| {
+                        let _ = crate::services::local_api::open_url_in_browser(website);
+                    },
+                    "Website"
                 }
                 if update_available {
                     Button {
@@ -9398,6 +9408,25 @@ fn AboutPage(on_open_help: EventHandler<()>) -> Element {
                     span { class: "about-key", "License" }
                     span { class: "about-val", "MIT" }
                     span {}
+                }
+                div { class: "about-row",
+                    span { class: "about-key", "Website" }
+                    span { class: "about-val", "{website}" }
+                    div { class: "flex flex-wrap gap-1",
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| {
+                                let _ = crate::services::local_api::open_url_in_browser(website);
+                            },
+                            "Open"
+                        }
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| copy_text_to_clipboard(website),
+                            Icon { name: IconName::Copy, size: 12 }
+                            "Copy"
+                        }
+                    }
                 }
                 div { class: "about-row",
                     span { class: "about-key", "Source" }

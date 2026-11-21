@@ -87,6 +87,9 @@ function buildShowcase() {
     item.className = "shot-stack__item";
     item.dataset.index = String(i);
 
+    const shell = document.createElement("div");
+    shell.className = "shot-shell";
+
     const frame = document.createElement("div");
     frame.className = "shot-frame";
 
@@ -127,8 +130,9 @@ function buildShowcase() {
     }
     mirror.appendChild(mirrorClone);
 
-    item.appendChild(frame);
-    item.appendChild(mirror);
+    shell.appendChild(frame);
+    shell.appendChild(mirror);
+    item.appendChild(shell);
     stack.appendChild(item);
 
     if (dots) {
@@ -181,13 +185,19 @@ function buildShowcase() {
         z = 3;
       }
 
-      const tiltY = j === i ? -6 + (t - 0.5) * 2 : dist * 5 - 4;
-      const tiltX = j === i ? 3.5 : 6;
-      const lift = j === i ? 0 : dist * 14;
+      // Mild tilt on the frame only — keeps the floor reflection clear.
+      const tiltY = j === i ? -5 + (t - 0.5) * 1.5 : dist * 3 - 2;
+      const tiltX = j === i ? 1.5 : 2.5;
+      const lift = j === i ? 0 : dist * 8;
+      const frame = el.querySelector(".shot-frame");
 
       el.style.opacity = String(opacity);
       el.style.zIndex = String(z);
-      el.style.transform = `translate3d(0, ${lift}px, 0) rotateX(${tiltX}deg) rotateY(${tiltY}deg)`;
+      el.style.transform = `translate3d(0, ${lift}px, 0)`;
+      if (frame) {
+        frame.style.transformOrigin = "40% 100%";
+        frame.style.transform = `perspective(1400px) rotateX(${tiltX}deg) rotateY(${tiltY}deg)`;
+      }
       el.classList.toggle("is-active", j === i);
     });
 

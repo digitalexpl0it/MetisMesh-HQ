@@ -11,6 +11,7 @@
   --font-body: "Outfit", "Segoe UI", sans-serif;
   --radius: 0.85rem;
   --max: 72rem;
+  --max-wide: min(96rem, 100vw - 2rem);
 }
 
 *,
@@ -96,23 +97,24 @@ code {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 1rem;
-  padding: 0.65rem clamp(1rem, 3vw, 2rem);
+  gap: 0.75rem 1rem;
+  padding: 0.55rem clamp(0.85rem, 3vw, 2rem);
   background: rgba(7, 10, 13, 0.72);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--line);
 }
 
 .topbar__brand img {
-  width: 2.75rem;
+  width: 2.5rem;
   height: auto;
 }
 
 .topbar__nav {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.85rem 1.15rem;
-  font-size: 0.9rem;
+  justify-content: flex-end;
+  gap: 0.55rem 0.9rem;
+  font-size: clamp(0.78rem, 2.4vw, 0.9rem);
 }
 
 .topbar__nav a {
@@ -126,24 +128,30 @@ code {
 
 .hero {
   display: grid;
-  gap: 2.25rem;
+  gap: 1.75rem;
   align-items: center;
-  max-width: var(--max);
+  max-width: var(--max-wide);
   margin: 0 auto;
-  padding: clamp(2rem, 6vh, 4rem) clamp(1rem, 3vw, 2rem) 3rem;
-  min-height: calc(100vh - 4rem);
+  padding: clamp(1.1rem, 3.5vh, 2.5rem) clamp(0.85rem, 3vw, 2rem) clamp(1.5rem, 4vh, 2.75rem);
+  min-height: calc(100svh - 3.5rem);
 }
 
 @media (min-width: 960px) {
   .hero {
-    grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.15fr);
-    gap: 2.75rem;
+    grid-template-columns: minmax(17rem, 0.7fr) minmax(0, 1.4fr);
+    gap: clamp(1.25rem, 2.5vw, 2.5rem);
+  }
+}
+
+@media (min-width: 1280px) {
+  .hero {
+    grid-template-columns: minmax(18rem, 0.62fr) minmax(0, 1.55fr);
   }
 }
 
 .hero__logo {
-  width: min(100%, 28rem);
-  margin-bottom: 1.25rem;
+  width: min(100%, 26rem);
+  margin-bottom: 1rem;
   filter: drop-shadow(0 0 28px var(--glow));
   animation: hero-rise 0.9s ease-out both;
 }
@@ -183,17 +191,57 @@ code {
 }
 
 .hero__visual {
+  width: 100%;
+  min-width: 0;
   animation: hero-rise 1s ease-out 0.18s both;
 }
 
-.hero__shot {
-  transform: perspective(1400px) rotateY(-8deg) rotateX(4deg);
-  transform-origin: center left;
+.hero__shot .shot-frame {
+  transform: perspective(1400px) rotateY(-7deg) rotateX(2.5deg);
+  /* Pivot from the bottom so tilt never covers the floor reflection */
+  transform-origin: 40% 100%;
+}
+
+.hero__shot .shot-frame img {
+  /* Leave room for the floor reflection inside short laptop viewports */
+  max-height: min(42svh, 26rem);
+  width: 100%;
+}
+
+.hero__shot .shot-mirror {
+  margin-top: 0.25rem;
+  height: clamp(3.75rem, 11svh, 5.75rem);
+}
+
+@media (min-height: 860px) and (min-width: 960px) {
+  .hero__shot .shot-frame img {
+    max-height: min(52svh, 34rem);
+  }
+
+  .hero__shot .shot-mirror {
+    height: clamp(4.5rem, 13svh, 7rem);
+  }
 }
 
 @media (max-width: 959px) {
-  .hero__shot {
+  .hero {
+    min-height: 0;
+  }
+
+  .hero__shot .shot-frame {
     transform: none;
+  }
+
+  .hero__shot .shot-frame img {
+    max-height: min(42svh, 20rem);
+  }
+
+  .hero__ctas {
+    flex-direction: row;
+  }
+
+  .hero__ctas .btn {
+    flex: 1 1 auto;
   }
 }
 
@@ -202,16 +250,26 @@ code {
   align-items: center;
   justify-content: center;
   gap: 0.4rem;
-  min-height: 3rem;
-  padding: 0.7rem 1.35rem;
+  min-height: 2.85rem;
+  padding: 0.7rem 1.25rem;
   border-radius: 0.55rem;
   border: 1px solid transparent;
   font-family: var(--font-body);
-  font-size: 1rem;
+  font-size: clamp(0.92rem, 2.5vw, 1rem);
   font-weight: 600;
   text-decoration: none;
   cursor: pointer;
   transition: transform 0.18s ease, background 0.18s ease, border-color 0.18s ease;
+}
+
+@media (max-width: 420px) {
+  .hero__ctas {
+    flex-direction: column;
+  }
+
+  .hero__ctas .btn {
+    width: 100%;
+  }
 }
 
 .btn--primary {
@@ -232,23 +290,127 @@ code {
   border-color: var(--line);
 }
 
+.shot-shell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+}
+
 .shot-frame {
   position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
   border-radius: var(--radius);
   border: 1px solid var(--line);
   background: #05080c;
   box-shadow:
-    0 30px 80px rgba(0, 0, 0, 0.55),
-    0 0 0 1px rgba(255, 255, 255, 0.04);
+    0 24px 70px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(255, 255, 255, 0.04),
+    0 0 40px rgba(45, 255, 106, 0.06);
   overflow: hidden;
+  transform-style: preserve-3d;
+  transform-origin: 40% 100%;
+}
+
+.shot-frame::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 42%;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    rgba(45, 255, 106, 0.04) 55%,
+    rgba(180, 255, 210, 0.14) 100%
+  );
+  mix-blend-mode: screen;
 }
 
 .shot-frame img,
 .shot-frame video {
   width: 100%;
-  aspect-ratio: 16 / 11;
+  height: auto;
+  aspect-ratio: 16 / 10.5;
   object-fit: cover;
   object-position: top left;
+  display: block;
+}
+
+.shot-mirror {
+  position: relative;
+  z-index: 0;
+  flex: 0 0 auto;
+  width: 96%;
+  height: clamp(3.75rem, 18vw, 7.5rem);
+  margin: 0.15rem auto 0;
+  overflow: hidden;
+  pointer-events: none;
+  border-radius: 0 0 calc(var(--radius) * 0.7) calc(var(--radius) * 0.7);
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0.85) 0%,
+    rgba(0, 0, 0, 0.45) 38%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0.85) 0%,
+    rgba(0, 0, 0, 0.45) 38%,
+    transparent 100%
+  );
+}
+
+.shot-mirror::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: linear-gradient(
+    180deg,
+    rgba(45, 255, 106, 0.28) 0%,
+    rgba(45, 255, 106, 0.08) 22%,
+    transparent 50%,
+    rgba(7, 10, 13, 0.55) 100%
+  );
+  pointer-events: none;
+}
+
+.shot-mirror::after {
+  content: "";
+  position: absolute;
+  left: 6%;
+  right: 6%;
+  top: 0;
+  height: 3px;
+  z-index: 2;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(220, 255, 230, 0.75) 35%,
+    rgba(45, 255, 106, 0.9) 50%,
+    rgba(220, 255, 230, 0.75) 65%,
+    transparent 100%
+  );
+  box-shadow:
+    0 0 22px rgba(45, 255, 106, 0.55),
+    0 4px 18px rgba(45, 255, 106, 0.25);
+  pointer-events: none;
+}
+
+.shot-mirror img,
+.shot-mirror video {
+  width: 100%;
+  height: 220%;
+  object-fit: cover;
+  object-position: top left;
+  transform: scaleY(-1);
+  filter: saturate(1.05) brightness(0.95) contrast(1.05);
+  opacity: 1;
 }
 
 .audience,
@@ -306,21 +468,21 @@ code {
 
 .showcase__sticky {
   position: sticky;
-  top: 3.5rem;
+  top: 3.25rem;
   z-index: 5;
   display: grid;
-  gap: 1.5rem;
+  gap: 1.25rem;
   align-items: center;
-  min-height: calc(100vh - 3.5rem);
-  max-width: var(--max);
+  min-height: calc(100svh - 3.25rem);
+  max-width: var(--max-wide);
   margin: 0 auto;
-  padding: 1.25rem clamp(1rem, 3vw, 2rem);
+  padding: 1rem clamp(0.85rem, 3vw, 2rem) 1.5rem;
 }
 
 @media (min-width: 900px) {
   .showcase__sticky {
-    grid-template-columns: minmax(12rem, 0.85fr) minmax(0, 1.4fr);
-    gap: 2rem;
+    grid-template-columns: minmax(12rem, 0.62fr) minmax(0, 1.55fr);
+    gap: clamp(1.25rem, 2.5vw, 2.5rem);
   }
 }
 
@@ -360,13 +522,16 @@ code {
 }
 
 .showcase__stage {
+  width: 100%;
+  min-width: 0;
   perspective: 1600px;
 }
 
 .shot-stack {
   position: relative;
   width: 100%;
-  aspect-ratio: 16 / 12.2;
+  /* Room for the frame + floor reflection */
+  aspect-ratio: 16 / 12.8;
 }
 
 .shot-stack__item {
@@ -375,7 +540,7 @@ code {
   opacity: 0;
   z-index: 0;
   pointer-events: none;
-  transform: translate3d(0, 12px, 0) rotateX(6deg) rotateY(-10deg);
+  transform: translate3d(0, 12px, 0);
   transform-origin: 50% 80%;
   will-change: opacity, transform;
 }
@@ -385,8 +550,14 @@ code {
   z-index: 2;
 }
 
+.shot-stack__item .shot-shell {
+  height: 100%;
+}
+
 .shot-stack__item .shot-frame {
-  height: 78%;
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
 }
 
 .shot-stack__item .shot-frame img,
@@ -395,32 +566,45 @@ code {
   aspect-ratio: auto;
 }
 
-.shot-mirror {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 76%;
-  height: 24%;
-  overflow: hidden;
-  pointer-events: none;
-  opacity: 0.55;
-  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.55), transparent 85%);
-  -webkit-mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.55), transparent 85%);
-}
-
-.shot-mirror img,
-.shot-mirror video {
-  width: 100%;
-  height: 220%;
-  object-fit: cover;
-  object-position: top left;
-  transform: scaleY(-1);
-  filter: blur(0.4px) saturate(0.85) brightness(0.55);
-  opacity: 0.85;
+.shot-stack__item .shot-mirror {
+  flex: 0 0 20%;
+  height: 20%;
+  width: 96%;
+  margin-top: 0.65rem;
 }
 
 .showcase__spacer {
   height: 700vh;
+}
+
+@media (max-width: 899px) {
+  .showcase__sticky {
+    align-content: start;
+    min-height: 0;
+    padding-top: 0.75rem;
+  }
+
+  .showcase__meta {
+    order: 1;
+  }
+
+  .showcase__stage {
+    order: 0;
+  }
+
+  .shot-stack {
+    aspect-ratio: 16 / 13.4;
+    max-height: min(62svh, 30rem);
+  }
+
+  .shot-stack__item .shot-mirror {
+    flex-basis: 24%;
+    height: 24%;
+  }
+
+  .shot-stack__item .shot-frame {
+    transform: none !important;
+  }
 }
 
 .offline__points {
@@ -615,8 +799,9 @@ code {
     animation: none;
   }
 
-  .hero__shot,
-  .shot-stack__item {
+  .hero__shot .shot-frame,
+  .shot-stack__item,
+  .shot-stack__item .shot-frame {
     transform: none !important;
   }
 
@@ -632,9 +817,10 @@ code {
 
   .shot-stack {
     display: grid;
-    gap: 1.5rem;
+    gap: 2rem;
     aspect-ratio: auto;
     height: auto;
+    max-height: none;
   }
 
   .shot-stack__item {
@@ -644,7 +830,47 @@ code {
     pointer-events: auto;
   }
 
+  .shot-stack__item .shot-shell {
+    height: auto;
+  }
+
+  .shot-stack__item .shot-frame {
+    flex: 0 0 auto;
+    height: auto;
+  }
+
+  .shot-stack__item .shot-frame img,
+  .shot-stack__item .shot-frame video {
+    height: auto;
+    aspect-ratio: 16 / 10.5;
+  }
+
   .shot-mirror {
     display: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .audience,
+  .offline,
+  .hardware,
+  .download-band {
+    padding: 2.75rem clamp(0.85rem, 4vw, 1.25rem);
+  }
+
+  .audience__list li {
+    font-size: 0.85rem;
+  }
+
+  .topbar__nav a {
+    padding: 0.25rem 0;
+  }
+
+  .hero__logo {
+    max-width: min(100%, 18rem);
+  }
+
+  .shot-mirror {
+    height: clamp(3.25rem, 22vw, 5.5rem);
   }
 }

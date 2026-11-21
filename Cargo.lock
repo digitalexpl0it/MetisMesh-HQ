@@ -3923,7 +3923,7 @@ dependencies = [
 
 [[package]]
 name = "metis-mesh-hq"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "aes",
  "argon2",

@@ -107,11 +107,11 @@ Critical UI libraries are probed before the window opens. On Debian/Ubuntu the a
 Releases are created only from version tags (not every `main` push):
 
 ```bash
-git tag v0.1.27
-git push origin v0.1.27
+git tag v0.1.28
+git push origin v0.1.28
 ```
 
-That attaches the Windows `.zip`, Ubuntu `.deb`, Linux `.tar.gz`, and Linux `.AppImage`. If the tag already exists on an older commit, move it after the release commit (`git tag -f v0.1.27` then `git push --force origin v0.1.27`) or use the next patch version.
+That attaches the Windows `.zip`, Ubuntu `.deb`, Linux `.tar.gz`, and Linux `.AppImage`. If the tag already exists on an older commit, move it after the release commit (`git tag -f v0.1.28` then `git push --force origin v0.1.28`) or use the next patch version.
 
 ## Requirements (build from source)
 

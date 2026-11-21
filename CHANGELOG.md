@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.28 — 2026-11-20
+
+Package version `0.1.28` (Cargo / About). Windows Details may show `0.1.28.0`.
+
+### Brand
+
+- New Metis Mesh HQ logo / badge and window app icons (`emerghq_logo.png`, `mmhq_badge.png`, `app_icon*.png` / `.ico`) shipped in the desktop builds
+
+### Site / docs
+
+- Product marketing site under `site/` for Cloudflare Pages (`mmhq.digitalexpl0it.com`): scroll tour, Windows/Linux download CTAs, categorized Amazon Associates hardware
+- README screenshot gallery and brand-mark notes
+
 ## 0.1.27 — 2026-11-19
 
 Package version `0.1.27` (Cargo / About). Windows Details may show `0.1.27.0`.

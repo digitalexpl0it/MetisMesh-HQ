@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Metis Mesh HQ — Local emergency headquarters for MeshCore</title>
+    <meta
+      name="description"
+      content="Free desktop headquarters for MeshCore communities. Churches, neighborhoods, and volunteer groups stay connected when the internet drops. Windows and Linux."
+    />
+    <link rel="icon" type="image/png" href="media/favicon.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="atmosphere" aria-hidden="true"></div>
+
+    <header class="topbar">
+      <a class="topbar__brand" href="#top">
+        <img src="media/mmhq_badge.png" alt="Metis Mesh HQ" width="120" height="120" />
+      </a>
+      <nav class="topbar__nav" aria-label="Page">
+        <a href="#showcase">Tour</a>
+        <a href="#offline">Offline</a>
+        <a href="#hardware">Hardware</a>
+        <a href="#download">Download</a>
+      </nav>
+    </header>
+
+    <main id="top">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero__copy">
+          <img
+            class="hero__logo"
+            src="media/emerghq_logo.png"
+            alt="Metis Mesh HQ"
+            width="720"
+            height="120"
+          />
+          <h1 id="hero-title" class="visually-hidden">Metis Mesh HQ</h1>
+          <p class="hero__lead">
+            Local emergency headquarters for MeshCore — churches, neighborhoods,
+            and volunteer desks that keep talking when the internet drops.
+          </p>
+          <p class="hero__free">Free · Windows &amp; Linux · No cloud account</p>
+          <div class="hero__ctas" id="download">
+            <a
+              class="btn btn--primary"
+              data-download="windows"
+              href="https://github.com/digitalexpl0it/MetisMesh-HQ/releases/latest"
+            >
+              Download for Windows
+            </a>
+            <a
+              class="btn btn--primary"
+              data-download="linux"
+              href="https://github.com/digitalexpl0it/MetisMesh-HQ/releases/latest"
+            >
+              Download for Linux
+            </a>
+          </div>
+          <p class="hero__alt">
+            Prefer packages?
+            <a data-download="deb" href="https://github.com/digitalexpl0it/MetisMesh-HQ/releases/latest"
+              >Ubuntu .deb</a
+            >
+            ·
+            <a data-download="tarball" href="https://github.com/digitalexpl0it/MetisMesh-HQ/releases/latest"
+              >Linux .tar.gz</a
+            >
+            ·
+            <a href="https://github.com/digitalexpl0it/MetisMesh-HQ">GitHub</a>
+          </p>
+        </div>
+        <div class="hero__visual">
+          <div class="shot-frame hero__shot">
+            <img
+              src="media/overview.png"
+              alt="Metis Mesh HQ Overview screen"
+              width="1395"
+              height="954"
+              fetchpriority="high"
+            />
+          </div>
+        </div>
+      </section>
+
+      <section class="audience" aria-labelledby="audience-title">
+        <h2 id="audience-title">Built for groups that cannot wait on the WAN</h2>
+        <p>
+          Run Metis Mesh HQ on a regular laptop beside a MeshCore companion radio.
+          Enroll nodes, relay community alerts, map the mesh, flash firmware from a
+          local locker — all without calling home.
+        </p>
+        <ul class="audience__list">
+          <li>Churches &amp; community halls</li>
+          <li>Neighborhood emergency desks</li>
+          <li>Off-grid &amp; outage-ready operators</li>
+        </ul>
+      </section>
+
+      <section class="showcase" id="showcase" aria-labelledby="showcase-title">
+        <div class="showcase__sticky">
+          <div class="showcase__meta">
+            <p class="showcase__kicker">Product tour</p>
+            <h2 id="showcase-title" class="showcase__caption" data-showcase-caption>
+              Desk overview
+            </h2>
+            <p class="showcase__blurb" data-showcase-blurb>
+              Companion status, roster pressure, and mesh traffic at a glance.
+            </p>
+            <div class="showcase__dots" data-showcase-dots aria-hidden="true"></div>
+          </div>
+          <div class="showcase__stage" data-showcase-stage>
+            <div class="shot-stack" data-showcase-stack>
+              <!-- slides injected by main.js -->
+            </div>
+          </div>
+        </div>
+        <div class="showcase__spacer" data-showcase-spacer aria-hidden="true"></div>
+      </section>
+
+      <section class="offline" id="offline" aria-labelledby="offline-title">
+        <h2 id="offline-title">Works when the internet does not</h2>
+        <p class="offline__lead">
+          The local app is the system. Mesh traffic, enrollment, and history stay on
+          your machine — ready for the hour the WAN dies.
+        </p>
+        <ul class="offline__points">
+          <li>
+            <strong>Radio-first</strong>
+            Bluetooth, USB, or TCP companion — primary radio owns bot and secrets.
+          </li>
+          <li>
+            <strong>Firmware locker</strong>
+            Sync while online; flash over USB when you are offline.
+          </li>
+          <li>
+            <strong>Guides on disk</strong>
+            Survival and reference packs under your data folder, not the cloud.
+          </li>
+        </ul>
+      </section>
+
+      <section class="hardware" id="hardware" aria-labelledby="hardware-title">
+        <h2 id="hardware-title">Hardware that sits next to HQ</h2>
+        <p>
+          MeshCore-capable LoRa radios, antennas, and solar repeaters that work with
+          the same mesh Metis Mesh HQ administers. Buy links go to Amazon (Associates).
+        </p>
+        <div class="hardware__grid" data-hardware-grid></div>
+        <p class="affiliate-note">
+          As an Amazon Associate I earn from qualifying purchases.
+        </p>
+      </section>
+
+      <section class="download-band" aria-labelledby="download-band-title">
+        <h2 id="download-band-title">Get Metis Mesh HQ</h2>
+        <p>Free desktop builds for Windows and Linux. macOS is not shipped.</p>
+        <div class="hero__ctas">
+          <a
+            class="btn btn--primary"
+            data-download="windows"
+            href="https://github.com/digitalexpl0it/MetisMesh-HQ/releases/latest"
+          >
+            Download for Windows
+          </a>
+          <a
+            class="btn btn--primary"
+            data-download="linux"
+            href="https://github.com/digitalexpl0it/MetisMesh-HQ/releases/latest"
+          >
+            Download for Linux
+          </a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="footer__row">
+        <img src="media/mmhq_badge.png" alt="" width="72" height="72" />
+        <div>
+          <p>
+            <a href="https://github.com/digitalexpl0it/MetisMesh-HQ">GitHub</a>
+            ·
+            <a href="https://github.com/digitalexpl0it/MetisMesh-HQ/releases">Releases</a>
+            ·
+            <a href="https://meshcore.io/">MeshCore</a>
+            · MIT License
+          </p>
+          <p class="affiliate-note">
+            As an Amazon Associate I earn from qualifying purchases. Metis Mesh HQ is
+            community software — not FEMA, NWS, or law enforcement.
+          </p>
+        </div>
+      </div>
+    </footer>
+
+    <script src="main.js" type="module"></script>
+  </body>
+</html>

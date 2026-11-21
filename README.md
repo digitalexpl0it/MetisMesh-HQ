@@ -4,7 +4,23 @@ Local emergency headquarters for [MeshCore](https://meshcore.io/) communities.
 
 Churches, neighborhoods, and volunteer groups run this on a regular computer sitting next to a MeshCore companion radio. It keeps working when the internet drops. No cloud account, and it does not call home.
 
+Product site (Cloudflare Pages): [mmhq.digitalexpl0it.com](https://mmhq.digitalexpl0it.com) — attach the custom domain in Cloudflare after the first Pages deploy (`site/` in this repo).
+
 ![Overview](Screenshots/overview.png)
+
+### Screenshots
+
+| | |
+| --- | --- |
+| ![Messages](Screenshots/messages.png) | ![Chat / Heard](Screenshots/chat.png) |
+| ![Roster](Screenshots/roster.png) | ![Map](Screenshots/map.png) |
+| ![Claim device](Screenshots/claimdevice.png) | ![Broadcast](Screenshots/broadcast.png) |
+| ![CLI](Screenshots/cli.png) | ![Firmware locker](Screenshots/firmware_locker.png) |
+| ![Guides](Screenshots/guides.png) | |
+
+A short **Live Stream** map clip (`Screenshots/metis-1795234518.mp4`) is used on the product site scroll tour.
+
+Brand marks live under `assets/`: `emerghq_logo.png`, `mmhq_badge.png`, `app_icon.png` / `app_icon_512.png` / `app_icon.ico`.
 
 ## What it does
 
@@ -157,8 +173,10 @@ Desktop window icon uses the mesh-head mark from the brand logo (`assets/app_ico
 | Path | What |
 | --- | --- |
 | `src/` | App, radio task, SQLite, map tiles, UI |
-| `assets/` | MapLibre, CSS, presets, offline map bits |
-| `Screenshots/` | README product shots |
+| `assets/` | MapLibre, CSS, presets, offline map bits, brand marks |
+| `Screenshots/` | README + marketing product shots / Live Stream clip |
+| `site/` | Dark marketing site for Cloudflare Pages (`mmhq.digitalexpl0it.com`) |
+| `scripts/prepare-site-media.sh` | Copies Screenshots + brand PNGs into `site/media/` for Pages builds |
 | profile data dir | Local DB + QR SVGs (`~/.MetisMeshHQ` on Linux; not in git) |
 | `.github/workflows/` | Cross-platform builds |
 

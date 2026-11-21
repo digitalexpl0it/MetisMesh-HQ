@@ -339,7 +339,13 @@ async function wireDownloads() {
   });
 }
 
-const HARDWARE_CATEGORY_ORDER = ["Nodes", "Antennas", "Cables", "Repeaters"];
+const HARDWARE_CATEGORY_ORDER = [
+  "Nodes",
+  "Antennas",
+  "Cables",
+  "Repeaters",
+  "Books",
+];
 
 function hardwareMerchantLabel(merchant, url) {
   const m = String(merchant || "").toLowerCase();

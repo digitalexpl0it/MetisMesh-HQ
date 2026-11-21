@@ -78,6 +78,18 @@
     ]
   },
   {
+    "category": "Nodes",
+    "title": "Heltec V4 LoRa board",
+    "blurb": "ESP32-S3 + SX1262 development board with OLED, Wi-Fi/BLE, and solar/GPS headers — flash MeshCore or Meshtastic for DIY nodes.",
+    "image": "thumbs/B0GSVW19C5.jpg",
+    "links": [
+      {
+        "merchant": "amazon",
+        "url": "https://www.amazon.com/MESHYEAOFAH-Meshtastic-LoRa-Dev-Board/dp/B0GSVW19C5?crid=XMS1O033GRIO&dib=eyJ2IjoiMSJ9.6a54oBHB56JBq_kWDPNP1Pw9brb9xM1KFuCB76KUCk9ihXW_XZRi9NLVNsgLaiEl0BafrFNXflIJAaaCL06mU6yg2qKHgOzin_j0QynAvuSH5n2qdjItnuJ1Fd1ljdU7JygfeB6pxV_ebdW1Q7Jlv4-tyyKKY_xykjm_wBfxD3wTKL3KjI5qOHYwNxV8-98isioh-1dNlaMkLtYqQmwvTBsyb4uMIQKwmEUZ96ACR_A.tD3RW0rEYh7d9FGIp7q2fvPz5I1-k5A3_A4vfg25Q7I&dib_tag=se&keywords=meshcore&qid=1795298683&sprefix=meshcore%2Caps%2C250&sr=8-7&th=1&linkCode=ll2&tag=metismeshcore-20&linkId=c82fa06fc7dac64cef5b71f11b1f3d3b&language=en_US&gaOptInStatus=true&ref_=as_li_ss_tl"
+      }
+    ]
+  },
+  {
     "category": "Antennas",
     "title": "915 MHz whip antenna",
     "blurb": "muzi works 17 cm whip — a tuned antenna usually beats swapping boards.",
@@ -127,6 +139,30 @@
       {
         "merchant": "amazon",
         "url": "https://www.amazon.com/SenseCAP-Repeater-MeshCore-batteries-enclosure/dp/B0FMDHBWX8?crid=T8V3D899KO5N&dib=eyJ2IjoiMSJ9.YlzPovOU9_f-BzBUIAQ4w7alQof-Qj3WLis94Nu45K29CW_o1u30w3BqZjQQBu_q_N0h-TPNEtEYT7ZUH6BemWtgh9gZgWbYVK8nOt0UDxRtiOFwILsCwX42dXQAMAd-UjL2UjfsxXUjryJ-S9KRqOY8_Fm6D8BT8ERGdrmcRZ1dEjMs0nT4JobojscAU2O21gJ1i-4E9KlOSvkwcdRaokl-YgIC7oMLQhBpX7AgvR0.XJ6fMIokbH0QvFIsvY7N6A6KsFV1BuJFucYXB6LIaNc&dib_tag=se&keywords=MeshCore&qid=1794183885&sprefix=meshcore%2B%2Caps%2C307&sr=8-3&th=1&gaOptInStatus=true&ascsubtag=srctok-26ed46dbcde0267d&btn_type=ss&btn_ref=srctok-26ed46dbcde0267d&linkCode=ll2&tag=metismeshcore-20&linkId=9b571293e8c39ac29ab296453ab03420&language=en_US&gaOptInStatus=true&ref_=as_li_ss_tl"
+      }
+    ]
+  },
+  {
+    "category": "Books",
+    "title": "MeshCore for Absolute Beginners",
+    "blurb": "Ryan Stach — build private off-grid LoRa networks without internet or cell towers.",
+    "image": "thumbs/B0GYWQY7VH.jpg",
+    "links": [
+      {
+        "merchant": "amazon",
+        "url": "https://www.amazon.com/MESHCORE-ABSOLUTE-BEGINNERS-Off-Grid-Networks/dp/B0GYWQY7VH?crid=XMS1O033GRIO&dib=eyJ2IjoiMSJ9.6a54oBHB56JBq_kWDPNP1Pw9brb9xM1KFuCB76KUCk9ihXW_XZRi9NLVNsgLaiEl0BafrFNXflIJAaaCL06mU6yg2qKHgOzin_j0QynAvuSH5n2qdjItnuJ1Fd1ljdU7JygfeB6pxV_ebdW1Q7Jlv4-tyyKKY_xykjm_wBfxD3wTKL3KjI5qOHYwNxV8-98isioh-1dNlaMkLtYqQmwvTBsyb4uMIQKwmEUZ96ACR_A.tD3RW0rEYh7d9FGIp7q2fvPz5I1-k5A3_A4vfg25Q7I&dib_tag=se&keywords=meshcore&qid=1795298683&sprefix=meshcore%2Caps%2C250&sr=8-15&th=1&linkCode=ll2&tag=metismeshcore-20&linkId=f53ae59389e9cffe582d50dab083df2f&language=en_US&gaOptInStatus=true&ref_=as_li_ss_tl"
+      }
+    ]
+  },
+  {
+    "category": "Books",
+    "title": "MeshCore: Comprehensive Guide (2nd ed.)",
+    "blurb": "David Rodgers — revised off-grid mesh communication guide for operators building larger deployments.",
+    "image": "thumbs/B0HQFX1WHM.jpg",
+    "links": [
+      {
+        "merchant": "amazon",
+        "url": "https://www.amazon.com/MeshCore-Comprehensive-Off-Grid-Communication-Revised-ebook/dp/B0HQFX1WHM?crid=XMS1O033GRIO&dib=eyJ2IjoiMSJ9.0UMVKscK1uT_i_4Ihfp7QLxurYtIRlTr5SR6uPJnRdnJaYC2FcH6X1bg-iNakvbFdbA1BOLixqI0_Ilnasz6dncDJw7T44PmE6FpjS-5aojdKYp_7DgBV8DCAT_QcCrTtKSxPpcNGtWdHr4-ZebNChnVrMXdJOTQdNMwhbABu76kQnuN_B_JDo61QcTii1rqpsD3Dhpn150dHx06Cttxww.ahI8PGExJ-1t_eIt6bbbHvBbmk9Mhh2s5yswRmWO57E&dib_tag=se&keywords=meshcore&qid=1795298915&sprefix=meshcore%2Caps%2C250&sr=8-37&xpid=4u2dcQf2FlzaX&th=1&linkCode=ll2&tag=metismeshcore-20&linkId=3d49ac87465a18776c21d2e49140d024&language=en_US&gaOptInStatus=true&ref_=as_li_ss_tl"
       }
     ]
   }

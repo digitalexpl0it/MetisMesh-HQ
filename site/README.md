@@ -34,9 +34,14 @@ Repo root has [`wrangler.toml`](../wrangler.toml) with `assets.directory = "./si
 
 5. After deploy succeeds: project → **Custom domains** → `mmhq.digitalexpl0it.com` (zone already on Cloudflare nameservers).
 
-## Amazon Associates
+## Affiliate links
 
-Product cards load from [`hardware.json`](hardware.json) (Associates tag `metismeshcore-20`). Each item has a `category` (Nodes / Antennas / Cables / Repeaters) and a local thumbnail under [`thumbs/`](thumbs/). Disclosure copy is in the page footer.
+Product cards load from [`hardware.json`](hardware.json).
+
+- **Amazon Associates** tag `metismeshcore-20` for most Nodes / Antennas / Cables.
+- **Seeed Studio** SenseCAP affiliate code `b7Z7Ozr` (`?sensecap_affiliate=b7Z7Ozr&referring_service=link`). Optional `merchant: "seeed"` and `coupon` fields render on the card.
+
+Each item has a `category` (Nodes / Antennas / Cables / Repeaters) and a local thumbnail under [`thumbs/`](thumbs/). Disclosure copy is in the Hardware section and footer.
 
 ## Downloads
 

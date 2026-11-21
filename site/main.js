@@ -341,6 +341,14 @@ async function wireDownloads() {
 
 const HARDWARE_CATEGORY_ORDER = ["Nodes", "Antennas", "Cables", "Repeaters"];
 
+function hardwareBuyLabel(item, url) {
+  if (!url) return "Link coming soon";
+  const merchant = String(item.merchant || "").toLowerCase();
+  if (merchant === "seeed") return "Buy on Seeed →";
+  if (merchant === "amazon" || /amazon\./i.test(url)) return "Buy on Amazon →";
+  return "Buy →";
+}
+
 function hardwareCard(item) {
   const url = item.url && item.url !== "#" ? item.url : null;
   const card = document.createElement(url ? "a" : "div");
@@ -351,13 +359,17 @@ function hardwareCard(item) {
     card.rel = "noopener sponsored nofollow";
   }
   const img = escapeHtml(item.image || "media/app_icon_512.png");
+  const coupon = item.coupon
+    ? `<p class="hardware-card__coupon">Coupon <code>${escapeHtml(item.coupon)}</code></p>`
+    : "";
   card.innerHTML = `
       <div class="hardware-card__thumb">
         <img src="${img}" alt="${escapeHtml(item.title || "Product")}" width="160" height="160" loading="lazy" />
       </div>
       <h3>${escapeHtml(item.title || "Product")}</h3>
       <p>${escapeHtml(item.blurb || "")}</p>
-      <span class="buy">${url ? "Buy on Amazon →" : "Link coming soon"}</span>
+      ${coupon}
+      <span class="buy">${hardwareBuyLabel(item, url)}</span>
     `;
   return card;
 }

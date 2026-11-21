@@ -784,6 +784,38 @@ code {
   flex: 1;
 }
 
+.hardware-card__coupon {
+  flex: 0 0 auto;
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--ink);
+}
+
+.hardware-card__coupon code {
+  padding: 0.12rem 0.4rem;
+  border-radius: 0.3rem;
+  border: 1px dashed rgba(45, 255, 106, 0.45);
+  background: rgba(45, 255, 106, 0.08);
+  color: var(--accent);
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+}
+
+.hardware-promo {
+  margin: 0 0 1.25rem;
+  max-width: 40rem;
+  padding: 0.75rem 0.95rem;
+  border-left: 2px solid var(--accent);
+  background: linear-gradient(90deg, rgba(45, 255, 106, 0.08), transparent 85%);
+  font-size: 0.95rem;
+  color: var(--muted);
+}
+
+.hardware-promo a {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .hardware-card .buy {
   font-size: 0.85rem;
   font-weight: 600;

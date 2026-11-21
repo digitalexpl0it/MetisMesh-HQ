@@ -741,7 +741,6 @@ code {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: rgba(14, 20, 26, 0.85);
-  text-decoration: none;
   color: inherit;
   transition: border-color 0.2s ease, transform 0.2s ease;
 }
@@ -749,7 +748,6 @@ code {
 .hardware-card:hover {
   border-color: rgba(45, 255, 106, 0.45);
   transform: translateY(-2px);
-  color: inherit;
 }
 
 .hardware-card__thumb {
@@ -816,10 +814,23 @@ code {
   font-weight: 600;
 }
 
+.hardware-card__buys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.75rem;
+  margin-top: 0.15rem;
+}
+
 .hardware-card .buy {
   font-size: 0.85rem;
   font-weight: 600;
   color: var(--accent);
+  text-decoration: none;
+}
+
+.hardware-card a.buy:hover {
+  color: #57ff8a;
+  text-decoration: underline;
 }
 
 .hardware-card.is-placeholder .buy {

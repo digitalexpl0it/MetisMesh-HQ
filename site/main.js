@@ -341,35 +341,66 @@ async function wireDownloads() {
 
 const HARDWARE_CATEGORY_ORDER = ["Nodes", "Antennas", "Cables", "Repeaters"];
 
-function hardwareBuyLabel(item, url) {
-  if (!url) return "Link coming soon";
-  const merchant = String(item.merchant || "").toLowerCase();
-  if (merchant === "seeed") return "Buy on Seeed →";
-  if (merchant === "amazon" || /amazon\./i.test(url)) return "Buy on Amazon →";
-  return "Buy →";
+function hardwareMerchantLabel(merchant, url) {
+  const m = String(merchant || "").toLowerCase();
+  if (m === "seeed") return "Buy on Seeed";
+  if (m === "amazon" || /amazon\./i.test(url || "")) return "Buy on Amazon";
+  return "Buy";
+}
+
+function hardwareLinks(item) {
+  if (Array.isArray(item.links) && item.links.length) {
+    return item.links.filter((l) => l && l.url && l.url !== "#");
+  }
+  // Legacy single-url cards
+  if (item.url && item.url !== "#") {
+    return [
+      {
+        merchant: item.merchant || (/amazon\./i.test(item.url) ? "amazon" : ""),
+        url: item.url,
+        coupon: item.coupon,
+      },
+    ];
+  }
+  return [];
 }
 
 function hardwareCard(item) {
-  const url = item.url && item.url !== "#" ? item.url : null;
-  const card = document.createElement(url ? "a" : "div");
-  card.className = "hardware-card" + (url ? "" : " is-placeholder");
-  if (url) {
-    card.href = url;
-    card.target = "_blank";
-    card.rel = "noopener sponsored nofollow";
-  }
+  const links = hardwareLinks(item);
+  const card = document.createElement("div");
+  card.className =
+    "hardware-card" + (links.length ? "" : " is-placeholder");
+
   const img = escapeHtml(item.image || "media/app_icon_512.png");
-  const coupon = item.coupon
-    ? `<p class="hardware-card__coupon">Coupon <code>${escapeHtml(item.coupon)}</code></p>`
-    : "";
+  const coupons = [
+    ...new Set(
+      links.map((l) => l.coupon).filter((c) => typeof c === "string" && c.trim())
+    ),
+  ];
+  const couponHtml = coupons
+    .map(
+      (c) =>
+        `<p class="hardware-card__coupon">Coupon <code>${escapeHtml(c)}</code></p>`
+    )
+    .join("");
+
+  const buyHtml = links.length
+    ? `<div class="hardware-card__buys">${links
+        .map((l) => {
+          const label = hardwareMerchantLabel(l.merchant, l.url);
+          return `<a class="buy" href="${escapeHtml(l.url)}" target="_blank" rel="noopener sponsored nofollow">${escapeHtml(label)} →</a>`;
+        })
+        .join("")}</div>`
+    : `<span class="buy">Link coming soon</span>`;
+
   card.innerHTML = `
       <div class="hardware-card__thumb">
         <img src="${img}" alt="${escapeHtml(item.title || "Product")}" width="160" height="160" loading="lazy" />
       </div>
       <h3>${escapeHtml(item.title || "Product")}</h3>
       <p>${escapeHtml(item.blurb || "")}</p>
-      ${coupon}
-      <span class="buy">${hardwareBuyLabel(item, url)}</span>
+      ${couponHtml}
+      ${buyHtml}
     `;
   return card;
 }

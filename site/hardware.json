@@ -4,66 +4,130 @@
     "title": "ThinkNode M9 terminal",
     "blurb": "MeshCore LoRa mesh terminal with keyboard, GPS, and USB-C — a ready field radio for the mesh HQ supports.",
     "image": "thumbs/B0HFRYZV9V.jpg",
-    "url": "https://www.amazon.com/Meshnology-ThinkNode-MeshCore-Terminal-ESP32-S3R8/dp/B0HFRYZV9V?crid=3BLB1PWPPSC2I&dib=eyJ2IjoiMSJ9.gCz-1f2Dw8GVhm3Zrqn3aJ9U0_2pbwlnOWppBeDXs0pPKe2Emg28S5DdFJ30eiNuB5vjYJI87Y2LIn6Mx2dsx4T6_XJ09eV8t57RCEMbeGvq67kUFDzUx4tCBbRuFtP0fjl1hjmAjAEqRpF6ksZVOc_INk5WhyCeGjm6SwcnH3evO7HYLftDHmA2vyqCmxR1x8byfHnpR-CUq3QKUsq6yWDn8hnKqzo236ggGCty7e8._MotGxSA5zZ9D_q6V5SOQbnj2NHyruje2x0DagXqxSE&dib_tag=se&keywords=meshcore+thinknode+m9&qid=1794184596&sprefix=meshcore+thinknode+m%2Caps%2C240&sr=8-1&linkCode=sl2&tag=metismeshcore-20&linkId=6d8466485970a9ba62f05f86c136b405&language=en_US&gaOptInStatus=true&ref_=as_li_ss_tl&ascsubtag=srctok-5a869ac31c435a37&btn_type=ss&btn_ref=srctok-5a869ac31c435a37"
+    "links": [
+      {
+        "merchant": "amazon",
+        "url": "https://www.amazon.com/Meshnology-ThinkNode-MeshCore-Terminal-ESP32-S3R8/dp/B0HFRYZV9V?crid=3BLB1PWPPSC2I&dib=eyJ2IjoiMSJ9.gCz-1f2Dw8GVhm3Zrqn3aJ9U0_2pbwlnOWppBeDXs0pPKe2Emg28S5DdFJ30eiNuB5vjYJI87Y2LIn6Mx2dsx4T6_XJ09eV8t57RCEMbeGvq67kUFDzUx4tCBbRuFtP0fjl1hjmAjAEqRpF6ksZVOc_INk5WhyCeGjm6SwcnH3evO7HYLftDHmA2vyqCmxR1x8byfHnpR-CUq3QKUsq6yWDn8hnKqzo236ggGCty7e8._MotGxSA5zZ9D_q6V5SOQbnj2NHyruje2x0DagXqxSE&dib_tag=se&keywords=meshcore+thinknode+m9&qid=1794184596&sprefix=meshcore+thinknode+m%2Caps%2C240&sr=8-1&linkCode=sl2&tag=metismeshcore-20&linkId=6d8466485970a9ba62f05f86c136b405&language=en_US&gaOptInStatus=true&ref_=as_li_ss_tl&ascsubtag=srctok-5a869ac31c435a37&btn_type=ss&btn_ref=srctok-5a869ac31c435a37"
+      }
+    ]
   },
   {
     "category": "Nodes",
     "title": "LILYGO T-Deck Plus",
     "blurb": "ESP32-S3 + LoRa 915 MHz development board with display and external antenna — popular MeshCore companion hardware.",
     "image": "thumbs/B0FYC64K4P.jpg",
-    "url": "https://www.amazon.com/LILYGO-ESP32-S3-Computer-2-8-inch-Development/dp/B0FYC64K4P?crid=HRBLECGWRWV6&dib=eyJ2IjoiMSJ9.LA3Z-mMpXHqFvqk7l8Q2MFQJR7DN8FuK2UlB18OcPJ27m20U0QuSlX30L9sNYAf7ghsQDfHCcECEyOSUw2B4FhZCMjRgI7dpoYXTRf4zLLu7OBGp27OJZQ0uQAJsjkWVgi9UsUM0OC0msrOVmPbR8fmfGLNVnl-W_RI3S4qBAjIq03UObyN8lD9TZqJ91y5Bz2_dbe0IlTEc3HMUQT_Mn4WC5zVUzKkcMDCs_3WANUQ.mYgqPBnVCD2lPo-f8zIM55zV0LMbr1P5sTe24QQO6Gc&dib_tag=se&keywords=meshcore&qid=1794184500&sprefix=meshcore%2Caps%2C306&sr=8-11&th=1&linkCode=sl2&tag=metismeshcore-20&linkId=b0184bab60ae088789d22fc08ccb3b5a&language=en_US&gaOptInStatus=true&ref_=as_li_ss_tl&ascsubtag=srctok-7ef9f6f96230f66f&btn_type=ss&btn_ref=srctok-7ef9f6f96230f66f"
+    "links": [
+      {
+        "merchant": "amazon",
+        "url": "https://www.amazon.com/LILYGO-ESP32-S3-Computer-2-8-inch-Development/dp/B0FYC64K4P?crid=HRBLECGWRWV6&dib=eyJ2IjoiMSJ9.LA3Z-mMpXHqFvqk7l8Q2MFQJR7DN8FuK2UlB18OcPJ27m20U0QuSlX30L9sNYAf7ghsQDfHCcECEyOSUw2B4FhZCMjRgI7dpoYXTRf4zLLu7OBGp27OJZQ0uQAJsjkWVgi9UsUM0OC0msrOVmPbR8fmfGLNVnl-W_RI3S4qBAjIq03UObyN8lD9TZqJ91y5Bz2_dbe0IlTEc3HMUQT_Mn4WC5zVUzKkcMDCs_3WANUQ.mYgqPBnVCD2lPo-f8zIM55zV0LMbr1P5sTe24QQO6Gc&dib_tag=se&keywords=meshcore&qid=1794184500&sprefix=meshcore%2Caps%2C306&sr=8-11&th=1&linkCode=sl2&tag=metismeshcore-20&linkId=b0184bab60ae088789d22fc08ccb3b5a&language=en_US&gaOptInStatus=true&ref_=as_li_ss_tl&ascsubtag=srctok-7ef9f6f96230f66f&btn_type=ss&btn_ref=srctok-7ef9f6f96230f66f"
+      }
+    ]
   },
   {
     "category": "Nodes",
     "title": "LoRa GPS node",
     "blurb": "nRF52840 / SX1262 long-range node with GPS — trail and emergency kits that check into HQ.",
     "image": "thumbs/B0H798S8M4.jpg",
-    "url": "https://www.amazon.com/LoRa-Node-Meshtastic-MeshCore-Out/dp/B0H798S8M4?crid=HRBLECGWRWV6&dib=eyJ2IjoiMSJ9.sdK5ACTtmRFb2YbEkjl2dqzAs8e5EOsLjBfZzDDf51X5rChe0V9c7jKJ-Lq7yqmgU3iG0L1o-uWc-wIf-CyRMPlxfvuZ5mTaXp4QXby9Kais8Lv5cdF7nmH-C4mYOHkTFszQ483AHXGLdI571z4IVCWbMR-8rjlDEhSmUc7OqbQ3RthkYRXbNCDqJJ1UVVSUnLtm9v43b1EPaU6UGhQw0dAv3RMW0uucvPZnU3k8H4o.w6YZDTiWfuSH_WiKKpynADVh-B68x2lnkHpSaXWUq1Q&dib_tag=se&keywords=meshcore&qid=1794185053&sprefix=meshcore%2Caps%2C306&sr=8-22&xpid=8bF4WxNvIQR0o&linkCode=sl2&tag=metismeshcore-20&linkId=9d4dd0f1ddef3ea496fb38fd201c53c2&language=en_US&gaOptInStatus=true&ref_=as_li_ss_tl&ascsubtag=srctok-7a94ff12ba57fd56&btn_type=ss&btn_ref=srctok-7a94ff12ba57fd56"
+    "links": [
+      {
+        "merchant": "amazon",
+        "url": "https://www.amazon.com/LoRa-Node-Meshtastic-MeshCore-Out/dp/B0H798S8M4?crid=HRBLECGWRWV6&dib=eyJ2IjoiMSJ9.sdK5ACTtmRFb2YbEkjl2dqzAs8e5EOsLjBfZzDDf51X5rChe0V9c7jKJ-Lq7yqmgU3iG0L1o-uWc-wIf-CyRMPlxfvuZ5mTaXp4QXby9Kais8Lv5cdF7nmH-C4mYOHkTFszQ483AHXGLdI571z4IVCWbMR-8rjlDEhSmUc7OqbQ3RthkYRXbNCDqJJ1UVVSUnLtm9v43b1EPaU6UGhQw0dAv3RMW0uucvPZnU3k8H4o.w6YZDTiWfuSH_WiKKpynADVh-B68x2lnkHpSaXWUq1Q&dib_tag=se&keywords=meshcore&qid=1794185053&sprefix=meshcore%2Caps%2C306&sr=8-22&xpid=8bF4WxNvIQR0o&linkCode=sl2&tag=metismeshcore-20&linkId=9d4dd0f1ddef3ea496fb38fd201c53c2&language=en_US&gaOptInStatus=true&ref_=as_li_ss_tl&ascsubtag=srctok-7a94ff12ba57fd56&btn_type=ss&btn_ref=srctok-7a94ff12ba57fd56"
+      }
+    ]
   },
   {
     "category": "Nodes",
     "title": "GAT562 Mesh Tracker Pro",
     "blurb": "Ready-to-go MeshCore / Meshtastic tracker with GNSS — good for neighborhood check-ins.",
     "image": "thumbs/B0H32MBH6F.jpg",
-    "url": "https://www.amazon.com/dp/B0H32MBH6F?plpRedirect=mhFallback&th=1&linkCode=sl2&tag=metismeshcore-20&linkId=53e19ea4147cfed8e8ba945eb3a0d626&language=en_US&gaOptInStatus=true&ref_=as_li_ss_tl&ascsubtag=srctok-28f2d114b3bbb2f5&btn_type=ss&btn_ref=srctok-28f2d114b3bbb2f5"
+    "links": [
+      {
+        "merchant": "amazon",
+        "url": "https://www.amazon.com/dp/B0H32MBH6F?plpRedirect=mhFallback&th=1&linkCode=sl2&tag=metismeshcore-20&linkId=53e19ea4147cfed8e8ba945eb3a0d626&language=en_US&gaOptInStatus=true&ref_=as_li_ss_tl&ascsubtag=srctok-28f2d114b3bbb2f5&btn_type=ss&btn_ref=srctok-28f2d114b3bbb2f5"
+      }
+    ]
   },
   {
     "category": "Nodes",
     "title": "Wio Tracker L1 Pro (MeshCore)",
     "blurb": "Seeed Studio companion with OLED, GPS, and 2000 mAh battery — pre-flashed MeshCore Bluetooth companion firmware.",
     "image": "thumbs/B0GV77KJ91.jpg",
-    "url": "https://www.seeedstudio.com/Wio-Tracker-L1-Pro-for-Meshcore-p-6717.html?sensecap_affiliate=b7Z7Ozr&referring_service=link",
-    "merchant": "seeed",
-    "coupon": "EJOHP0CC"
+    "links": [
+      {
+        "merchant": "seeed",
+        "url": "https://www.seeedstudio.com/Wio-Tracker-L1-Pro-for-Meshcore-p-6717.html?sensecap_affiliate=b7Z7Ozr&referring_service=link",
+        "coupon": "EJOHP0CC"
+      },
+      {
+        "merchant": "amazon",
+        "url": "https://www.amazon.com/Meshnology-Wio-Tracker-L1-Meshtastic/dp/B0GV77KJ91?crid=1BOPN9PZG4DVN&dib=eyJ2IjoiMSJ9.FT6OJXW24zBURox_bZwolNO5xrqAgdgs_GP_ZNGdJZ1vLImvudwdMQW9wR_3DkNU8ajf_l68p8THz6ofg0QQvczx5pPk6ecgEtMlORia-7oJGivMTIDSJLfhmkBsAYAaIYeDCkj7o1BMP5zY4bvegIi0p9V3KRnAjNtnlGquArP6zTDNSvroomlM1gNszF1kiIPE-rapUcH32XKKJeZ9DDg691SY-NZn5bU4Uy-1aTk.e5OtWEOGkBofvd1e1GDMeps0nI7P5yS-BEKPGyhSq4U&dib_tag=se&keywords=Wio%2BTracker%2BL1%2BPro&qid=1794184394&sprefix=wio%2Btracker%2Bl1%2Bpro%2Caps%2C265&sr=8-4&th=1&linkCode=sl2&tag=metismeshcore-20&linkId=13aaabb3c692ac8d4e1fda1f38e518a1&language=en_US&gaOptInStatus=true&ref_=as_li_ss_tl&ascsubtag=srctok-4b31d326bfe90ff5&btn_type=ss&btn_ref=srctok-4b31d326bfe90ff5"
+      }
+    ]
+  },
+  {
+    "category": "Nodes",
+    "title": "Wio Tracker L2 Pro (Meshtastic)",
+    "blurb": "Standalone ESP32-S3 handheld with 3.2\" touchscreen, GNSS, offline maps, and 3000 mAh battery — Meshtastic out of the box.",
+    "image": "thumbs/wio-l2-pro.jpg",
+    "links": [
+      {
+        "merchant": "seeed",
+        "url": "https://www.seeedstudio.com/Wio-Tracker-L2-Pro-for-Meshtastic-p-0000.html?sensecap_affiliate=b7Z7Ozr&referring_service=link",
+        "coupon": "EJOHP0CC"
+      }
+    ]
   },
   {
     "category": "Antennas",
     "title": "915 MHz whip antenna",
     "blurb": "muzi works 17 cm whip — a tuned antenna usually beats swapping boards.",
     "image": "thumbs/B0D7D6866W.jpg",
-    "url": "https://www.amazon.com/muzi-%E1%B4%A1%E1%B4%8F%CA%80%E1%B4%8B%EA%9C%B1-915Mhz-Antenna-Meshtastic/dp/B0D7D6866W?dib=eyJ2IjoiMSJ9.TSe7M_PzU01n9wjfZQkiqGj3CXbrqqzYVMqhSbiOdCr3xXGGldb2gXyAW2VKdXjXmNMz6INbsUhRxU-Seq3NhoPsBQ1bJpiq2hwFPDJXSTC2JpT9Oe0ztB_G4qTaqeen8dsUW-qYLwbBgHY1W5tgfMJlolsvaS_j0g-C75Z7FAhod9MS-Yfm97l9Ed4LEJuVz-DlDc5c2mMEQ2pTWRTjpVRmgfdZ8opNcSZHheMyoV0.xBRxr6ssT5Sb46HT1OAUSJZEx_YkOfB_NuyCtvvlDqM&dib_tag=se&keywords=meshcore%2B915%2Bantenna&qid=1794185189&sr=8-5&th=1&linkCode=sl2&tag=metismeshcore-20&linkId=9a8321f20047843e9b254ac86f3eed28&language=en_US&gaOptInStatus=true&ref_=as_li_ss_tl&ascsubtag=srctok-0ee387f40cec949b&btn_type=ss&btn_ref=srctok-0ee387f40cec949b"
+    "links": [
+      {
+        "merchant": "amazon",
+        "url": "https://www.amazon.com/muzi-%E1%B4%A1%E1%B4%8F%CA%80%E1%B4%8B%EA%9C%B1-915Mhz-Antenna-Meshtastic/dp/B0D7D6866W?dib=eyJ2IjoiMSJ9.TSe7M_PzU01n9wjfZQkiqGj3CXbrqqzYVMqhSbiOdCr3xXGGldb2gXyAW2VKdXjXmNMz6INbsUhRxU-Seq3NhoPsBQ1bJpiq2hwFPDJXSTC2JpT9Oe0ztB_G4qTaqeen8dsUW-qYLwbBgHY1W5tgfMJlolsvaS_j0g-C75Z7FAhod9MS-Yfm97l9Ed4LEJuVz-DlDc5c2mMEQ2pTWRTjpVRmgfdZ8opNcSZHheMyoV0.xBRxr6ssT5Sb46HT1OAUSJZEx_YkOfB_NuyCtvvlDqM&dib_tag=se&keywords=meshcore%2B915%2Bantenna&qid=1794185189&sr=8-5&th=1&linkCode=sl2&tag=metismeshcore-20&linkId=9a8321f20047843e9b254ac86f3eed28&language=en_US&gaOptInStatus=true&ref_=as_li_ss_tl&ascsubtag=srctok-0ee387f40cec949b&btn_type=ss&btn_ref=srctok-0ee387f40cec949b"
+      }
+    ]
   },
   {
     "category": "Antennas",
     "title": "5.8 dBi fiberglass antenna",
     "blurb": "Outdoor 915 MHz fiberglass with N connector and IPEX adapter — for fixed nodes and repeaters.",
     "image": "thumbs/B0GBSTPHKG.jpg",
-    "url": "https://www.amazon.com/Waterproof-Meshtastic-Repeaters-Fiberglass-Connector/dp/B0GBSTPHKG?dib=eyJ2IjoiMSJ9.TSe7M_PzU01n9wjfZQkiqGj3CXbrqqzYVMqhSbiOdCr3xXGGldb2gXyAW2VKdXjXmNMz6INbsUhRxU-Seq3NhoPsBQ1bJpiq2hwFPDJXSTC2JpT9Oe0ztB_G4qTaqeen8dsUW-qYLwbBgHY1W5tgfMJlolsvaS_j0g-C75Z7FAhod9MS-Yfm97l9Ed4LEJuVz-DlDc5c2mMEQ2pTWRTjpVRmgfdZ8opNcSZHheMyoV0.xBRxr6ssT5Sb46HT1OAUSJZEx_YkOfB_NuyCtvvlDqM&dib_tag=se&keywords=meshcore%2B915%2Bantenna&qid=1794185257&sr=8-4&th=1&linkCode=sl2&tag=metismeshcore-20&linkId=6e13fca53a30ea25bff92f759cccb9a1&language=en_US&gaOptInStatus=true&ref_=as_li_ss_tl&ascsubtag=srctok-53fa5522fbb04932&btn_type=ss&btn_ref=srctok-53fa5522fbb04932"
+    "links": [
+      {
+        "merchant": "amazon",
+        "url": "https://www.amazon.com/Waterproof-Meshtastic-Repeaters-Fiberglass-Connector/dp/B0GBSTPHKG?dib=eyJ2IjoiMSJ9.TSe7M_PzU01n9wjfZQkiqGj3CXbrqqzYVMqhSbiOdCr3xXGGldb2gXyAW2VKdXjXmNMz6INbsUhRxU-Seq3NhoPsBQ1bJpiq2hwFPDJXSTC2JpT9Oe0ztB_G4qTaqeen8dsUW-qYLwbBgHY1W5tgfMJlolsvaS_j0g-C75Z7FAhod9MS-Yfm97l9Ed4LEJuVz-DlDc5c2mMEQ2pTWRTjpVRmgfdZ8opNcSZHheMyoV0.xBRxr6ssT5Sb46HT1OAUSJZEx_YkOfB_NuyCtvvlDqM&dib_tag=se&keywords=meshcore%2B915%2Bantenna&qid=1794185257&sr=8-4&th=1&linkCode=sl2&tag=metismeshcore-20&linkId=6e13fca53a30ea25bff92f759cccb9a1&language=en_US&gaOptInStatus=true&ref_=as_li_ss_tl&ascsubtag=srctok-53fa5522fbb04932&btn_type=ss&btn_ref=srctok-53fa5522fbb04932"
+      }
+    ]
   },
   {
     "category": "Cables",
     "title": "RP-SMA to N coax",
     "blurb": "1 ft RG316 low-loss jumper for antenna installs (RP-SMA male to N bulkhead female).",
     "image": "thumbs/B077BKQ3W5.jpg",
-    "url": "https://www.amazon.com/dp/B077BKQ3W5?linkCode=sl2&tag=metismeshcore-20&linkId=29c048dcd53a13ecbb057f433759e9ac&language=en_US&gaOptInStatus=true&ref_=as_li_ss_tl&ascsubtag=srctok-65c5d5932c7e3c07&btn_type=ss&btn_ref=srctok-65c5d5932c7e3c07"
+    "links": [
+      {
+        "merchant": "amazon",
+        "url": "https://www.amazon.com/dp/B077BKQ3W5?linkCode=sl2&tag=metismeshcore-20&linkId=29c048dcd53a13ecbb057f433759e9ac&language=en_US&gaOptInStatus=true&ref_=as_li_ss_tl&ascsubtag=srctok-65c5d5932c7e3c07&btn_type=ss&btn_ref=srctok-65c5d5932c7e3c07"
+      }
+    ]
   },
   {
     "category": "Repeaters",
     "title": "SenseCAP P1-Pro solar repeater",
     "blurb": "Seeed Studio 5 W solar MeshCore backbone node — outdoor repeater with GPS and enclosure.",
     "image": "thumbs/B0FMDHBWX8.jpg",
-    "url": "https://www.seeedstudio.com/SenseCAP-Solar-Node-P1-Pro-for-Meshcore-p-6741.html?sensecap_affiliate=b7Z7Ozr&referring_service=link",
-    "merchant": "seeed",
-    "coupon": "2JE163H0"
+    "links": [
+      {
+        "merchant": "seeed",
+        "url": "https://www.seeedstudio.com/SenseCAP-Solar-Node-P1-Pro-for-Meshcore-p-6741.html?sensecap_affiliate=b7Z7Ozr&referring_service=link",
+        "coupon": "2JE163H0"
+      },
+      {
+        "merchant": "amazon",
+        "url": "https://www.amazon.com/SenseCAP-Repeater-MeshCore-batteries-enclosure/dp/B0FMDHBWX8?crid=T8V3D899KO5N&dib=eyJ2IjoiMSJ9.YlzPovOU9_f-BzBUIAQ4w7alQof-Qj3WLis94Nu45K29CW_o1u30w3BqZjQQBu_q_N0h-TPNEtEYT7ZUH6BemWtgh9gZgWbYVK8nOt0UDxRtiOFwILsCwX42dXQAMAd-UjL2UjfsxXUjryJ-S9KRqOY8_Fm6D8BT8ERGdrmcRZ1dEjMs0nT4JobojscAU2O21gJ1i-4E9KlOSvkwcdRaokl-YgIC7oMLQhBpX7AgvR0.XJ6fMIokbH0QvFIsvY7N6A6KsFV1BuJFucYXB6LIaNc&dib_tag=se&keywords=MeshCore&qid=1794183885&sprefix=meshcore%2B%2Caps%2C307&sr=8-3&th=1&gaOptInStatus=true&ascsubtag=srctok-26ed46dbcde0267d&btn_type=ss&btn_ref=srctok-26ed46dbcde0267d&linkCode=ll2&tag=metismeshcore-20&linkId=9b571293e8c39ac29ab296453ab03420&language=en_US&gaOptInStatus=true&ref_=as_li_ss_tl"
+      }
+    ]
   }
 ]

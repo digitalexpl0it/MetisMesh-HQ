@@ -25,7 +25,7 @@ Brand marks live under `assets/`: `emerghq_logo.png`, `mmhq_badge.png`, `app_ico
 ## What it does
 
 - **Radio pool** — connect MeshCore companions over Bluetooth, USB serial, or TCP (Wi-Fi / Ethernet, default port 5000); multiple radios with a primary that owns bot and enrollment traffic
-- **Enrollment** — approve join requests, hand out private channel secrets, run the local bot on METIS-INFO (`#weather`, `#quake`, `#amber`, and related commands)
+- **Enrollment** — approve join requests, hand out private channel secrets, run the local bot on METIS-INFO (`!weather`, `!quake`, `!amber`, and related commands)
 - **Messages** — Channels / DMs / Contacts rail (Favorites / Saved / Discovered); public and private channels with session speakers; direct threads when a public key is known; unread and @mention tracking; **Follow newest**; local history delete / clear; optional per-channel look; block senders; share via `meshcore://contact/add` and `meshcore://channel/add` chips; channel TX bubbles show **Heard** repeater pills when flood echoes resolve
 - **Inbox** — pending signups and held community alerts (weather / Amber / civil) for operator confirm or auto-relay
 - **Roster** — everyone heard on the mesh (enrolled or not); contact QR; clear NEW / prune heard-only
@@ -107,11 +107,11 @@ Critical UI libraries are probed before the window opens. On Debian/Ubuntu the a
 Releases are created only from version tags (not every `main` push):
 
 ```bash
-git tag v0.1.28
-git push origin v0.1.28
+git tag v0.1.29
+git push origin v0.1.29
 ```
 
-That attaches the Windows `.zip`, Ubuntu `.deb`, Linux `.tar.gz`, and Linux `.AppImage`. If the tag already exists on an older commit, move it after the release commit (`git tag -f v0.1.28` then `git push --force origin v0.1.28`) or use the next patch version.
+That attaches the Windows `.zip`, Ubuntu `.deb`, Linux `.tar.gz`, and Linux `.AppImage`. If the tag already exists on an older commit, move it after the release commit (`git tag -f v0.1.29` then `git push --force origin v0.1.29`) or use the next patch version.
 
 ## Requirements (build from source)
 

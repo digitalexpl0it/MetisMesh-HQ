@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.29 — 2026-11-24
+
+Package version `0.1.29` (Cargo / About). Windows Details may show `0.1.29.0`.
+
+### Messaging, Contacts & Radio
+
+- **Contacts & public keys**: Add **Add public key…** to right-click menus and an inline public-key form in **Details** for name-only contacts; **Add contact** now accepts raw 64-hex, `meshcore://contact/add?…`, or `<key:type:name>` and syncs immediately to the companion.
+- **Bare public keys in chat**: Detect standalone 64-character hex public keys (e.g. T-Deck shares without `meshcore://`) and show an **Add to Contacts** + **Copy** chip.
+- **Direct messages**: Sync manually added/upgraded contacts onto the companion radio before sending DMs; resolve incoming DMs from companion contacts not yet in HQ's `nodes` table; count unread messages on brand-new DM threads immediately.
+- **Channels & hash channels**: Scan all companion channel slots (up to 40), reconcile deleted channels from the companion, blank duplicate same-name slots, add a **Sync from radio** button, and preserve `#` in hash-channel names with canonical `SHA-256("#name")[..16]` secret derivation.
+- **Bot & webhook commands**: Switch default bot command prefix to `!` (`!signup`, `!status`, `!weather`, `!quake`, `!amber`, `!alert`, `!help`) and never match `#` or `@`; remove the pre-populated default webhook connector and update webhook placeholders to `!`.
+- **Roster & distance**: Add a **Distance** column to Roster and distance-from-HQ labels on Contacts (using HQ site pin or companion GPS, following °F/mi or °C/km); surface starred DM favorites under Roster → Contacts.
+
 ## 0.1.28 — 2026-11-20
 
 Package version `0.1.28` (Cargo / About). Windows Details may show `0.1.28.0`.

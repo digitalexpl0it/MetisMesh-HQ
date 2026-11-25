@@ -16,7 +16,7 @@ Keep the mesh usable for the whole community during an outage.
 ## Be kind to the airtime
 
 - Wait before re-sending; duplicates clog the mesh.
-- Prefer HQ bot commands (`#weather`, and similar) only when enrolled and needed.
+- Prefer HQ bot commands (`!weather`, and similar) only when enrolled and needed.
 - Leave emergency traffic room — yield if someone is coordinating aid.
 
 ## HQ operators

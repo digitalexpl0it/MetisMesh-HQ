@@ -139,6 +139,34 @@ pub fn parse_contact_bracket_share(raw: &str) -> Option<(String, String, u8)> {
     Some((name, pubkey, ty))
 }
 
+/// Parse user-pasted contact key material:
+/// - `meshcore://contact/add?name=…&public_key=…`
+/// - `<64hex:type:name>`
+/// - bare 64-character hex public key (optional `0x` prefix)
+///
+/// Returns `(optional_name, normalized_64_char_lowercase_hex)`.
+pub fn parse_contact_input(raw: &str) -> Option<(Option<String>, String)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some((name, pubkey, _)) = parse_contact_add_uri(trimmed) {
+        return Some((Some(name), pubkey));
+    }
+    if let Some((name, pubkey, _)) = parse_contact_bracket_share(trimmed) {
+        return Some((Some(name), pubkey));
+    }
+    let hex_only = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed)
+        .trim();
+    if hex_only.len() == 64 && hex_only.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Some((None, hex_only.to_ascii_lowercase()));
+    }
+    None
+}
+
 fn urldecode_component(raw: &str) -> String {
     let bytes = raw.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -441,5 +469,27 @@ mod tests {
         );
         let svg = qr_svg_for_test(&uri).expect("svg");
         assert!(svg.contains("<svg"));
+    }
+
+    #[test]
+    fn parse_contact_input_handles_all_formats() {
+        let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(parse_contact_input(key), Some((None, key.into())));
+        assert_eq!(
+            parse_contact_input(&format!("0x{}", key.to_ascii_uppercase())),
+            Some((None, key.into()))
+        );
+        let uri = contact_add_uri("TDeck", key, 1);
+        assert_eq!(
+            parse_contact_input(&uri),
+            Some((Some("TDeck".into()), key.into()))
+        );
+        let bracket = format!("<{key}:1:TDeck>");
+        assert_eq!(
+            parse_contact_input(&bracket),
+            Some((Some("TDeck".into()), key.into()))
+        );
+        assert!(parse_contact_input("not-a-key").is_none());
+        assert!(parse_contact_input(&format!("{key}aa")).is_none());
     }
 }

@@ -1498,8 +1498,10 @@ pub fn format_channel_share(name: &str, role: &str) -> String {
         ));
     }
     if role.eq_ignore_ascii_case("hash") {
-        let secret = crate::mesh_regions::hash_channel_secret(name);
-        return clamp_mesh_text(crate::contact_qr::channel_add_uri(name, &secret));
+        let share_name = crate::mesh_regions::normalize_hash_channel_name(name)
+            .unwrap_or_else(|_| name.to_string());
+        let secret = crate::mesh_regions::hash_channel_secret(&share_name);
+        return clamp_mesh_text(crate::contact_qr::channel_add_uri(&share_name, &secret));
     }
     clamp_mesh_text(format!("Channel: {name}"))
 }
@@ -2112,9 +2114,9 @@ mod compose_share_tests {
 
     #[test]
     fn channel_share_hash_is_add_uri() {
-        let text = format_channel_share("highdesert", "hash");
+        let text = format_channel_share("#highdesert", "hash");
         assert!(text.starts_with("meshcore://channel/add?"));
-        assert!(text.contains("name=highdesert"));
+        assert!(text.contains("name=%23highdesert"));
         assert!(text.contains("secret="));
     }
 

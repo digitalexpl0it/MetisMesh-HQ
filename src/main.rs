@@ -18,6 +18,7 @@ mod contact_qr;
 mod db;
 mod deps;
 mod firmware;
+mod geo;
 mod guides;
 mod live_stream;
 mod log_file;

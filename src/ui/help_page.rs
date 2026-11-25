@@ -258,11 +258,11 @@ pub fn HelpPage() -> Element {
                             }
                             li {
                                 "Send "
-                                code { "#signup" }
+                                code { "!signup" }
                                 " or "
-                                code { "#signup YourName" }
+                                code { "!signup YourName" }
                                 " (name optional, short). The "
-                                code { "#" }
+                                code { "!" }
                                 " marks a command — plain chat is ignored."
                             }
                             li { "Wait for an operator to Approve you in HQ Inbox. You should get a reply that you are pending, then two approval messages." }
@@ -277,9 +277,9 @@ pub fn HelpPage() -> Element {
                             }
                             li {
                                 "Send "
-                                code { "#status" }
+                                code { "!status" }
                                 " anytime to check enrollment. Bot commands like "
-                                code { "#weather" }
+                                code { "!weather" }
                                 " work only after you are enrolled, on "
                                 code { "{info_name}" }
                                 " — not as a signup DM."
@@ -330,7 +330,7 @@ pub fn HelpPage() -> Element {
                             "Enrollment desk"
                         }
                         p { "Heard nodes appear on Roster automatically. They stay “heard” until they DM "
-                            code { "#signup" }
+                            code { "!signup" }
                             "."
                         }
                         ul { class: "help-bullets",
@@ -345,7 +345,7 @@ pub fn HelpPage() -> Element {
                             li {
                                 strong { "Deny" }
                                 " — no secret sent. They may "
-                                code { "#signup" }
+                                code { "!signup" }
                                 " again later (back to pending)."
                             }
                             li {
@@ -371,7 +371,7 @@ pub fn HelpPage() -> Element {
                             li {
                                 code { "{info_name}" }
                                 " — bot home: weather, quake, amber/alerts, "
-                                code { "#help" }
+                                code { "!help" }
                                 ". Scheduled and operator-confirmed relays post here. Rename under Settings → Private channels."
                             }
                             li {
@@ -385,7 +385,7 @@ pub fn HelpPage() -> Element {
                             }
                         }
                         p { "A "
-                            code { "#" }
+                            code { "!" }
                             " name on the mesh is a bot command, not a hash-channel id."
                         }
                     }
@@ -429,7 +429,7 @@ pub fn HelpPage() -> Element {
                             li {
                                 strong { "Spellcheck" }
                                 " — OS dictionary on channel, DM, and Broadcast compose (default on; compose is a textarea so underlines show). Linux WebKit needs hunspell dictionaries installed (e.g. hunspell-en-us). Right-click a flagged word for suggestions. Turn off under Settings → Preferences → Compose. Callsigns, "
-                                code { "#weather" }
+                                code { "!weather" }
                                 ", and hex may false-positive."
                             }
                         }
@@ -550,13 +550,13 @@ pub fn HelpPage() -> Element {
                             "Enrolled nodes use bot commands on "
                             code { "{info_name}" }
                             " ("
-                            code { "#weather" }
+                            code { "!weather" }
                             ", "
-                            code { "#quake" }
+                            code { "!quake" }
                             ", "
-                            code { "#amber" }
+                            code { "!amber" }
                             ", "
-                            code { "#alert" }
+                            code { "!alert" }
                             "). Settings → Services configures ZIP schedules, NWS / Amber polls, MQTT or Ecowitt stations, and auto-relay vs Inbox confirm. For Home Assistant / scripts, see "
                             strong { "Local API" }
                             " below."
@@ -658,7 +658,7 @@ pub fn HelpPage() -> Element {
                             "Prefer a loopback or LAN URL you control. Rate-limit posts. Mesh text is untrusted — never pass it to a shell."
                         }
                         pre { class: "help-pre",
-                            {"# Example event (abridged)\n{\n  \"type\": \"message.received\",\n  \"api_version\": 1,\n  \"kind\": \"channel\",\n  \"channel\": \"METIS-INFO\",\n  \"from\": { \"enrollment\": \"enrolled\", \"name\": \"Ada\" },\n  \"text\": \"#gate open\",\n  \"body\": \"#gate open\",\n  \"rule\": { \"id\": \"hash-cmds\" }\n}\n\n# Verify HMAC (Python sketch)\n# import hmac, hashlib\n# sig = request.headers[\"X-Metis-Signature\"].removeprefix(\"sha256=\")\n# expect = hmac.new(secret, body, hashlib.sha256).hexdigest()"}
+                            {"# Example event (abridged)\n{\n  \"type\": \"message.received\",\n  \"api_version\": 1,\n  \"kind\": \"channel\",\n  \"channel\": \"METIS-INFO\",\n  \"from\": { \"enrollment\": \"enrolled\", \"name\": \"Ada\" },\n  \"text\": \"!gate open\",\n  \"body\": \"!gate open\",\n  \"rule\": { \"id\": \"bot-cmds\" }\n}\n\n# Verify HMAC (Python sketch)\n# import hmac, hashlib\n# sig = request.headers[\"X-Metis-Signature\"].removeprefix(\"sha256=\")\n# expect = hmac.new(secret, body, hashlib.sha256).hexdigest()"}
                         }
                         h4 { class: "help-subtitle", "Home Assistant (MQTT discovery)" }
                         p {

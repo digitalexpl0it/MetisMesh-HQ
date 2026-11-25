@@ -49,22 +49,28 @@ pub fn region_scope_key(name: &str) -> [u8; 16] {
     key
 }
 
-/// Normalize a hash-channel name for join: trim, strip one leading `#`.
+/// Normalize a MeshCore hash-channel name: keep a single leading `#` (add one
+/// if omitted) so the channel name stored on the companion and in HQ matches
+/// MeshCore's `#channel` format.
 pub fn normalize_hash_channel_name(raw: &str) -> Result<String, String> {
-    let name = raw.trim().strip_prefix('#').unwrap_or(raw.trim()).trim();
-    if name.is_empty() {
+    let bare = raw.trim().trim_start_matches('#').trim();
+    if bare.is_empty() {
         return Err("Hash channel name is required.".into());
     }
-    if name.len() > 16 {
-        return Err("Hash channel name is limited to 16 characters.".into());
+    let full = format!("#{bare}");
+    if full.len() > 31 {
+        return Err("Hash channel name is limited to 31 bytes (including #).".into());
     }
-    Ok(name.to_string())
+    Ok(full)
 }
 
-/// MeshCore hash-channel secret: first 16 bytes of SHA-256(UTF-8 name).
+/// MeshCore hash-channel secret: first 16 bytes of SHA-256(`#` + name).
+/// Accepts either `#channel` or `channel` and always hashes with a single `#`.
 pub fn hash_channel_secret(name: &str) -> [u8; 16] {
+    let bare = name.trim().trim_start_matches('#').trim();
     let mut hasher = Sha256::new();
-    hasher.update(name.as_bytes());
+    hasher.update(b"#");
+    hasher.update(bare.as_bytes());
     let digest = hasher.finalize();
     let mut key = [0u8; 16];
     key.copy_from_slice(&digest[..16]);
@@ -196,12 +202,19 @@ mod tests {
     #[test]
     fn hash_channel_secret_is_stable() {
         let a = hash_channel_secret("highdesert");
-        let b = hash_channel_secret("highdesert");
+        let b = hash_channel_secret("#highdesert");
         assert_eq!(a, b);
-        assert_ne!(a, hash_channel_secret("other"));
+        assert_ne!(a, hash_channel_secret("#other"));
+        assert_eq!(normalize_hash_channel_name("#Ops").unwrap(), "#Ops");
+        assert_eq!(normalize_hash_channel_name("Ops").unwrap(), "#Ops");
+        // Verified MeshCore reference vectors: SHA-256("#name")[..16]
         assert_eq!(
-            normalize_hash_channel_name("#Ops").unwrap(),
-            "Ops"
+            hex::encode(hash_channel_secret("#test")),
+            "9cd8fcf22a47333b591d96a2b848b73f"
+        );
+        assert_eq!(
+            hex::encode(hash_channel_secret("#bot")),
+            "eb50a1bcb3e4e5d7bf69a57c9dada211"
         );
     }
 

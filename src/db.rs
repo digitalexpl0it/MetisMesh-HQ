@@ -2490,19 +2490,53 @@ impl Db {
         };
         self.vacate_channel_slot(slot, name)?;
         let now = unix_now();
-        self.lock().execute(
-            "INSERT INTO channels (name, slot, secret_account, visibility, role, active, created_at)
-             VALUES (?1, ?2, ?1, ?3, ?4, 1, ?5)
-             ON CONFLICT(name) DO UPDATE SET
-               slot = excluded.slot,
-               visibility = excluded.visibility,
-               role = CASE
-                 WHEN channels.role = 'emergency' THEN channels.role
-                 ELSE excluded.role
-               END,
-               active = 1",
-            params![name, slot, visibility, role, now],
-        )?;
+        // Prevent case-variant duplicate rows (e.g. "Ops" vs "ops"): if a row
+        // already exists matching `name` case-insensitively, update it in place.
+        let existing_ci: Option<String> = self
+            .lock()
+            .query_row(
+                "SELECT name FROM channels WHERE name = ?1 COLLATE NOCASE LIMIT 1",
+                params![name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(old_name) = existing_ci {
+            if old_name != name {
+                self.lock().execute(
+                    "UPDATE channels SET
+                       name = ?1,
+                       secret_account = ?1,
+                       slot = ?2,
+                       visibility = ?3,
+                       role = CASE
+                         WHEN role = 'emergency' THEN role
+                         ELSE ?4
+                       END,
+                       active = 1
+                     WHERE name = ?5",
+                    params![name, slot, visibility, role, old_name],
+                )?;
+            } else {
+                self.lock().execute(
+                    "UPDATE channels SET
+                       slot = ?2,
+                       visibility = ?3,
+                       role = CASE
+                         WHEN role = 'emergency' THEN role
+                         ELSE ?4
+                       END,
+                       active = 1
+                     WHERE name = ?1",
+                    params![name, slot, visibility, role],
+                )?;
+            }
+        } else {
+            self.lock().execute(
+                "INSERT INTO channels (name, slot, secret_account, visibility, role, active, created_at)
+                 VALUES (?1, ?2, ?1, ?3, ?4, 1, ?5)",
+                params![name, slot, visibility, role, now],
+            )?;
+        }
         // Seed last-read so future RX/bot activity can badge without a prior open.
         if self.channel_last_read(slot)?.is_none() {
             self.mark_channel_caught_up(slot)?;
@@ -2777,22 +2811,54 @@ impl Db {
             self.ensure_channel_row(&net, slot, "private", "net")?;
             return Ok(true);
         }
+        let is_hash = name.starts_with('#')
+            && *secret == crate::mesh_regions::hash_channel_secret(name);
         let visibility = if name.eq_ignore_ascii_case("Public") || secret.iter().all(|b| *b == 0) {
             "public"
         } else {
             "private"
         };
-        if visibility == "private" && secrets.load(name).map_err(Error::Msg)?.is_none() {
-            let kind = secrets.store(name, secret).map_err(Error::Msg)?;
-            self.set_setting("secret_store", kind.as_str())?;
+        if visibility == "private" {
+            let existing = secrets.load(name).map_err(Error::Msg)?;
+            if existing.as_ref() != Some(secret) {
+                let kind = secrets.store(name, secret).map_err(Error::Msg)?;
+                self.set_setting("secret_store", kind.as_str())?;
+            }
         }
-        let role = if name.eq_ignore_ascii_case("Public") {
-            "general"
-        } else {
-            "general"
-        };
+        let role = if is_hash { "hash" } else { "general" };
         self.ensure_channel_row(name, slot, visibility, role)?;
         Ok(true)
+    }
+
+    /// Reconcile HQ's active channel list against the full set of channel names
+    /// currently present on the companion radio. Any non-reserved channel that
+    /// is active in HQ but absent from the companion is deactivated (`active = 0`)
+    /// so HQ mirrors what is actually on the companion without deleting message
+    /// history.
+    pub fn reconcile_channels_from_radio(
+        &self,
+        radio_names_lower: &std::collections::HashSet<String>,
+    ) -> Result<usize> {
+        let info = self.info_channel_name()?;
+        let net = self.net_channel_name()?;
+        let active = self.list_channels()?;
+        let mut deactivated = 0usize;
+        for ch in active {
+            if ch.name.eq_ignore_ascii_case("Public")
+                || ch.name.eq_ignore_ascii_case(&info)
+                || ch.name.eq_ignore_ascii_case(&net)
+            {
+                continue;
+            }
+            if !radio_names_lower.contains(&ch.name.to_ascii_lowercase()) {
+                self.lock().execute(
+                    "UPDATE channels SET active = 0 WHERE name = ?1",
+                    params![ch.name],
+                )?;
+                deactivated += 1;
+            }
+        }
+        Ok(deactivated)
     }
 
     /// Newest `limit` channel messages, ordered oldest → newest for the chat pane.
@@ -3491,41 +3557,25 @@ impl Db {
                     (SELECT m2.display_text FROM messages m2
                      WHERE m2.kind = 'direct' AND m2.sender_pubkey = m.sender_pubkey
                      ORDER BY m2.received_at DESC, m2.id DESC LIMIT 1),
-                    CASE
-                      WHEN EXISTS (
-                        SELECT 1 FROM settings s
-                        WHERE s.key = 'dm_last_read_' || lower(m.sender_pubkey)
-                      ) THEN (
-                        SELECT COUNT(*) FROM messages m3
-                        WHERE m3.kind = 'direct'
-                          AND m3.sender_pubkey = m.sender_pubkey
-                          AND m3.direction = 'rx'
-                          AND m3.id > COALESCE(
-                            (SELECT CAST(s.value AS INTEGER) FROM settings s
-                             WHERE s.key = 'dm_last_read_' || lower(m.sender_pubkey)),
-                            0
-                          )
-                      )
-                      ELSE 0
-                    END,
-                    CASE
-                      WHEN EXISTS (
-                        SELECT 1 FROM settings s
-                        WHERE s.key = 'dm_last_read_' || lower(m.sender_pubkey)
-                      ) THEN (
-                        SELECT COUNT(*) FROM messages m3
-                        WHERE m3.kind = 'direct'
-                          AND m3.sender_pubkey = m.sender_pubkey
-                          AND m3.direction = 'rx'
-                          AND COALESCE(m3.mentions_hq, 0) = 1
-                          AND m3.id > COALESCE(
-                            (SELECT CAST(s.value AS INTEGER) FROM settings s
-                             WHERE s.key = 'dm_last_read_' || lower(m.sender_pubkey)),
-                            0
-                          )
-                      )
-                      ELSE 0
-                    END
+                    (SELECT COUNT(*) FROM messages m3
+                     WHERE m3.kind = 'direct'
+                       AND m3.sender_pubkey = m.sender_pubkey
+                       AND m3.direction = 'rx'
+                       AND m3.id > COALESCE(
+                         (SELECT CAST(s.value AS INTEGER) FROM settings s
+                          WHERE s.key = 'dm_last_read_' || lower(m.sender_pubkey)),
+                         0
+                       )),
+                    (SELECT COUNT(*) FROM messages m3
+                     WHERE m3.kind = 'direct'
+                       AND m3.sender_pubkey = m.sender_pubkey
+                       AND m3.direction = 'rx'
+                       AND COALESCE(m3.mentions_hq, 0) = 1
+                       AND m3.id > COALESCE(
+                         (SELECT CAST(s.value AS INTEGER) FROM settings s
+                          WHERE s.key = 'dm_last_read_' || lower(m.sender_pubkey)),
+                         0
+                       ))
              FROM messages m
              LEFT JOIN nodes n ON n.pubkey = m.sender_pubkey
              WHERE m.kind = 'direct'
@@ -3973,7 +4023,129 @@ impl Db {
              ON CONFLICT(pubkey) DO UPDATE SET label = excluded.label",
             params![key, resolved, unix_now()],
         )?;
+        if is_hex {
+            self.ensure_contact_node(&key, &resolved)?;
+        }
         Ok(())
+    }
+
+    /// Ensure a minimal `nodes` row exists for a manually-added 64-hex contact
+    /// so Details, DM threads, and companion contact sync work immediately even
+    /// before an advert is heard.
+    pub fn ensure_contact_node(&self, pubkey: &str, name: &str) -> Result<()> {
+        let key = pubkey.trim().to_ascii_lowercase();
+        if key.len() != 64 || !key.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(Error::Msg("Enter a full 64-character hex public key.".into()));
+        }
+        let prefix = &key[..12];
+        let clean_name = name.trim();
+        let conn = self.lock();
+        conn.execute(
+            "INSERT OR IGNORE INTO nodes
+               (pubkey, name, contact_type, flags, path_len, hop_bytes, enrollment, prefix, raw_json)
+             VALUES (?1, ?2, 1, 0, -1, x'', 'heard', ?3, '{}')",
+            params![key, clean_name, prefix],
+        )?;
+        if !clean_name.is_empty() {
+            conn.execute(
+                "UPDATE nodes SET name = ?2 WHERE pubkey = ?1 AND TRIM(name) = ''",
+                params![key, clean_name],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Attach a real 64-character hex public key to an existing `name:<label>`
+    /// contact, preserving its label, Favorites pin, and custom sidebar section.
+    /// Accepts raw 64-hex, `meshcore://contact/add?…`, or `<64hex:type:name>`.
+    /// Returns `(normalized_pubkey, resolved_label)`.
+    pub fn upgrade_name_contact(
+        &self,
+        name_key: &str,
+        raw_key_or_uri: &str,
+        label_override: Option<&str>,
+    ) -> Result<(String, String)> {
+        let old_key = name_key.trim().to_ascii_lowercase();
+        let (parsed_name, key) = crate::contact_qr::parse_contact_input(raw_key_or_uri)
+            .ok_or_else(|| {
+                Error::Msg(
+                    "Enter a 64-character hex public key, meshcore:// link, or <key:type:name>."
+                        .into(),
+                )
+            })?;
+        let existing_label: Option<String> = self
+            .lock()
+            .query_row(
+                "SELECT label FROM pinned_contacts WHERE pubkey = ?1",
+                params![old_key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let label = label_override
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| existing_label.filter(|s| !s.trim().is_empty()))
+            .or(parsed_name)
+            .unwrap_or_else(|| {
+                old_key
+                    .trim_start_matches(NAME_BLOCK_PREFIX)
+                    .to_string()
+            });
+
+        self.pin_contact(&key, &label)?;
+
+        if old_key != key {
+            let conn = self.lock();
+            // Migrate favorite status if the name-only contact was starred.
+            let was_fav: bool = conn
+                .query_row(
+                    "SELECT 1 FROM messages_favorites WHERE item_kind = 'dm' AND item_key = ?1",
+                    params![old_key],
+                    |_| Ok(true),
+                )
+                .optional()?
+                .unwrap_or(false);
+            if was_fav {
+                conn.execute(
+                    "INSERT OR IGNORE INTO messages_favorites (item_kind, item_key, added_at)
+                     VALUES ('dm', ?1, ?2)",
+                    params![key, unix_now()],
+                )?;
+                conn.execute(
+                    "DELETE FROM messages_favorites WHERE item_kind = 'dm' AND item_key = ?1",
+                    params![old_key],
+                )?;
+            }
+            // Migrate any custom sidebar section assignment.
+            let sec: Option<(String, i64, i64)> = conn
+                .query_row(
+                    "SELECT item_kind, section_id, sort_order FROM messages_section_members
+                     WHERE item_key = ?1 AND item_kind IN ('dm', 'contact') LIMIT 1",
+                    params![old_key],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            if let Some((item_kind, section_id, sort_order)) = sec {
+                conn.execute(
+                    "INSERT OR REPLACE INTO messages_section_members (item_kind, item_key, section_id, sort_order)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![item_kind, key, section_id, sort_order],
+                )?;
+                conn.execute(
+                    "DELETE FROM messages_section_members
+                     WHERE item_key = ?1 AND item_kind IN ('dm', 'contact')",
+                    params![old_key],
+                )?;
+            }
+            // Remove the old name-only pin.
+            conn.execute(
+                "DELETE FROM pinned_contacts WHERE pubkey = ?1",
+                params![old_key],
+            )?;
+        }
+
+        Ok((key, label))
     }
 
     pub fn unpin_contact(&self, pubkey: &str) -> Result<()> {
@@ -7781,11 +7953,11 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        // No cursor yet → unread stays 0 (same as channels: first open marks caught up).
+        // Brand-new DM thread with no read cursor yet → all incoming DMs are unread.
         let threads = db.list_dm_threads().unwrap();
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].message_count, 2);
-        assert_eq!(threads[0].unread_count, 0);
+        assert_eq!(threads[0].unread_count, 2);
         db.set_dm_last_read("aa11", id1).unwrap();
         let threads = db.list_dm_threads().unwrap();
         assert_eq!(threads[0].unread_count, 1);
@@ -8495,6 +8667,56 @@ mod tests {
             .is_none());
         let job = db.enqueue_broadcast(gid, "All clear").unwrap();
         assert!(job > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn upgrade_name_contact_preserves_favorite_and_creates_node() {
+        let (db, _, dir) = test_db();
+        let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        db.pin_contact("name:tdeck", "TDeck").unwrap();
+        db.set_messages_favorite("dm", "name:tdeck", true).unwrap();
+
+        let (upgraded, label) = db.upgrade_name_contact("name:tdeck", key, None).unwrap();
+        assert_eq!(upgraded, key);
+        assert_eq!(label, "TDeck");
+
+        // Old name: pin removed, real hex pin + node row created, favorite preserved.
+        let pins = db.list_pinned_contacts().unwrap();
+        assert!(!pins.iter().any(|p| p.pubkey == "name:tdeck"));
+        assert!(pins.iter().any(|p| p.pubkey == key && p.label == "TDeck"));
+        let node = db.get_node(key).unwrap().expect("node created");
+        assert_eq!(node.name, "TDeck");
+        let favs = db.list_messages_favorites().unwrap();
+        assert!(favs.iter().any(|(k, v)| k == "dm" && v == key));
+        assert!(!favs.iter().any(|(k, v)| k == "dm" && v == "name:tdeck"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn channels_dedupe_case_insensitive_and_reconcile_from_radio() {
+        let (db, secrets, dir) = test_db();
+        let row = db.join_hash_channel("#ops", &secrets).unwrap();
+        assert_eq!(row.name, "#ops");
+        assert_eq!(row.role, "hash");
+
+        // Same name with different casing updates in place instead of duplicating.
+        db.ensure_channel_row("#Ops", row.slot, "private", "hash")
+            .unwrap();
+        let active = db.list_channels().unwrap();
+        let ops_count = active
+            .iter()
+            .filter(|c| c.name.eq_ignore_ascii_case("#ops"))
+            .count();
+        assert_eq!(ops_count, 1);
+
+        // Reconcile when companion no longer has #Ops deactivates it, keeping reserved.
+        let seen = std::collections::HashSet::from(["public".to_string()]);
+        let removed = db.reconcile_channels_from_radio(&seen).unwrap();
+        assert_eq!(removed, 1);
+        let after = db.list_channels().unwrap();
+        assert!(!after.iter().any(|c| c.name.eq_ignore_ascii_case("#ops")));
+        assert!(after.iter().any(|c| c.name == CHANNEL_NAME));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

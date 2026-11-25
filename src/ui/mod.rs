@@ -2366,6 +2366,7 @@ fn DashboardPage(on_navigate: EventHandler<Page>) -> Element {
                                                 text: message.text.clone(),
                                                 outgoing: message.direction == "tx",
                                                 sender_pubkey: message.sender_pubkey.clone(),
+                                                sender_name: Some(message.sender_name.clone()),
                                             }
                                         }
                                     }
@@ -2598,6 +2599,16 @@ enum RosterTab {
 /// How many rows to paint before "Load more" on Roster / Contacts tabs.
 const ROSTER_LIST_PAGE: usize = 50;
 
+/// Distance cell text: `—` when HQ or the node has no usable fix.
+fn distance_text(
+    anchor: Option<(f64, f64)>,
+    lat: Option<f64>,
+    lon: Option<f64>,
+    imperial: bool,
+) -> String {
+    crate::geo::distance_label(anchor, lat, lon, imperial).unwrap_or_else(|| "—".into())
+}
+
 #[allow(non_snake_case)]
 fn RosterPage() -> Element {
     // Own refresh — do not rely on App shell tick (R2).
@@ -2614,7 +2625,32 @@ fn RosterPage() -> Element {
     }
     let _ = refresh();
     let nodes = state().db.list_nodes().unwrap_or_default();
-    let pinned_contacts = state().db.list_pinned_contacts().unwrap_or_default();
+    let mut pinned_contacts = state().db.list_pinned_contacts().unwrap_or_default();
+    // Also surface contacts starred in DMs/Messages even if they weren't
+    // explicitly pinned yet.
+    if let Ok(favs) = state().db.list_messages_favorites() {
+        for (kind, key) in favs {
+            if kind == "dm"
+                && !pinned_contacts
+                    .iter()
+                    .any(|p| p.pubkey.eq_ignore_ascii_case(&key))
+            {
+                let label = state()
+                    .db
+                    .get_node(&key)
+                    .ok()
+                    .flatten()
+                    .map(|n| node_title(&n.name, &n.requested_name))
+                    .unwrap_or_else(|| key.chars().take(12).collect());
+                pinned_contacts.push(crate::db::PinnedContactRow {
+                    pubkey: key,
+                    label,
+                    notes: String::new(),
+                    added_at: 0,
+                });
+            }
+        }
+    }
     let private_channels: Vec<_> = state()
         .db
         .list_channels()
@@ -2701,6 +2737,9 @@ fn RosterPage() -> Element {
         .db
         .claimed_pubkey_set()
         .unwrap_or_default();
+    // HQ anchor + unit once per render; distances are computed from stored node fixes.
+    let roster_anchor = crate::geo::hq_anchor(&state().db);
+    let roster_imperial = crate::services::weather_unit_f(&state().db);
 
     let details_key = details_pubkey();
     let details_node = details_key
@@ -3084,8 +3123,23 @@ fn RosterPage() -> Element {
                                         };
                                         let added = format_time(Some(row.added_at));
                                         let zebra = if row_i % 2 == 1 { " row-zebra" } else { "" };
-                                        let in_roster = has_key
-                                            && state().db.get_node(&pubkey).ok().flatten().is_some();
+                                        let contact_node = if has_key {
+                                            state().db.get_node(&pubkey).ok().flatten()
+                                        } else {
+                                            None
+                                        };
+                                        let in_roster = contact_node.is_some();
+                                        let added_line = match contact_node.as_ref().and_then(|n| {
+                                            crate::geo::distance_label(
+                                                roster_anchor,
+                                                n.lat,
+                                                n.lon,
+                                                roster_imperial,
+                                            )
+                                        }) {
+                                            Some(dist) => format!("Added {added} · {dist} from HQ"),
+                                            None => format!("Added {added}"),
+                                        };
                                         let fav_on = messages_rail::contact_is_favorited(&pubkey);
                                         rsx! {
                                             div { class: "flex flex-wrap items-center justify-between gap-3 px-3 py-2.5{zebra}",
@@ -3108,7 +3162,7 @@ fn RosterPage() -> Element {
                                                             "{short}"
                                                         }
                                                         p { class: "text-xs text-muted-foreground",
-                                                            "Added {added}"
+                                                            "{added_line}"
                                                         }
                                                     }
                                                 }
@@ -3234,13 +3288,14 @@ fn RosterPage() -> Element {
                             th { class: "px-3 py-2 font-medium", "Type" }
                             th { class: "px-3 py-2 font-medium", "Last heard" }
                             th { class: "px-3 py-2 font-medium", "GPS" }
+                            th { class: "px-3 py-2 font-medium", title: "Great-circle distance from HQ (site pin or HQ GPS). Self-reported node GPS.", "Distance" }
                             th { class: "px-3 py-2 text-right font-medium", "Actions" }
                         }
                     }
                     tbody {
                         if ranked.is_empty() {
                             tr {
-                                td { colspan: "6", class: "px-3 py-6 text-muted-foreground",
+                                td { colspan: "7", class: "px-3 py-6 text-muted-foreground",
                                     span { class: "inline-flex items-center gap-2",
                                         Icon { name: IconName::Radio, size: 16 }
                                         if needle.trim().is_empty() {
@@ -3254,6 +3309,11 @@ fn RosterPage() -> Element {
                         }
                         for (row_i, (_score, node, title)) in ranked.into_iter().enumerate() {
                             {
+                                let dist_text = if node.enrollment == Enrollment::Hq {
+                                    "This HQ".to_string()
+                                } else {
+                                    distance_text(roster_anchor, node.lat, node.lon, roster_imperial)
+                                };
                                 let is_claimed = claimed_keys.contains(&node.pubkey);
                                 let can_claim = matches!(node.contact_type, 2 | 3 | 4)
                                     && node.enrollment != Enrollment::Hq
@@ -3296,6 +3356,9 @@ fn RosterPage() -> Element {
                                         Icon { name: IconName::Locate, size: 14 }
                                         if node.has_gps { "Fix" } else { "None" }
                                     }
+                                }
+                                td { class: "px-3 py-2 whitespace-nowrap font-mono text-xs",
+                                    "{dist_text}"
                                 }
                                 td { class: "px-3 py-2",
                                     div { class: "roster-actions",
@@ -3816,7 +3879,7 @@ fn InboxPage() -> Element {
                     .unwrap_or_else(|_| crate::secrets::NET_CHANNEL_NAME.into());
                 rsx! {
                     PageHeading { icon: IconName::Inbox, title: "Inbox".to_string(),
-                        "Operator queue for join requests and held community alerts. A node DMs #signup to ask to join; approval sends the {info_name} and {net_name} secrets. Weather and Amber wait here when auto-relay is off. Ordinary chats are under Messages → Direct."
+                        "Operator queue for join requests and held community alerts. A node DMs !signup to ask to join; approval sends the {info_name} and {net_name} secrets. Weather and Amber wait here when auto-relay is off. Ordinary chats are under Messages → Direct."
                     }
                 }
             }
@@ -4706,7 +4769,9 @@ fn MessagesThreadShell(
                                                     status_note(format!(
                                                         "Deleted {name}. Clearing companion slot {slot}…"
                                                     ));
-                                                    let reply = state().radio.clear_channel(slot as u8);
+                                                    let reply = state()
+                                                        .radio
+                                                        .clear_channel(slot as u8, Some(name.clone()));
                                                     let label = name.clone();
                                                     spawn(async move {
                                                         match reply.await {
@@ -5435,6 +5500,7 @@ fn MessagesPage() -> Element {
                                                     text: message.text.clone(),
                                                     outgoing,
                                                     sender_pubkey: Some(dm_pubkey.clone()),
+                                                    sender_name: if outgoing { None } else { Some(peer_label.clone()) },
                                                 }
                                                 if !select_mode() {
                                                     div {
@@ -6423,6 +6489,7 @@ fn MessagesPage() -> Element {
                                                 text: bubble_text.clone(),
                                                 outgoing,
                                                 sender_pubkey: known_pk.clone(),
+                                                sender_name: if outgoing { None } else { Some(device_name.clone()) },
                                             }
                                             if !select_mode() {
                                             div {
@@ -6808,6 +6875,24 @@ fn MessagesPage() -> Element {
                     "Open a channel, or create / join a new one. Retention lives under Default keep."
                 }
                 div { class: "flex flex-wrap items-center gap-2",
+                    if linked {
+                        Button {
+                            kind: ButtonKind::Ghost,
+                            onclick: move |_| {
+                                status_note("Syncing channels from companion radio…");
+                                let reply = state().radio.sync_channels();
+                                spawn(async move {
+                                    match reply.await {
+                                        Ok(Ok(())) => status_note("Channels synced from companion radio."),
+                                        Ok(Err(err)) => status_note(format!("Channel sync failed: {err}")),
+                                        Err(_) => status_note("Channel sync did not finish."),
+                                    }
+                                });
+                            },
+                            Icon { name: IconName::Scan, size: 14 }
+                            "Sync from radio"
+                        }
+                    }
                     Button {
                         kind: ButtonKind::Ghost,
                         onclick: move |_| {
@@ -7292,7 +7377,7 @@ fn MessagesPage() -> Element {
                                                                     ));
                                                                     let reply = state()
                                                                         .radio
-                                                                        .clear_channel(slot as u8);
+                                                                        .clear_channel(slot as u8, Some(name.clone()));
                                                                     let label = name.clone();
                                                                     spawn(async move {
                                                                         match reply.await {
@@ -8305,6 +8390,9 @@ fn MessageBody(
     /// Sender / peer pubkey used to skip the temp pin when their device pin already covers the spot.
     #[props(default)]
     sender_pubkey: Option<String>,
+    /// Sender display name — used as default label when adding a bare public key from chat.
+    #[props(default)]
+    sender_name: Option<String>,
 ) -> Element {
     let parts = parse_message_parts(&text);
     let mention_style = if outgoing {
@@ -8462,6 +8550,60 @@ fn MessageBody(
                                 }
                             }
                         }
+                        TextPart::Pubkey(pubkey) => {
+                            let pk_add = pubkey.clone();
+                            let pk_copy = pubkey.clone();
+                            let add_label = sender_name.clone();
+                            let short = format!(
+                                "key · {}…{}",
+                                &pubkey[..12],
+                                &pubkey[pubkey.len().saturating_sub(6)..]
+                            );
+                            rsx! {
+                                div {
+                                    key: "{idx}",
+                                    class: "{mesh_box}",
+                                    title: "{pubkey}",
+                                    code { class: "mesh-link-chip-uri", "{short}" }
+                                    div { class: "mesh-link-chip-actions",
+                                        button {
+                                            class: "{mesh_btn}",
+                                            title: "Add this public key to Contacts and sync to companion",
+                                            onclick: move |_| {
+                                                match messages_rail::add_contact_from_key(
+                                                    &pk_add,
+                                                    add_label.as_deref(),
+                                                ) {
+                                                    Ok(msg) => crate::toast::push(
+                                                        crate::toast::ToastKind::Success,
+                                                        msg,
+                                                    ),
+                                                    Err(err) => crate::toast::push(
+                                                        crate::toast::ToastKind::Error,
+                                                        err,
+                                                    ),
+                                                }
+                                            },
+                                            Icon { name: IconName::Users, size: 14 }
+                                            "Add to Contacts"
+                                        }
+                                        button {
+                                            class: "{mesh_btn}",
+                                            title: "Copy public key",
+                                            onclick: move |_| {
+                                                copy_text_to_clipboard(&pk_copy);
+                                                crate::toast::push(
+                                                    crate::toast::ToastKind::Success,
+                                                    "Copied public key",
+                                                );
+                                            },
+                                            Icon { name: IconName::Copy, size: 14 }
+                                            "Copy"
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -8508,6 +8650,8 @@ enum TextPart {
     Link(String),
     /// meshcore:// — copy chip (no shell / unconfigured URL open).
     MeshLink(String),
+    /// Bare 64-character hex public key (e.g. shared from T-Deck without meshcore://).
+    Pubkey(String),
 }
 
 fn parse_message_parts(input: &str) -> Vec<TextPart> {
@@ -8520,7 +8664,16 @@ fn parse_message_parts(input: &str) -> Vec<TextPart> {
                         TextPart::Text(plain) => {
                             for contactified in contactify_text(&plain) {
                                 match contactified {
-                                    TextPart::Text(p) => parts.extend(positionify_text(&p)),
+                                    TextPart::Text(p) => {
+                                        for pk_part in pubkeyify_text(&p) {
+                                            match pk_part {
+                                                TextPart::Text(q) => {
+                                                    parts.extend(positionify_text(&q));
+                                                }
+                                                other => parts.push(other),
+                                            }
+                                        }
+                                    }
                                     other => parts.push(other),
                                 }
                             }
@@ -8534,6 +8687,39 @@ fn parse_message_parts(input: &str) -> Vec<TextPart> {
     }
     if parts.is_empty() {
         parts.push(TextPart::Text(String::new()));
+    }
+    parts
+}
+
+/// Turn standalone 64-character ASCII hex public keys (e.g. T-Deck shares with
+/// no `meshcore://` prefix) into actionable `TextPart::Pubkey` chips.
+fn pubkeyify_text(input: &str) -> Vec<TextPart> {
+    let bytes = input.as_bytes();
+    let mut parts = Vec::new();
+    let mut cursor = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_hexdigit() {
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
+                i += 1;
+            }
+            let len = i - start;
+            let left_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+            let right_ok = i == bytes.len() || !bytes[i].is_ascii_alphanumeric();
+            if len == 64 && left_ok && right_ok {
+                if start > cursor {
+                    parts.push(TextPart::Text(input[cursor..start].to_string()));
+                }
+                parts.push(TextPart::Pubkey(input[start..i].to_ascii_lowercase()));
+                cursor = i;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    if cursor < input.len() || parts.is_empty() {
+        parts.push(TextPart::Text(input[cursor..].to_string()));
     }
     parts
 }
@@ -10781,7 +10967,7 @@ fn SettingsPage(
             }
             Card { title: "Compose".to_string(), icon: Some(IconName::Messages),
                 p { class: "mb-3 text-sm text-muted-foreground",
-                    "OS spellcheck on channel, DM, and Broadcast compose. Uses the system dictionary (offline). Right-click a flagged word for suggestions. On Linux install Hunspell + a dictionary (Debian: hunspell-en-us, Arch/CachyOS: hunspell-en_us, Fedora: hunspell-en-US). Callsigns, #weather, and hex may false-positive."
+                    "OS spellcheck on channel, DM, and Broadcast compose. Uses the system dictionary (offline). Right-click a flagged word for suggestions. On Linux install Hunspell + a dictionary (Debian: hunspell-en-us, Arch/CachyOS: hunspell-en_us, Fedora: hunspell-en-US). Callsigns, !weather, and hex may false-positive."
                 }
                 ToggleSwitch {
                     checked: compose_spellcheck_on(),
@@ -10922,7 +11108,7 @@ fn SettingsPage(
                 if services_tab() == ServicesTab::Site {
                     div { class: "services-panel",
                         p { class: "text-sm text-muted-foreground",
-                            "Site pin anchors bare #weather, NWS polling, and the USGS box when a node has no GPS."
+                            "Site pin anchors bare !weather, NWS polling, and the USGS box when a node has no GPS."
                         }
                         div { class: "grid gap-3 sm:grid-cols-2",
                             div {
@@ -10985,7 +11171,7 @@ fn SettingsPage(
                         ToggleSwitch {
                             checked: svc_weather(),
                             label: format!("Weather on {0}", channel_info_name()),
-                            hint: Some("#weather [zip] and #weather+ (multi-frame). Place lookups use Open-Meteo.".to_string()),
+                            hint: Some("!weather [zip] and !weather+ (multi-frame). Place lookups use Open-Meteo.".to_string()),
                             onchange: move |next| {
                                 svc_weather.set(next);
                                 crate::services::set_setting_bool(&state().db, "svc_weather_enabled", next);
@@ -11231,7 +11417,7 @@ fn SettingsPage(
                 if services_tab() == ServicesTab::Mqtt {
                     div { class: "services-panel",
                         p { class: "text-sm text-muted-foreground",
-                            "Optional LAN MQTT bridge (Home Assistant / WeeWX → Mosquitto). Prefer the Ecowitt tab for direct gateway support. Bare #weather uses the freshest local station reading."
+                            "Optional LAN MQTT bridge (Home Assistant / WeeWX → Mosquitto). Prefer the Ecowitt tab for direct gateway support. Bare !weather uses the freshest local station reading."
                         }
                         ToggleSwitch {
                             checked: svc_mqtt_enabled(),
@@ -11459,7 +11645,7 @@ fn SettingsPage(
                                     },
                                 }
                             }
-                            span { class: "text-xs text-muted-foreground", "seconds (shared; then bare #weather falls back to Open-Meteo)" }
+                            span { class: "text-xs text-muted-foreground", "seconds (shared; then bare !weather falls back to Open-Meteo)" }
                         }
                     }
                 }
@@ -12892,7 +13078,7 @@ fn SettingsPage(
                                                             label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Name" }
                                                             TextInput {
                                                                 value: draft.name.clone(),
-                                                                placeholder: "Hash commands".to_string(),
+                                                                placeholder: "Bot commands".to_string(),
                                                                 oninput: move |event: FormEvent| {
                                                                     webhook_wizard.with_mut(|w| {
                                                                         if let Some((_, r)) = w.as_mut() {
@@ -12911,7 +13097,7 @@ fn SettingsPage(
                                                             label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Id" }
                                                             TextInput {
                                                                 value: draft.id.clone(),
-                                                                placeholder: "hash-cmds".to_string(),
+                                                                placeholder: "bot-cmds".to_string(),
                                                                 oninput: move |event: FormEvent| {
                                                                     webhook_wizard.with_mut(|w| {
                                                                         if let Some((_, r)) = w.as_mut() {
@@ -13209,7 +13395,7 @@ fn SettingsPage(
                                                         label { class: "text-xs uppercase tracking-[0.16em] text-muted-foreground", "Text prefix" }
                                                         TextInput {
                                                             value: draft.text_prefix.clone(),
-                                                            placeholder: "#".to_string(),
+                                                            placeholder: "!".to_string(),
                                                             oninput: move |event: FormEvent| {
                                                                 webhook_wizard.with_mut(|w| {
                                                                     if let Some((_, r)) = w.as_mut() {
@@ -13767,7 +13953,7 @@ fn SettingsPage(
                         ToggleSwitch {
                             checked: svc_amber(),
                             label: "Amber alerts".to_string(),
-                            hint: Some("NWS CAP CAE for the alert state — #amber / #amber+.".to_string()),
+                            hint: Some("NWS CAP CAE for the alert state — !amber / !amber+.".to_string()),
                             onchange: move |next| {
                                 svc_amber.set(next);
                                 crate::services::set_setting_bool(&state().db, "svc_amber_enabled", next);
@@ -13786,7 +13972,7 @@ fn SettingsPage(
                         ToggleSwitch {
                             checked: svc_emerg(),
                             label: "Civil emergencies".to_string(),
-                            hint: Some("Evac, hazmat, LE, blue… — #alert / #alert+.".to_string()),
+                            hint: Some("Evac, hazmat, LE, blue… — !alert / !alert+.".to_string()),
                             onchange: move |next| {
                                 svc_emerg.set(next);
                                 crate::services::set_setting_bool(&state().db, "svc_emerg_enabled", next);
@@ -13824,7 +14010,7 @@ fn SettingsPage(
                         ToggleSwitch {
                             checked: svc_quake(),
                             label: "Poll USGS quakes in HQ box".to_string(),
-                            hint: Some("Posts only when a new quake is found. #quake on demand.".to_string()),
+                            hint: Some("Posts only when a new quake is found. !quake on demand.".to_string()),
                             onchange: move |next| {
                                 svc_quake.set(next);
                                 crate::services::set_setting_bool(&state().db, "svc_quake_enabled", next);
@@ -19041,4 +19227,27 @@ fn print_contact_sheet(name: &str, pubkey: &str, uri: &str, qr_data_url: &str) {
             status_note("Could not open the print dialog. Check the desktop print permissions.");
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_message_parts_detects_bare_64_hex_pubkey() {
+        let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let parts = parse_message_parts(&format!("My T-Deck key is {key} thanks"));
+        assert_eq!(
+            parts,
+            vec![
+                TextPart::Text("My T-Deck key is ".into()),
+                TextPart::Pubkey(key.into()),
+                TextPart::Text(" thanks".into()),
+            ]
+        );
+        // 128-hex private key must NOT be misread as a 64-hex public key.
+        let long_hex = format!("{key}{key}");
+        let parts_long = parse_message_parts(&long_hex);
+        assert_eq!(parts_long, vec![TextPart::Text(long_hex)]);
+    }
 }

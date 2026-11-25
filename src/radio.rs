@@ -301,11 +301,20 @@ pub enum RadioCmd {
     ApplyName(String),
     /// Push a channel definition onto the companion radio.
     PushChannel { slot: u8, name: String },
-    /// Soft-delete / clear a non-system channel on the radio.
+    /// Soft-delete / clear a non-system channel on the radio (and any duplicate
+    /// slots holding the same channel name).
     ClearChannel {
         slot: u8,
+        name: Option<String>,
         reply: Option<oneshot::Sender<Result<(), String>>>,
     },
+    /// Re-pull all channel slots from the companion and reconcile HQ's channel list.
+    SyncChannels {
+        reply: Option<oneshot::Sender<Result<(), String>>>,
+    },
+    /// Ensure a manually added/upgraded contact exists in the companion's contact
+    /// table so DMs to and from it can be encrypted/decrypted immediately.
+    SyncContact { pubkey: String, name: String },
     /// Send channel text. Prefixes the HQ name, waits for companion OK, then
     /// inserts the history row. `reply` tells the UI the outcome.
     /// `bot_activity` marks the history row as `origin=bot` so channel badges update.
@@ -410,6 +419,9 @@ fn no_primary_reason(cmd: &RadioCmd) -> &'static str {
         RadioCmd::ClearChannel { .. } => {
             "Connect a primary companion radio before clearing a channel slot."
         }
+        RadioCmd::SyncChannels { .. } => {
+            "Connect a primary companion radio before syncing channels."
+        }
         RadioCmd::DiscoverRegions { .. } => "Connect a primary companion radio before scanning regions.",
         RadioCmd::DiscoverNodes { .. } => {
             "Connect a primary companion radio before discovering nodes."
@@ -463,6 +475,12 @@ fn reject_cmd(cmd: RadioCmd, status: &Mutex<RadioStatus>, reason: &str) {
                 let _ = reply.send(Err(reason.into()));
             }
         }
+        RadioCmd::SyncChannels { reply } => {
+            if let Some(reply) = reply {
+                let _ = reply.send(Err(reason.into()));
+            }
+        }
+        RadioCmd::SyncContact { .. } => {}
         RadioCmd::DiscoverRegions { reply } => {
             let _ = reply.send(Err(reason.into()));
         }
@@ -1349,13 +1367,33 @@ impl RadioHandle {
             .route_to_primary(RadioCmd::PushChannel { slot, name });
     }
 
-    pub fn clear_channel(&self, slot: u8) -> oneshot::Receiver<Result<(), String>> {
+    pub fn clear_channel(
+        &self,
+        slot: u8,
+        name: Option<String>,
+    ) -> oneshot::Receiver<Result<(), String>> {
         let (tx, rx) = oneshot::channel();
         self.pool.route_to_primary(RadioCmd::ClearChannel {
             slot,
+            name,
             reply: Some(tx),
         });
         rx
+    }
+
+    pub fn sync_channels(&self) -> oneshot::Receiver<Result<(), String>> {
+        let (tx, rx) = oneshot::channel();
+        self.pool
+            .route_to_primary(RadioCmd::SyncChannels { reply: Some(tx) });
+        rx
+    }
+
+    pub fn sync_contact(&self, pubkey: String, name: String) {
+        if self.snapshot().state != "connected" {
+            return;
+        }
+        self.pool
+            .route_to_primary(RadioCmd::SyncContact { pubkey, name });
     }
 
     pub fn send_channel(&self, slot: u8, text: String) -> oneshot::Receiver<Result<(), String>> {
@@ -5021,19 +5059,76 @@ async fn run_session(
                             );
                         }
                     }
-                    Some(RadioCmd::ClearChannel { slot, reply }) => {
+                    Some(RadioCmd::ClearChannel { slot, name, reply }) => {
                         let commands = meshcore.commands().lock().await;
                         let result = clear_radio_channel_slot(&commands, slot).await;
+                        // Also wipe any duplicate companion slots holding the same
+                        // channel name so recreating the channel never leaves ghosts.
+                        if result.is_ok() {
+                            if let Some(target_name) = name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                                for idx in 0..max_channels.min(40) {
+                                    if idx == slot {
+                                        continue;
+                                    }
+                                    if let Ok(info) = commands.get_channel(idx).await {
+                                        if info.name.trim().eq_ignore_ascii_case(target_name) {
+                                            if let Err(err) = clear_radio_channel_slot(&commands, idx).await {
+                                                hq_log!(warn, "clear duplicate channel slot {idx}: {err}");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         match &result {
-                            Ok(()) => write_status(
-                                status,
-                                "connected",
-                                format!("Cleared radio channel slot {slot}."),
-                            ),
+                            Ok(()) => {
+                                bump_rx_seq(status);
+                                write_status(
+                                    status,
+                                    "connected",
+                                    format!("Cleared radio channel slot {slot}."),
+                                );
+                            }
+                            Err(err) => {
+                                write_status(status, "connected", err.clone());
+                            }
+                        }
+                        if let Some(reply) = reply {
+                            let _ = reply.send(result);
+                        }
+                    }
+                    Some(RadioCmd::SyncChannels { reply }) => {
+                        let commands = meshcore.commands().lock().await;
+                        let result =
+                            sync_channels(db, secrets, &commands, max_channels, status).await;
+                        write_sync(status, SyncPhase::Ready, "Companion ready", None);
+                        match &result {
+                            Ok(()) => {
+                                bump_rx_seq(status);
+                                write_status(
+                                    status,
+                                    "connected",
+                                    "Channels synced from companion radio.",
+                                );
+                            }
                             Err(err) => write_status(status, "connected", err.clone()),
                         }
                         if let Some(reply) = reply {
                             let _ = reply.send(result);
+                        }
+                    }
+                    Some(RadioCmd::SyncContact { pubkey, name: contact_name }) => {
+                        let commands = meshcore.commands().lock().await;
+                        if let Err(err) = ensure_radio_contact_for_dm(
+                            db,
+                            &meshcore,
+                            &commands,
+                            &pubkey,
+                            &contact_name,
+                        )
+                        .await
+                        {
+                            hq_log!(warn, "sync_contact {pubkey}: {err}");
                         }
                     }
                     Some(RadioCmd::SendChannel {
@@ -6047,9 +6142,10 @@ async fn sync_channels(
     max_channels: u8,
     status: &Mutex<RadioStatus>,
 ) -> Result<(), String> {
-    // Prefer a short discovery window on BLE; also refresh any higher slots we
-    // already track locally so custom channels beyond the window still update.
-    let discovery = max_channels.min(16);
+    // Scan the full companion channel table (up to 40 slots) so HQ accurately
+    // mirrors what is on the companion, detects duplicate names on higher slots,
+    // and deactivates channels that were deleted on the companion.
+    let discovery = max_channels.min(40);
     let mut slots: Vec<u8> = (0..discovery).collect();
     if let Ok(existing) = db.list_channels() {
         for row in existing {
@@ -6065,6 +6161,8 @@ async fn sync_channels(
     slots.dedup();
     let total = slots.len() as u32;
     let mut completed = 0u32;
+    let mut completed_full = true;
+    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     write_sync(
         status,
         SyncPhase::Channels,
@@ -6083,16 +6181,31 @@ async fn sync_channels(
                 completed = step as u32 + 1;
                 let name = info.name.trim();
                 if !name.is_empty() {
-                    match db.upsert_channel_from_radio(name, idx as i64, &info.secret, secrets) {
-                        Ok(false) => {
-                            // Operator deleted this channel in HQ — wipe the companion
-                            // slot so the next open does not resurrect it.
-                            if let Err(err) = clear_radio_channel_slot(commands, idx).await {
-                                hq_log!(warn, "clear soft-deleted channel slot {idx}: {err}");
-                            }
+                    let lower = name.to_ascii_lowercase();
+                    if seen_names.contains(&lower) {
+                        // Duplicate channel name on a higher companion slot — clear it
+                        // so neither the companion nor HQ accumulates duplicate channels.
+                        hq_log!(
+                            warn,
+                            "clearing duplicate companion channel '{name}' on slot {idx}"
+                        );
+                        if let Err(err) = clear_radio_channel_slot(commands, idx).await {
+                            hq_log!(warn, "clear duplicate channel slot {idx}: {err}");
                         }
-                        Ok(true) => {}
-                        Err(err) => hq_log!(warn, "upsert channel slot {idx}: {err}"),
+                    } else {
+                        match db.upsert_channel_from_radio(name, idx as i64, &info.secret, secrets) {
+                            Ok(false) => {
+                                // Operator deleted this channel in HQ — wipe the companion
+                                // slot so the next open does not resurrect it.
+                                if let Err(err) = clear_radio_channel_slot(commands, idx).await {
+                                    hq_log!(warn, "clear soft-deleted channel slot {idx}: {err}");
+                                }
+                            }
+                            Ok(true) => {
+                                seen_names.insert(lower);
+                            }
+                            Err(err) => hq_log!(warn, "upsert channel slot {idx}: {err}"),
+                        }
                     }
                 }
                 write_sync(
@@ -6135,25 +6248,39 @@ async fn sync_channels(
                                 completed = step as u32 + 1;
                                 let name = info.name.trim();
                                 if !name.is_empty() {
-                                    match db.upsert_channel_from_radio(
-                                        name,
-                                        idx as i64,
-                                        &info.secret,
-                                        secrets,
-                                    ) {
-                                        Ok(false) => {
-                                            if let Err(err) =
-                                                clear_radio_channel_slot(commands, idx).await
-                                            {
-                                                hq_log!(
-                                                    warn,
-                                                    "clear soft-deleted channel slot {idx}: {err}"
-                                                );
-                                            }
+                                    let lower = name.to_ascii_lowercase();
+                                    if seen_names.contains(&lower) {
+                                        if let Err(err) =
+                                            clear_radio_channel_slot(commands, idx).await
+                                        {
+                                            hq_log!(
+                                                warn,
+                                                "clear duplicate channel slot {idx}: {err}"
+                                            );
                                         }
-                                        Ok(true) => {}
-                                        Err(err) => {
-                                            hq_log!(warn, "upsert channel slot {idx}: {err}")
+                                    } else {
+                                        match db.upsert_channel_from_radio(
+                                            name,
+                                            idx as i64,
+                                            &info.secret,
+                                            secrets,
+                                        ) {
+                                            Ok(false) => {
+                                                if let Err(err) =
+                                                    clear_radio_channel_slot(commands, idx).await
+                                                {
+                                                    hq_log!(
+                                                        warn,
+                                                        "clear soft-deleted channel slot {idx}: {err}"
+                                                    );
+                                                }
+                                            }
+                                            Ok(true) => {
+                                                seen_names.insert(lower);
+                                            }
+                                            Err(err) => {
+                                                hq_log!(warn, "upsert channel slot {idx}: {err}")
+                                            }
                                         }
                                     }
                                 }
@@ -6178,10 +6305,23 @@ async fn sync_channels(
                         warn,
                         "get_channel({idx}) timed out after {completed} slot(s); keeping partial sync and verifying link on channel push"
                     );
+                    completed_full = false;
                     break;
                 }
                 return Err(format!("Channel sync stopped at slot {idx}: {msg}"));
             }
+        }
+    }
+    if completed_full {
+        match db.reconcile_channels_from_radio(&seen_names) {
+            Ok(removed) if removed > 0 => {
+                hq_log!(
+                    info,
+                    "reconciled channels from companion: deactivated {removed} stale channel(s)"
+                );
+            }
+            Ok(_) => {}
+            Err(err) => hq_log!(warn, "reconcile channels from companion: {err}"),
         }
     }
     write_sync(
@@ -6268,6 +6408,12 @@ async fn push_named_channel(
         existing
     } else if name.eq_ignore_ascii_case("Public") {
         [0u8; 16]
+    } else if name.starts_with('#') {
+        let derived = crate::mesh_regions::hash_channel_secret(name);
+        secrets
+            .store(name, &derived)
+            .map_err(|err| err.to_string())?;
+        derived
     } else {
         let generated = Secrets::generate();
         secrets
@@ -6502,7 +6648,34 @@ async fn on_direct(
     live_bot: bool,
 ) -> Result<bool, String> {
     let prefix = message.sender_prefix_hex();
-    let matches = db.nodes_by_prefix(&prefix).map_err(|err| err.to_string())?;
+    let mut matches = db.nodes_by_prefix(&prefix).map_err(|err| err.to_string())?;
+    // If the companion decrypted a DM from a contact HQ hasn't imported into
+    // `nodes` yet, pull the matching contact from the companion cache so the DM
+    // gets a real `sender_pubkey`, appears in the DM sidebar, and updates unread.
+    if matches.is_empty() {
+        let prefix_lower = prefix.to_ascii_lowercase();
+        let companion_matches: Vec<(String, String)> = meshcore
+            .contacts()
+            .await
+            .values()
+            .filter_map(|c| {
+                let hex_pk = hex::encode(c.public_key);
+                if hex_pk.starts_with(&prefix_lower) {
+                    Some((hex_pk, c.adv_name.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if companion_matches.len() == 1 {
+            let (pk, adv_name) = &companion_matches[0];
+            if let Err(err) = db.ensure_contact_node(pk, adv_name) {
+                hq_log!(warn, "ensure_contact_node for DM sender {pk}: {err}");
+            } else if let Ok(refreshed) = db.nodes_by_prefix(&prefix) {
+                matches = refreshed;
+            }
+        }
+    }
     let unique = matches.len() == 1;
     let current = matches
         .first()
@@ -6627,7 +6800,7 @@ fn handle_bot_channel(
         if !local_operator && !crate::services::is_enrolled(node.enrollment) {
             enqueue_channel_text(
                 slot,
-                crate::signup::fit_mesh("Not enrolled. DM #signup to this HQ first."),
+                crate::signup::fit_mesh("Not enrolled. DM !signup to this HQ first."),
             );
             return;
         }
@@ -6778,7 +6951,7 @@ fn handle_bot_channel(
                                 enqueue_channel_text(
                                     slot,
                                     crate::signup::fit_mesh(
-                                        "No position. Use #weather <zip> or set HQ site pin.",
+                                        "No position. Use !weather <zip> or set HQ site pin.",
                                     ),
                                 );
                                 return;
@@ -6790,7 +6963,7 @@ fn handle_bot_channel(
                         enqueue_channel_text(
                             slot,
                             crate::signup::fit_mesh(
-                                "No position. Use #weather <zip> or set HQ site pin.",
+                                "No position. Use !weather <zip> or set HQ site pin.",
                             ),
                         );
                         return;
@@ -7507,6 +7680,96 @@ async fn remember_route(db: &Db, meshcore: &MeshCore, pubkey_hex: &str, message_
     let _ = fetch_advert_path(db, meshcore, pubkey_hex, Some(message_id), "advert").await;
 }
 
+/// Ensure the companion radio's contact table contains `pubkey_hex` before
+/// sending or expecting DMs. MeshCore companions require the peer's 32-byte
+/// public key in their contact table to both send (`CMD_SEND_TXT_MSG`) and
+/// decrypt incoming DMs. If the contact is already on the companion, this is a
+/// no-op so any learned outbound route is preserved.
+async fn ensure_radio_contact_for_dm(
+    db: &Db,
+    meshcore: &MeshCore,
+    commands: &meshcore_rs::commands::CommandHandler,
+    pubkey_hex: &str,
+    fallback_name: &str,
+) -> Result<(), String> {
+    let key_hex = pubkey_hex.trim().to_ascii_lowercase();
+    let bytes = hex::decode(&key_hex).map_err(|_| "Invalid 64-character hex public key.".to_string())?;
+    if bytes.len() != 32 {
+        return Err("Public key must be 32 bytes (64 hex chars).".into());
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&bytes);
+
+    if meshcore
+        .contacts()
+        .await
+        .values()
+        .any(|c| c.public_key == key)
+    {
+        return Ok(());
+    }
+
+    let node = db.get_node(&key_hex).ok().flatten();
+    let (contact_type, path_len, out_path, adv_name, last_advert, adv_lat, adv_lon) =
+        if let Some(n) = node {
+            let name = if !n.name.trim().is_empty() {
+                n.name.trim().to_string()
+            } else if !fallback_name.trim().is_empty() {
+                fallback_name.trim().to_string()
+            } else {
+                key_hex.chars().take(12).collect()
+            };
+            let (plen, opath) = if n.path_len >= 0 && !n.hop_bytes.is_empty() {
+                (n.path_len.min(64) as i8, n.hop_bytes)
+            } else {
+                (-1i8, Vec::new())
+            };
+            let lat = n
+                .lat
+                .filter(|v| v.abs() > 0.000_01)
+                .map(|v| (v * 1_000_000.0).round() as i32)
+                .unwrap_or(0);
+            let lon = n
+                .lon
+                .filter(|v| v.abs() > 0.000_01)
+                .map(|v| (v * 1_000_000.0).round() as i32)
+                .unwrap_or(0);
+            let last_adv = n.last_advert.unwrap_or(0).clamp(0, u32::MAX as i64) as u32;
+            let ty = if matches!(n.contact_type, 1..=4) {
+                n.contact_type
+            } else {
+                1
+            };
+            (ty, plen, opath, name, last_adv, lat, lon)
+        } else {
+            let name = if !fallback_name.trim().is_empty() {
+                fallback_name.trim().to_string()
+            } else {
+                key_hex.chars().take(12).collect()
+            };
+            (1u8, -1i8, Vec::new(), name, 0u32, 0i32, 0i32)
+        };
+
+    let contact = Contact {
+        public_key: key,
+        contact_type,
+        flags: 0,
+        path_len,
+        out_path,
+        adv_name: adv_name.clone(),
+        last_advert,
+        adv_lat,
+        adv_lon,
+        last_modification_timestamp: unix_now() as u32,
+    };
+    commands
+        .add_contact(&contact)
+        .await
+        .map_err(|e| format!("Failed to add contact {adv_name} to companion: {e}"))?;
+    hq_log!(info, "synced contact {adv_name} ({}) onto companion", &key_hex[..12]);
+    Ok(())
+}
+
 /// `CMD_SEND_TXT_MSG` (2) to a contact, listening for `MsgSent` before the write.
 async fn send_direct_text(
     commands: &meshcore_rs::commands::CommandHandler,
@@ -7563,6 +7826,11 @@ async fn flush_one_broadcast_leg(
                 // Leave leg queued for the next tick (do not mark failed).
                 return Ok(());
             };
+            if let Err(err) =
+                ensure_radio_contact_for_dm(db, meshcore, &commands, &key, "").await
+            {
+                hq_log!(warn, "broadcast ensure_radio_contact_for_dm({key}): {err}");
+            }
             match send_direct_text(&commands, meshcore.dispatcher(), &key, &leg.body).await {
                 Ok(info) => {
                     let ack = hex::encode(info.expected_ack);
@@ -7662,6 +7930,11 @@ async fn flush_one_outbound(
     else {
         return Err("Radio is busy (sync in progress). Try again in a moment.".into());
     };
+    if let Err(err) =
+        ensure_radio_contact_for_dm(db, meshcore, &commands, &outbound.pubkey, "").await
+    {
+        hq_log!(warn, "dm ensure_radio_contact_for_dm({}): {err}", outbound.pubkey);
+    }
     match send_direct_text(&commands, meshcore.dispatcher(), &outbound.pubkey, &outbound.body).await
     {
         Ok(info) => {

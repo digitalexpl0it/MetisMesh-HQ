@@ -32,6 +32,11 @@ enum RailDialog {
         current: String,
     },
     AddContact,
+    /// Attach a 64-hex public key (or meshcore:// / <key:type:name>) to a name-only contact.
+    SetContactKey {
+        name_key: String,
+        label: String,
+    },
     /// Confirm block for a contact/DM row (`key`, display label).
     BlockConfirm {
         key: String,
@@ -1330,6 +1335,10 @@ pub fn MessagesRail(
                                         on_block: move |(key, label)| {
                                             dialog.set(Some(RailDialog::BlockConfirm { key, label }));
                                         },
+                                        on_set_pubkey: move |(name_key, label)| {
+                                            contact_key.set(String::new());
+                                            dialog.set(Some(RailDialog::SetContactKey { name_key, label }));
+                                        },
                                     }
                                 }
                             }
@@ -1419,6 +1428,10 @@ pub fn MessagesRail(
                                         on_changed: move |_| bump(),
                                         on_block: move |(key, label)| {
                                             dialog.set(Some(RailDialog::BlockConfirm { key, label }));
+                                        },
+                                        on_set_pubkey: move |(name_key, label)| {
+                                            contact_key.set(String::new());
+                                            dialog.set(Some(RailDialog::SetContactKey { name_key, label }));
                                         },
                                     }
                                 }
@@ -1546,6 +1559,10 @@ pub fn MessagesRail(
                                                         on_block: move |(key, label)| {
                                                             dialog.set(Some(RailDialog::BlockConfirm { key, label }));
                                                         },
+                                                        on_set_pubkey: move |(name_key, label)| {
+                                                            contact_key.set(String::new());
+                                                            dialog.set(Some(RailDialog::SetContactKey { name_key, label }));
+                                                        },
                                                     }
                                                 }
                                             }
@@ -1584,6 +1601,10 @@ pub fn MessagesRail(
                                                         on_changed: move |_| bump(),
                                                         on_block: move |(key, label)| {
                                                             dialog.set(Some(RailDialog::BlockConfirm { key, label }));
+                                                        },
+                                                        on_set_pubkey: move |(name_key, label)| {
+                                                            contact_key.set(String::new());
+                                                            dialog.set(Some(RailDialog::SetContactKey { name_key, label }));
                                                         },
                                                     }
                                                 }
@@ -1653,6 +1674,10 @@ pub fn MessagesRail(
                                         on_changed: move |_| bump(),
                                         on_block: move |(key, label)| {
                                             dialog.set(Some(RailDialog::BlockConfirm { key, label }));
+                                        },
+                                        on_set_pubkey: move |(name_key, label)| {
+                                            contact_key.set(String::new());
+                                            dialog.set(Some(RailDialog::SetContactKey { name_key, label }));
                                         },
                                     }
                                 }
@@ -1729,6 +1754,10 @@ pub fn MessagesRail(
                                         on_block: move |(key, label)| {
                                             dialog.set(Some(RailDialog::BlockConfirm { key, label }));
                                         },
+                                        on_set_pubkey: move |(name_key, label)| {
+                                            contact_key.set(String::new());
+                                            dialog.set(Some(RailDialog::SetContactKey { name_key, label }));
+                                        },
                                     }
                                 }
                             }
@@ -1760,6 +1789,9 @@ pub fn MessagesRail(
                     Some(RailDialog::NewSection { .. }) => "New section".into(),
                     Some(RailDialog::SetSectionIcon { .. }) => "Section icon".into(),
                     Some(RailDialog::AddContact) => "Add contact".into(),
+                    Some(RailDialog::SetContactKey { ref label, .. }) => {
+                        format!("Add public key — {label}")
+                    }
                     Some(RailDialog::BlockConfirm { .. }) => "Block contact".into(),
                     None => String::new(),
                 },
@@ -1911,11 +1943,11 @@ pub fn MessagesRail(
                         },
                         Some(RailDialog::AddContact) => rsx! {
                             p { class: "text-sm text-muted-foreground",
-                                "Paste a 64-character public key. Adds to Contacts → Saved (star later for Favorites)."
+                                "Paste a 64-character hex public key, a meshcore://contact/add link, or <key:type:name>. Adds to Contacts → Saved and syncs to the companion."
                             }
                             TextInput {
                                 value: contact_key(),
-                                placeholder: "Public key (hex)".to_string(),
+                                placeholder: "Public key (64-char hex, meshcore://, or <key:type:name>)".to_string(),
                                 oninput: move |e: FormEvent| contact_key.set(e.value()),
                             }
                             TextInput {
@@ -1931,8 +1963,24 @@ pub fn MessagesRail(
                                 }
                                 Button {
                                     onclick: move |_| {
-                                        match state().db.pin_contact(&contact_key(), &contact_label()) {
+                                        let Some((parsed_name, key)) =
+                                            crate::contact_qr::parse_contact_input(&contact_key())
+                                        else {
+                                            crate::toast::push(
+                                                crate::toast::ToastKind::Error,
+                                                "Enter a 64-character hex public key, meshcore:// link, or <key:type:name>.",
+                                            );
+                                            return;
+                                        };
+                                        let label_input = contact_label().trim().to_string();
+                                        let label = if !label_input.is_empty() {
+                                            label_input
+                                        } else {
+                                            parsed_name.unwrap_or_default()
+                                        };
+                                        match state().db.pin_contact(&key, &label) {
                                             Ok(()) => {
+                                                state().radio.sync_contact(key, label);
                                                 // Add → Saved only; star later for Favorites.
                                                 dialog.set(None);
                                                 bump();
@@ -1944,6 +1992,54 @@ pub fn MessagesRail(
                                         }
                                     },
                                     "Add contact"
+                                }
+                            }
+                        },
+                        Some(RailDialog::SetContactKey { name_key, label }) => {
+                            let target_name_key = name_key.clone();
+                            let target_label = label.clone();
+                            rsx! {
+                                p { class: "text-sm text-muted-foreground",
+                                    "Paste {target_label}’s 64-character hex public key, meshcore://contact/add link, or <key:type:name>. Preserves Favorites and sections, and syncs to the companion so you can DM immediately."
+                                }
+                                TextInput {
+                                    value: contact_key(),
+                                    placeholder: "Public key (64-char hex, meshcore://, or <key:type:name>)".to_string(),
+                                    oninput: move |e: FormEvent| contact_key.set(e.value()),
+                                }
+                                div { class: "flex justify-end gap-2",
+                                    Button {
+                                        kind: ButtonKind::Ghost,
+                                        onclick: move |_| dialog.set(None),
+                                        "Cancel"
+                                    }
+                                    Button {
+                                        onclick: move |_| {
+                                            match state().db.upgrade_name_contact(
+                                                &target_name_key,
+                                                &contact_key(),
+                                                None,
+                                            ) {
+                                                Ok((new_key, resolved_label)) => {
+                                                    state()
+                                                        .radio
+                                                        .sync_contact(new_key.clone(), resolved_label.clone());
+                                                    contact_key.set(String::new());
+                                                    dialog.set(None);
+                                                    bump();
+                                                    crate::toast::push(
+                                                        crate::toast::ToastKind::Success,
+                                                        format!("Saved public key for {resolved_label}."),
+                                                    );
+                                                }
+                                                Err(err) => crate::toast::push(
+                                                    crate::toast::ToastKind::Error,
+                                                    err.to_string(),
+                                                ),
+                                            }
+                                        },
+                                        "Save public key"
+                                    }
                                 }
                             }
                         },
@@ -2010,6 +2106,11 @@ pub fn MessagesRail(
                 details_tick.with_mut(|n| *n = n.wrapping_add(1));
                 bump();
             },
+            on_upgraded: move |new_pk: String| {
+                details.set(Some(RailDetails::Contact(new_pk)));
+                details_tick.with_mut(|n| *n = n.wrapping_add(1));
+                bump();
+            },
         }
     }
 }
@@ -2048,7 +2149,9 @@ fn RailDetailsSlide(
     refreshing: Signal<HashSet<String>>,
     on_close: EventHandler<()>,
     on_refreshed: EventHandler<()>,
+    on_upgraded: EventHandler<String>,
 ) -> Element {
+    let mut inline_pubkey = use_signal(String::new);
     let _ = tick;
     let open = target.is_some();
     let (title, subtitle, icon) = match target.as_ref() {
@@ -2174,13 +2277,57 @@ fn RailDetailsSlide(
                     }
                 }
             } else if name_only {
-                div { class: "flex flex-col gap-3 text-sm",
-                    p { class: "text-muted-foreground",
-                        "This pin is name-only (from channel chat). HQ has no public key yet, so status, path, and telemetry cannot be requested. It upgrades automatically when the companion hears their advert, or when you Add their key."
-                    }
-                    RailDetailField { label: "Bookmark".to_string(),
-                        span { class: "break-all font-mono text-xs",
-                            { contact_key.clone().unwrap_or_default() }
+                {
+                    let upgrade_key = contact_key.clone().unwrap_or_default();
+                    rsx! {
+                        div { class: "flex flex-col gap-3 text-sm",
+                            p { class: "text-muted-foreground",
+                                "This pin is name-only (from channel chat). HQ has no public key yet, so DMs, status, path, and telemetry cannot be requested. Paste their public key below, or wait for their radio advert."
+                            }
+                            RailDetailField { label: "Bookmark".to_string(),
+                                span { class: "break-all font-mono text-xs",
+                                    "{upgrade_key}"
+                                }
+                            }
+                            div { class: "flex flex-col gap-2 pt-1",
+                                span { class: "text-xs font-medium text-muted-foreground",
+                                    "Add public key"
+                                }
+                                TextInput {
+                                    value: inline_pubkey(),
+                                    placeholder: "64-char hex, meshcore://contact/add, or <key:type:name>".to_string(),
+                                    oninput: move |e: FormEvent| inline_pubkey.set(e.value()),
+                                }
+                                div { class: "flex justify-end",
+                                    Button {
+                                        onclick: move |_| {
+                                            match state().db.upgrade_name_contact(
+                                                &upgrade_key,
+                                                &inline_pubkey(),
+                                                None,
+                                            ) {
+                                                Ok((new_pk, resolved_label)) => {
+                                                    state().radio.sync_contact(
+                                                        new_pk.clone(),
+                                                        resolved_label.clone(),
+                                                    );
+                                                    inline_pubkey.set(String::new());
+                                                    on_upgraded.call(new_pk);
+                                                    crate::toast::push(
+                                                        crate::toast::ToastKind::Success,
+                                                        format!("Saved public key for {resolved_label}."),
+                                                    );
+                                                }
+                                                Err(err) => crate::toast::push(
+                                                    crate::toast::ToastKind::Error,
+                                                    err.to_string(),
+                                                ),
+                                            }
+                                        },
+                                        "Save public key"
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -2527,6 +2674,8 @@ fn RailItemMenuPanel(
     #[props(default = false)] is_contact_pin: bool,
     /// Save to Contacts → Saved without starring (Discovered rows).
     #[props(default = false)] show_save_contact: bool,
+    /// Name-only contact pin (`name:<label>`) — offer "Add public key…".
+    #[props(default = false)] show_set_pubkey: bool,
     /// Contact/DM with a real pubkey — offer companion advert-path fetch.
     #[props(default = false)] show_fetch_path: bool,
     /// Lightweight advert-path cache read (no mesh Status).
@@ -2545,6 +2694,7 @@ fn RailItemMenuPanel(
     on_details: EventHandler<()>,
     on_block: EventHandler<(String, String)>,
     on_refresh_contact: EventHandler<String>,
+    #[props(default)] on_set_pubkey: EventHandler<(String, String)>,
     #[props(default)] on_advert_path: EventHandler<String>,
     #[props(default)] on_ping: EventHandler<String>,
 ) -> Element {
@@ -2552,6 +2702,8 @@ fn RailItemMenuPanel(
     let fav_kind = item_kind.clone();
     let fav_key = item_key.clone();
     let save_key = item_key.clone();
+    let set_pk_key = item_key.clone();
+    let set_pk_label = item_label.clone();
     let move_kind = item_kind.clone();
     let move_key = item_key.clone();
     let add_kind = item_kind.clone();
@@ -2629,11 +2781,28 @@ fn RailItemMenuPanel(
                     title: "Save to Contacts → Saved (not Favorites)",
                     onclick: move |_| {
                         let _ = state().db.pin_contact(&save_key, "");
+                        if is_hex_pubkey(&save_key) {
+                            state().radio.sync_contact(save_key.clone(), String::new());
+                        }
                         on_changed.call(());
                         on_close.call(());
                     },
                     Icon { name: IconName::Users, size: 12 }
                     "Add to Contacts"
+                }
+            }
+            if show_set_pubkey {
+                button {
+                    r#type: "button",
+                    class: "rail-item-menu-item",
+                    role: "menuitem",
+                    title: "Attach a 64-character hex public key or meshcore:// link to this contact",
+                    onclick: move |_| {
+                        on_close.call(());
+                        on_set_pubkey.call((set_pk_key.clone(), set_pk_label.clone()));
+                    },
+                    Icon { name: IconName::Key, size: 12 }
+                    "Add public key…"
                 }
             }
             button {
@@ -3159,6 +3328,9 @@ fn DmRailItem(
                 onclick: move |event: MouseEvent| {
                     event.prevent_default();
                     event.stop_propagation();
+                    if !favorite {
+                        let _ = state().db.pin_contact(&fav_key, "");
+                    }
                     let _ = state().db.set_messages_favorite("dm", &fav_key, !favorite);
                     on_changed.call(());
                 },
@@ -3245,6 +3417,7 @@ fn ContactNodeItem(
     on_changed: EventHandler<()>,
     on_add_section: EventHandler<(String, String)>,
     on_block: EventHandler<(String, String)>,
+    #[props(default)] on_set_pubkey: EventHandler<(String, String)>,
 ) -> Element {
     let select_key = pubkey.clone();
     let pin_key = pubkey.clone();
@@ -3352,6 +3525,7 @@ fn ContactNodeItem(
                         sections: sections.clone(),
                         is_contact_pin: true,
                         show_save_contact: !pinned,
+                        show_set_pubkey: !has_pubkey,
                         can_delete: pinned,
                         delete_label: "Remove from Contacts".to_string(),
                         show_fetch_path: has_pubkey,
@@ -3373,6 +3547,7 @@ fn ContactNodeItem(
                             details.set(Some(RailDetails::Contact(details_key.clone())));
                         },
                         on_block: move |pair| on_block.call(pair),
+                        on_set_pubkey: move |pair| on_set_pubkey.call(pair),
                         on_refresh_contact: move |key| {
                             rail_begin_contact_refresh(key, refreshing, on_changed);
                         },
@@ -3543,8 +3718,52 @@ pub fn pin_contact_from_message(pubkey: &str, label: &str) -> Result<bool, Strin
         .pin_contact(&key, &nice)
         .map_err(|e| e.to_string())?;
     let name_only = !is_hex_pubkey(&key);
+    if !name_only {
+        state().radio.sync_contact(key, nice);
+    }
     let _ = unix_now();
     Ok(name_only)
+}
+
+/// Add a bare 64-char hex public key from a message (e.g. T-Deck share without
+/// `meshcore://`). If a `name:<sender_name>` bookmark already exists for that
+/// sender, upgrades it in place; otherwise pins the contact in Contacts → Saved.
+/// Always syncs the contact to the companion radio if connected.
+pub fn add_contact_from_key(pubkey: &str, sender_name: Option<&str>) -> Result<String, String> {
+    let clean_key = pubkey.trim().to_ascii_lowercase();
+    if !is_hex_pubkey(&clean_key) {
+        return Err("Invalid 64-character hex public key.".into());
+    }
+    let clean_name = sender_name
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let st = state();
+    if let Some(name) = clean_name {
+        let name_key = format!("name:{}", name.to_ascii_lowercase());
+        let has_name_pin = st
+            .db
+            .list_pinned_contacts()
+            .ok()
+            .into_iter()
+            .flatten()
+            .any(|p| p.pubkey.eq_ignore_ascii_case(&name_key));
+        if has_name_pin {
+            let (new_key, resolved_label) = st
+                .db
+                .upgrade_name_contact(&name_key, &clean_key, Some(name))
+                .map_err(|e| e.to_string())?;
+            st.radio.sync_contact(new_key, resolved_label.clone());
+            return Ok(format!("Attached public key to {resolved_label}"));
+        }
+    }
+    let label = clean_name
+        .map(str::to_string)
+        .unwrap_or_else(|| clean_key.chars().take(12).collect());
+    st.db
+        .pin_contact(&clean_key, &label)
+        .map_err(|e| e.to_string())?;
+    st.radio.sync_contact(clean_key, label.clone());
+    Ok(format!("Added {label} to Contacts"))
 }
 
 /// Join a channel from a received `meshcore://channel/add` link.

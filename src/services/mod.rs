@@ -114,14 +114,16 @@ pub enum BotCommand {
 }
 
 /// Channel commands on METIS-INFO.
-/// Leading `#` preferred; bare keywords still parse for stubborn clients.
+/// Leading `!` is the default command prefix; `#` (hash channels) and `@`
+/// (mentions) are never treated as bot commands. Bare keywords still parse for
+/// stubborn clients.
 /// Trailing `+` or a first arg of `more`/`ext`/`detail`/`full` requests extended frames.
 pub fn parse_bot_command(text: &str) -> Option<BotCommand> {
     let trimmed = text.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('@') {
         return None;
     }
-    let bare = trimmed.strip_prefix('#').unwrap_or(trimmed).trim();
+    let bare = trimmed.strip_prefix('!').unwrap_or(trimmed).trim();
     let mut parts = bare.split_whitespace();
     let raw_head = parts.next()?.to_ascii_lowercase();
     let (head, plus) = if let Some(h) = raw_head.strip_suffix('+') {
@@ -159,7 +161,7 @@ pub fn parse_bot_command(text: &str) -> Option<BotCommand> {
 
 pub fn help_line() -> String {
     fit_mesh(
-        "cmds: #weather[+] [zip] #quake #amber[+] #alert[+] #help · + = more detail",
+        "cmds: !weather[+] [zip] !quake !amber[+] !alert[+] !help · + = more detail",
     )
 }
 
@@ -347,28 +349,28 @@ mod tests {
     #[test]
     fn parses_bot_commands() {
         assert_eq!(
-            parse_bot_command("#wx"),
+            parse_bot_command("!wx"),
             Some(BotCommand::Wx {
                 place: None,
                 detail: false
             })
         );
         assert_eq!(
-            parse_bot_command("#weather 92345"),
+            parse_bot_command("!weather 92345"),
             Some(BotCommand::Wx {
                 place: Some("92345".into()),
                 detail: false
             })
         );
         assert_eq!(
-            parse_bot_command("#weather+ 92345"),
+            parse_bot_command("!weather+ 92345"),
             Some(BotCommand::Wx {
                 place: Some("92345".into()),
                 detail: true
             })
         );
         assert_eq!(
-            parse_bot_command("#wx more Hesperia"),
+            parse_bot_command("!wx more Hesperia"),
             Some(BotCommand::Wx {
                 place: Some("Hesperia".into()),
                 detail: true
@@ -381,20 +383,27 @@ mod tests {
                 detail: false
             })
         );
-        assert_eq!(parse_bot_command("#quake"), Some(BotCommand::Quake));
+        assert_eq!(parse_bot_command("!quake"), Some(BotCommand::Quake));
         assert_eq!(
-            parse_bot_command("#amber"),
+            parse_bot_command("!amber"),
             Some(BotCommand::Amber { detail: false })
         );
         assert_eq!(
-            parse_bot_command("#amber+"),
+            parse_bot_command("!amber+"),
             Some(BotCommand::Amber { detail: true })
         );
         assert_eq!(
-            parse_bot_command("#alert more"),
+            parse_bot_command("!alert more"),
             Some(BotCommand::Alert { detail: true })
         );
         assert_eq!(parse_bot_command("help"), Some(BotCommand::Help));
+        assert_eq!(parse_bot_command("!help"), Some(BotCommand::Help));
+        // `#` (hash channels) and `@` (mentions) must never trigger bot commands.
+        assert_eq!(parse_bot_command("#wx"), None);
+        assert_eq!(parse_bot_command("#weather 92345"), None);
+        assert_eq!(parse_bot_command("@weather"), None);
+        assert_eq!(parse_bot_command("#quake"), None);
+        assert_eq!(parse_bot_command("@help"), None);
         assert_eq!(parse_bot_command("signup"), None);
         assert_eq!(parse_bot_command("hello"), None);
     }

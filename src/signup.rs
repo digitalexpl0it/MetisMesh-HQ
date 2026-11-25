@@ -48,11 +48,12 @@ pub enum InboundCommand {
     Other,
 }
 
-/// Enrollment desk DMs use the same `#` command marker as channel bots.
+/// Enrollment desk DMs use the `!` command prefix (never `#` or `@`, so
+/// `#channel` names and `@mentions` never collide with bot commands).
 /// Bare `signup` / `status` are ordinary chat and do not trigger a reply.
 pub fn parse_command(text: &str) -> InboundCommand {
     let trimmed = text.trim();
-    let Some(bare) = trimmed.strip_prefix('#') else {
+    let Some(bare) = trimmed.strip_prefix('!') else {
         return InboundCommand::Other;
     };
     let bare = bare.trim();
@@ -115,7 +116,7 @@ pub fn decide(command: &InboundCommand, current: Enrollment, unique_contact: boo
             reply: Some(status_line(current).into()),
             requested_name: None,
         },
-        // Casual DMs stay silent — enrollment desk is #signup / #status only.
+        // Casual DMs stay silent — enrollment desk is !signup / !status only.
         InboundCommand::Other => ReplyDecision {
             enrollment: current,
             reply: None,
@@ -226,17 +227,22 @@ mod tests {
     #[test]
     fn parses_signup_forms() {
         assert_eq!(
-            parse_command("  #SIGNUP  "),
+            parse_command("  !SIGNUP  "),
             InboundCommand::Signup { name: None }
         );
         assert_eq!(
-            parse_command("#signup Ada Lovelace"),
+            parse_command("!signup Ada Lovelace"),
             InboundCommand::Signup {
                 name: Some("Ada Lovelace".into())
             }
         );
-        assert_eq!(parse_command("#status"), InboundCommand::Status);
+        assert_eq!(parse_command("!status"), InboundCommand::Status);
         assert_eq!(parse_command("hello"), InboundCommand::Other);
+        // `#` (hash channels) and `@` (mentions) are never bot command prefixes.
+        assert_eq!(parse_command("#signup"), InboundCommand::Other);
+        assert_eq!(parse_command("@signup"), InboundCommand::Other);
+        assert_eq!(parse_command("#status"), InboundCommand::Other);
+        assert_eq!(parse_command("@status"), InboundCommand::Other);
         // Bare words are chat, not commands.
         assert_eq!(parse_command("signup"), InboundCommand::Other);
         assert_eq!(parse_command("status"), InboundCommand::Other);

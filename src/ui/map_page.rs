@@ -506,13 +506,7 @@ fn trail_color_for_pubkey(pubkey: &str) -> &'static str {
 }
 
 fn haversine_m(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
-    const R: f64 = 6_371_000.0;
-    let (phi1, phi2) = (lat1.to_radians(), lat2.to_radians());
-    let d_phi = (lat2 - lat1).to_radians();
-    let d_lambda = (lon2 - lon1).to_radians();
-    let a =
-        (d_phi / 2.0).sin().powi(2) + phi1.cos() * phi2.cos() * (d_lambda / 2.0).sin().powi(2);
-    2.0 * R * a.sqrt().asin()
+    crate::geo::haversine_m(lat1, lon1, lat2, lon2)
 }
 
 fn bearing_deg(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {

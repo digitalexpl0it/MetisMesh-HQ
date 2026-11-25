@@ -130,15 +130,15 @@ pub fn ensure_explicit_kinds(rule: &mut WebhookRule) {
 impl WebhookRule {
     pub fn default_hash_commands() -> Self {
         Self {
-            id: "hash-cmds".into(),
-            name: "Hash commands (#…)".into(),
+            id: "bot-cmds".into(),
+            name: "Bot commands (!…)".into(),
             // Off until the operator sets a per-connection POST URL.
             enabled: false,
             kinds: vec!["channel".into(), "direct".into()],
             channels: vec!["*".into()],
             enrollment: vec!["enrolled".into()],
             allowed_senders: Vec::new(),
-            text_prefix: "#".into(),
+            text_prefix: "!".into(),
             payload_mode: default_payload_mode(),
             payload_template: String::new(),
             url: String::new(),
@@ -156,7 +156,7 @@ impl WebhookRule {
             channels: vec!["*".into()],
             enrollment: vec!["enrolled".into()],
             allowed_senders: Vec::new(),
-            text_prefix: "#".into(),
+            text_prefix: "!".into(),
             payload_mode: default_payload_mode(),
             payload_template: String::new(),
             url: String::new(),
@@ -395,14 +395,13 @@ pub fn generate_webhook_secret() -> String {
 }
 
 pub fn default_rules_json() -> String {
-    serde_json::to_string_pretty(&[WebhookRule::default_hash_commands()])
-        .unwrap_or_else(|_| "[]".into())
+    "[]".into()
 }
 
 pub fn parse_rules_json(raw: &str) -> Result<Vec<WebhookRule>, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Ok(vec![WebhookRule::default_hash_commands()]);
+        return Ok(Vec::new());
     }
     let rules: Vec<WebhookRule> =
         serde_json::from_str(trimmed).map_err(|e| format!("Invalid rules JSON: {e}"))?;
@@ -1129,7 +1128,7 @@ fn job_to_delivery_job(rule: &WebhookRule, event: MeshEvent, is_test: bool) -> D
 pub fn test_event_text(rule: &WebhookRule) -> String {
     let prefix = rule.text_prefix.trim();
     if prefix.is_empty() {
-        "#test".into()
+        "!test".into()
     } else if prefix.ends_with(char::is_whitespace) {
         format!("{prefix}test")
     } else {
@@ -1459,7 +1458,7 @@ mod tests {
             "channel",
             Some("METIS-INFO"),
             Enrollment::Enrolled,
-            "#gate open",
+            "!gate open",
             None,
             "",
         );
@@ -1469,7 +1468,7 @@ mod tests {
             "channel",
             Some("METIS-INFO"),
             Enrollment::Heard,
-            "#gate open",
+            "!gate open",
             None,
             "",
         )
@@ -1606,7 +1605,7 @@ mod tests {
                 "channel",
                 Some("METIS-INFO"),
                 Enrollment::Heard,
-                "#x",
+                "!x",
                 Some("aabbcc001122"),
                 "aabbcc",
             )
@@ -1618,7 +1617,7 @@ mod tests {
             "channel",
             Some("METIS-INFO"),
             Enrollment::Heard,
-            "#x",
+            "!x",
             Some("deadbeef"),
             "deadbe",
         )
@@ -1628,7 +1627,7 @@ mod tests {
             "channel",
             Some("METIS-INFO"),
             Enrollment::Heard,
-            "#x",
+            "!x",
             None,
             "",
         )
@@ -1637,13 +1636,13 @@ mod tests {
 
     #[test]
     fn command_payload_strips_prefix() {
-        assert_eq!(command_after_prefix("#", "#gate open"), "gate open");
-        assert_eq!(command_after_prefix("#", "  #x"), "x");
+        assert_eq!(command_after_prefix("!", "!gate open"), "gate open");
+        assert_eq!(command_after_prefix("!", "  !x"), "x");
         let job = DeliveryJob {
             rule_id: "hash-cmds".into(),
             rule_name: "Hash".into(),
             url: "http://127.0.0.1:9/hook".into(),
-            text_prefix: "#".into(),
+            text_prefix: "!".into(),
             payload_mode: "command".into(),
             payload_template: String::new(),
             headers: Vec::new(),
@@ -1660,8 +1659,8 @@ mod tests {
                 from_name: Some("Ada".into()),
                 from_prefix: "aabbcc".into(),
                 enrollment: Enrollment::Enrolled,
-                text: "#gate open".into(),
-                body: "#gate open".into(),
+                text: "!gate open".into(),
+                body: "!gate open".into(),
                 hop_count: Some(1),
                 timestamp: 1,
             },
@@ -1670,7 +1669,7 @@ mod tests {
         let raw = render_payload(&job).unwrap();
         let v: Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(v["command"], "gate open");
-        assert_eq!(v["text"], "#gate open");
+        assert_eq!(v["text"], "!gate open");
         assert_eq!(v["source"], "hq");
     }
 
@@ -1680,7 +1679,7 @@ mod tests {
             rule_id: "r1".into(),
             rule_name: "R".into(),
             url: "http://127.0.0.1:9/hook".into(),
-            text_prefix: "#".into(),
+            text_prefix: "!".into(),
             payload_mode: "custom".into(),
             payload_template: r#"{"cmd":"{{command}}","who":"{{from.name}}"}"#.into(),
             headers: Vec::new(),
@@ -1694,8 +1693,8 @@ mod tests {
                 from_name: Some("Ada\"Bee".into()),
                 from_prefix: "aa".into(),
                 enrollment: Enrollment::Enrolled,
-                text: "#ping".into(),
-                body: "#ping".into(),
+                text: "!ping".into(),
+                body: "!ping".into(),
                 hop_count: None,
                 timestamp: 9,
             },
@@ -1759,8 +1758,7 @@ mod tests {
     fn parse_rules_round_trip() {
         let raw = default_rules_json();
         let rules = parse_rules_json(&raw).unwrap();
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].id, "hash-cmds");
+        assert!(rules.is_empty());
     }
 
     #[test]
@@ -1776,6 +1774,6 @@ mod tests {
         rule.text_prefix = "#snore".into();
         assert_eq!(test_event_text(&rule), "#snore test");
         rule.text_prefix.clear();
-        assert_eq!(test_event_text(&rule), "#test");
+        assert_eq!(test_event_text(&rule), "!test");
     }
 }

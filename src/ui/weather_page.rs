@@ -175,7 +175,7 @@ pub fn WeatherPage() -> Element {
     rsx! {
         div { class: "hq-page-fill gap-4 p-1",
             PageHeading { icon: IconName::Weather, title: "Weather".to_string(),
-                "Local station dashboard. Mesh #weather prefers a fresh reading; ZIP lookups stay on Open-Meteo."
+                "Local station dashboard. Mesh !weather prefers a fresh reading; ZIP lookups stay on Open-Meteo."
             }
 
             if !enabled {
@@ -193,7 +193,7 @@ pub fn WeatherPage() -> Element {
             } else {
                 if !fresh {
                     div { class: "rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100",
-                        "Reading is stale (>{stale_secs}s). Bare #weather falls back to Open-Meteo until a fresh observation arrives."
+                        "Reading is stale (>{stale_secs}s). Bare !weather falls back to Open-Meteo until a fresh observation arrives."
                     }
                 }
                 div { class: "flex flex-wrap items-center gap-2",
